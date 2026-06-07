@@ -10,5 +10,11 @@ excludes = [".venv/**", ".venv-workers/**"]
 binding = "R2"
 bucket_name = "gtfs-lviv"
 
+[triggers]
+crons = ["*/5 * * * *"]
+
 [vars]
 FEED_KEY = "feed/trip_updates.pb"
+GITHUB_REPO = "vbhjckfd/gtfs-eta"
+GITHUB_WORKFLOW = "push-feed.yml"
+GITHUB_REF = "main"

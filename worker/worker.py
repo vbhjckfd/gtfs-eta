@@ -1,14 +1,14 @@
 """
 Cloudflare Python Worker — GTFS-RT TripUpdates passthrough.
 
-Serves the pre-computed TripUpdates protobuf written to R2 by the external
-push daemon (scripts/push_feed.py).  No inference happens here — the Worker
-just does one R2 read per request, which costs ~0 ms of CPU and comfortably
-fits within Cloudflare's free-plan 10 ms CPU budget.
+on_fetch: serves the pre-computed TripUpdates protobuf from R2.
+on_scheduled: fires every 5 minutes (wrangler.toml [triggers]) and dispatches
+  the GitHub Actions push-feed workflow via the GitHub API.  The workflow runs
+  for ~4 minutes pushing a fresh feed to R2 every 30 s — Cloudflare's cron is
+  far more reliable than GitHub's own scheduled triggers on low-activity repos.
 
-The push daemon keeps the blob fresh (default: every 30 s).  The
-cache-control header lets Cloudflare's edge cache serve most requests from
-memory, so R2 is only hit once per cache TTL per edge location.
+Required secret (set via `wrangler secret put GITHUB_TOKEN`):
+  GITHUB_TOKEN — a GitHub PAT with the `workflow` scope.
 """
 
 import js
@@ -30,3 +30,30 @@ async def on_fetch(request, env, ctx=None):
         "content-type":  "application/x-protobuf",
         "cache-control": "public, max-age=30",
     })
+
+
+async def on_scheduled(event, env, ctx):
+    import json
+    from pyodide.ffi import to_js
+
+    repo     = getattr(env, "GITHUB_REPO",    "vbhjckfd/gtfs-eta")
+    workflow = getattr(env, "GITHUB_WORKFLOW", "push-feed.yml")
+    ref      = getattr(env, "GITHUB_REF",     "main")
+    token    = getattr(env, "GITHUB_TOKEN",   "")
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/dispatches"
+    resp = await js.fetch(url, to_js({
+        "method": "POST",
+        "headers": {
+            "authorization":       f"Bearer {token}",
+            "accept":              "application/vnd.github+json",
+            "content-type":        "application/json",
+            "user-agent":          "gtfs-eta-worker",
+            "x-github-api-version": "2022-11-28",
+        },
+        "body": json.dumps({"ref": ref}),
+    }, dict_converter=js.Object.fromEntries))
+
+    if resp.status not in (204, 200):
+        text = await resp.text()
+        print(f"[scheduled] GitHub dispatch failed: HTTP {resp.status} — {text}")
