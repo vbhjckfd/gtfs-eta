@@ -226,14 +226,20 @@ def encode_trip_updates(updates: list[dict], feed_ts: int) -> bytes:
         tu.vehicle.id = u["vehicle_id"]
         t0 = u["snap_ts"]
         cumulative = 0.0
+        stop_count = 0
         for pred in u["predictions"]:
+            cumulative += pred["seconds"]
+            arr_ts = int(t0.timestamp() + cumulative)
+            if arr_ts <= feed_ts:
+                continue
             stu = tu.stop_time_update.add()
             stu.stop_id = pred["stop_id"]
             stu.stop_sequence = pred["stop_sequence"]
-            cumulative += pred["seconds"]
-            arr_ts = int(t0.timestamp() + cumulative)
             stu.arrival.time = arr_ts
             stu.departure.time = arr_ts
+            stop_count += 1
+        if stop_count == 0:
+            del feed.entity[-1]
     return feed.SerializeToString()
 
 
@@ -285,7 +291,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             "snap_ts":    snap_ts,
             "predictions": [
                 {"stop_id": r[1], "stop_sequence": int(r[2]),
-                 "seconds": float(max(0.0, sec))}
+                 "seconds": float(sec)}
                 for r, sec in zip(feature_rows, preds_sec)
             ],
         })
