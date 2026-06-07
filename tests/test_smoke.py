@@ -10,9 +10,14 @@ Run with `make smoke`.
 
 from __future__ import annotations
 
+import re
 import time
 
 from google.transit import gtfs_realtime_pb2
+
+# Lviv trip IDs are always three underscore-separated groups of digits,
+# e.g. "29734_3_1".  Any other format means our inference produced garbage.
+_LVIV_TRIP_ID_RE = re.compile(r"^\d+_\d+_\d+$")
 
 # Worker caps upcoming stops per trip (worker.py: MAX_STOPS_AHEAD).
 MAX_STOPS_AHEAD = 10
@@ -115,6 +120,88 @@ def test_arrival_times_are_monotonic_and_future(worker_feed):
                     f"({prev} -> {t})"
                 )
             prev = t
+
+
+# ── Real Lviv data checks ────────────────────────────────────────────────────
+
+def test_trip_id_format(worker_feed):
+    """Trip IDs must follow Lviv's DIGITS_DIGIT_DIGIT scheme (e.g. 29734_3_1)."""
+    bad = [
+        e.trip_update.trip.trip_id
+        for e in worker_feed.entity
+        if not _LVIV_TRIP_ID_RE.match(e.trip_update.trip.trip_id)
+    ]
+    assert not bad, f"malformed trip_ids: {bad[:5]}"
+
+
+def test_stop_codes_are_numeric(worker_feed):
+    """Stop codes printed on Lviv street signs are always numeric strings."""
+    bad = {
+        stu.stop_id
+        for e in worker_feed.entity
+        for stu in e.trip_update.stop_time_update
+        if not stu.stop_id.isdigit()
+    }
+    assert not bad, f"non-numeric stop codes: {sorted(bad)[:10]}"
+
+
+def test_predicted_routes_are_currently_active(worker_feed, vehicle_positions_feed):
+    """≥95% of our route_ids must have at least one vehicle currently on road.
+
+    The 5% slack covers timing: our feed is pre-computed (up to 5 min old) while
+    the VP feed is live, so a vehicle can disappear between the two fetches.
+    """
+    active_routes = {
+        str(e.vehicle.trip.route_id)
+        for e in vehicle_positions_feed.entity
+        if e.HasField("vehicle")
+    }
+    our_routes = {e.trip_update.trip.route_id for e in worker_feed.entity}
+    unknown = our_routes - active_routes
+    stale_frac = len(unknown) / max(len(our_routes), 1)
+    assert stale_frac <= 0.05, (
+        f"{stale_frac:.0%} of predicted routes have no active vehicles: "
+        f"{sorted(unknown)} — inference may be matching wrong trips"
+    )
+
+
+def test_vehicle_coverage(worker_feed, vehicle_positions_feed):
+    """We should predict ETAs for the majority of vehicles that report a trip_id."""
+    # Vehicles with a blank trip_id cannot be matched; exclude them.
+    vp_trips = {
+        str(e.vehicle.trip.trip_id)
+        for e in vehicle_positions_feed.entity
+        if e.HasField("vehicle") and e.vehicle.trip.trip_id
+    }
+    our_trips = {e.trip_update.trip.trip_id for e in worker_feed.entity}
+    if not vp_trips:
+        pytest.skip("vehicle positions feed has no vehicles with trip_ids")
+    covered = len(vp_trips & our_trips) / len(vp_trips)
+    assert covered >= 0.50, (
+        f"only {covered:.0%} of active vehicles have ETA predictions "
+        f"({len(vp_trips & our_trips)}/{len(vp_trips)})"
+    )
+
+
+def test_stop_codes_overlap_with_reference(worker_feed, reference_feed):
+    """Our stop codes should come from the same numbering system as the reference feed."""
+    our_stops = {
+        stu.stop_id
+        for e in worker_feed.entity
+        for stu in e.trip_update.stop_time_update
+    }
+    ref_stops = {
+        stu.stop_id
+        for e in reference_feed.entity
+        for stu in e.trip_update.stop_time_update
+    }
+    if not ref_stops:
+        pytest.skip("reference feed has no stop_time_updates to compare")
+    overlap = len(our_stops & ref_stops) / len(our_stops)
+    assert overlap >= 0.30, (
+        f"only {overlap:.0%} of our stop codes appear in the reference feed — "
+        f"stop ID scheme mismatch likely"
+    )
 
 
 # ── Parity with the upstream reference ──────────────────────────────────────

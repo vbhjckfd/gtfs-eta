@@ -24,6 +24,9 @@ WORKER_URL = os.environ.get(
 REF_URL = os.environ.get(
     "SMOKE_REF_URL", "https://track.ua-gis.com/gtfs/lviv/trip_updates"
 )
+VP_URL = os.environ.get(
+    "SMOKE_VP_URL", "https://track.ua-gis.com/gtfs/lviv/vehicle_position"
+)
 TIMEOUT = float(os.environ.get("SMOKE_TIMEOUT", "30"))
 
 
@@ -63,6 +66,21 @@ def worker_feed(worker_response) -> gtfs_realtime_pb2.FeedMessage:
         return _parse(worker_response.content)
     except Exception as exc:  # noqa: BLE001 - any decode failure means skip
         pytest.skip(f"endpoint body is not a parseable FeedMessage: {exc}")
+
+
+@pytest.fixture(scope="session")
+def vehicle_positions_feed() -> gtfs_realtime_pb2.FeedMessage:
+    """Parsed VehiclePositions feed from the upstream source (skips if unavailable)."""
+    try:
+        resp = _fetch(VP_URL)
+    except requests.RequestException as exc:
+        pytest.skip(f"vehicle positions feed unreachable: {exc}")
+    if resp.status_code != 200:
+        pytest.skip(f"vehicle positions feed returned HTTP {resp.status_code}")
+    try:
+        return _parse(resp.content)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"vehicle positions body not parseable: {exc}")
 
 
 @pytest.fixture(scope="session")
