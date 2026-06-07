@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import time
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -92,6 +94,7 @@ def train(
     model_path: str | Path = MODEL_PATH,
     test_fraction: float = TEST_FRACTION,
 ) -> dict:
+    t0 = time.monotonic()
     input_path = Path(input_path)
 
     if input_path.is_dir():
@@ -99,12 +102,15 @@ def train(
         print("Loading GTFS static…")
         gtfs = get_gtfs()
         print("Building feature matrix from labeled parquets…")
+        t_feat = time.monotonic()
         labeled = _load_labeled_dir(input_path)
         df = compute_features_for_training(labeled, gtfs)
-        print(f"  Feature matrix: {len(df):,} rows × {len(FEATURE_COLS)} features")
+        print(f"  Feature matrix: {len(df):,} rows × {len(FEATURE_COLS)} features  ({time.monotonic() - t_feat:.1f}s)")
     else:
         print(f"Loading pre-built features from {input_path}…")
+        t_feat = time.monotonic()
         df = _load_features(input_path)
+        print(f"  Done  ({time.monotonic() - t_feat:.1f}s)")
 
     df = df.dropna(subset=[TARGET_COL] + FEATURE_COLS).copy()
     df = df[df[TARGET_COL].between(0, 3600)].copy()
@@ -118,10 +124,13 @@ def train(
     y_test  = test_df[TARGET_COL].astype(float)
 
     print("\nFitting HistGradientBoostingRegressor…")
+    t_fit = time.monotonic()
     pipeline = _build_pipeline()
     pipeline.fit(X_train, y_train)
+    fit_sec = time.monotonic() - t_fit
 
     n_iters = pipeline.named_steps["model"].n_iter_
+    print(f"  Stopped at iteration {n_iters}  ({fit_sec:.1f}s)")
     print(f"  Stopped at iteration {n_iters}")
 
     y_pred_train = pipeline.predict(X_train)
@@ -141,12 +150,16 @@ def train(
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(pipeline, model_path)
 
+    total_sec = time.monotonic() - t0
+    total_str = f"{int(total_sec // 60)}m {int(total_sec % 60)}s" if total_sec >= 60 else f"{total_sec:.1f}s"
+
     print(f"\n{'─'*50}")
     print(f"Train MAE:    {train_mae:6.1f}s")
     print(f"Test  MAE:    {test_mae:6.1f}s")
     print(f"Baseline MAE: {baseline_mae:6.1f}s  (schedule + propagated delay)")
     print(f"Improvement:  {improvement_pct:+.1f}% vs baseline")
     print(f"Model saved → {model_path}")
+    print(f"Done in {total_str}")
     print(f"{'─'*50}")
 
     # HistGBT exposes permutation-style importances only after sklearn 1.6
