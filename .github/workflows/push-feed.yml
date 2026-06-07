@@ -1,0 +1,34 @@
+name: Push GTFS-RT feed
+
+on:
+  schedule:
+    # Every 5 minutes (GitHub's minimum). The job runs an internal 30 s loop
+    # for ~4 min, so there is always a fresh process ready well before the
+    # next trigger fires.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  push-feed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10  # safety net — normal runtime is ~4 min
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      # Load GTFS + model from R2 once, push 8 times at 30 s intervals (~4 min).
+      # Resources stay in memory across pushes; only one R2 load per job.
+      - name: Push feed every 30 s
+        run: python scripts/push_feed.py --loop 30 --count 8
+        env:
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

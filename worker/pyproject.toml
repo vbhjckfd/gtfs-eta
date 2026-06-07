@@ -1,0 +1,13 @@
+[project]
+name = "gtfs-eta-worker"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "gtfs-realtime-bindings",
+]
+
+[dependency-groups]
+dev = [
+    "workers-py",
+    "workers-runtime-sdk",
+]

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python scripts/run_pipeline.py --date 2026-05-19)",
+      "Bash(python -)",
+      "WebFetch(domain:developers.cloudflare.com)"
+    ]
+  }
+}
