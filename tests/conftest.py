@@ -30,8 +30,14 @@ VP_URL = os.environ.get(
 TIMEOUT = float(os.environ.get("SMOKE_TIMEOUT", "30"))
 
 
-def _fetch(url: str) -> requests.Response:
-    return requests.get(url, timeout=TIMEOUT)
+def _fetch(url: str, _retries: int = 3) -> requests.Response:
+    for attempt in range(_retries):
+        try:
+            return requests.get(url, timeout=TIMEOUT)
+        except requests.exceptions.ChunkedEncodingError:
+            if attempt == _retries - 1:
+                raise
+    raise RuntimeError("unreachable")
 
 
 def _parse(content: bytes) -> gtfs_realtime_pb2.FeedMessage:
