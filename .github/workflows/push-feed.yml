@@ -8,9 +8,6 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:  # manual trigger
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   guard:
     runs-on: ubuntu-latest
@@ -21,36 +18,30 @@ jobs:
     steps:
       - name: Check for concurrent runs
         id: check
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const SIX_MIN_MS = 6 * 60 * 1000;
-            const { data: { workflow_runs } } = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'push-feed.yml',
-              status: 'in_progress',
-              per_page: 20,
-            });
-
-            let proceed = true;
-            for (const run of workflow_runs) {
-              if (run.id === context.runId) continue;
-              const ageMs = Date.now() - new Date(run.run_started_at).getTime();
-              const ageSec = Math.round(ageMs / 1000);
-              if (ageMs >= SIX_MIN_MS) {
-                core.info(`Cancelling stale run ${run.id} (${ageSec}s old)`);
-                await github.rest.actions.cancelWorkflowRun({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  run_id: run.id,
-                });
-              } else {
-                core.info(`Skipping: run ${run.id} is already in progress (${ageSec}s old)`);
-                proceed = false;
-              }
-            }
-            core.setOutput('proceed', String(proceed));
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          SIX_MIN_S=360
+          proceed=true
+          runs=$(gh api "repos/$REPO/actions/workflows/push-feed.yml/runs" \
+            --jq '.workflow_runs[] | select(.status=="in_progress") | [.id, .run_started_at] | @tsv' \
+            -F per_page=20)
+          now=$(date +%s)
+          while IFS=$'\t' read -r id started_at; do
+            [ "$id" = "$RUN_ID" ] && continue
+            started_s=$(date -d "$started_at" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$started_at" +%s)
+            age_s=$(( now - started_s ))
+            if [ "$age_s" -ge "$SIX_MIN_S" ]; then
+              echo "Cancelling stale run $id (${age_s}s old)"
+              gh api -X POST "repos/$REPO/actions/runs/$id/cancel"
+            else
+              echo "Skipping: run $id already in progress (${age_s}s old)"
+              proceed=false
+            fi
+          done <<< "$runs"
+          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
 
   push-feed:
     needs: guard
@@ -65,8 +56,6 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       - name: Install dependencies
         run: pip install -e .
