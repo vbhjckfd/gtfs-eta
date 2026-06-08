@@ -84,7 +84,9 @@ def _load_resources(client) -> tuple[dict, dict]:
 def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> None:
     t0 = time.monotonic()
     try:
-        vp_bytes = requests.get(VP_URL, timeout=REQUEST_TIMEOUT).content
+        resp = requests.get(VP_URL, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        vp_bytes = resp.content
     except Exception as exc:
         print(f"[warn] VP fetch failed: {exc}", flush=True)
         return
