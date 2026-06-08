@@ -9,7 +9,49 @@ on:
   workflow_dispatch:  # manual trigger
 
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+    steps:
+      - name: Check for concurrent runs
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const SIX_MIN_MS = 6 * 60 * 1000;
+            const { data: { workflow_runs } } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'push-feed.yml',
+              status: 'in_progress',
+              per_page: 20,
+            });
+
+            let proceed = true;
+            for (const run of workflow_runs) {
+              if (run.id === context.runId) continue;
+              const ageMs = Date.now() - new Date(run.run_started_at).getTime();
+              const ageSec = Math.round(ageMs / 1000);
+              if (ageMs >= SIX_MIN_MS) {
+                core.info(`Cancelling stale run ${run.id} (${ageSec}s old)`);
+                await github.rest.actions.cancelWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id,
+                });
+              } else {
+                core.info(`Skipping: run ${run.id} is already in progress (${ageSec}s old)`);
+                proceed = false;
+              }
+            }
+            core.setOutput('proceed', String(proceed));
+
   push-feed:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10  # safety net — normal runtime is ~4 min
 
