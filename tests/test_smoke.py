@@ -204,6 +204,26 @@ def test_stop_codes_overlap_with_reference(worker_feed, reference_feed):
     )
 
 
+# ── Stop-level coverage ─────────────────────────────────────────────────────
+
+def test_stop_60_has_arrivals(worker_feed):
+    """Stop sign-code 60 (Захисників України, highest-traffic in Lviv) must have arrivals.
+
+    The feed uses internal GTFS stop_id values, not sign codes. Sign code 60
+    maps to internal stop_id 4577 (stops.txt: stop_code=60, stop_id=4577).
+    """
+    arrivals = [
+        (e.trip_update.trip.trip_id, stu)
+        for e in worker_feed.entity
+        for stu in e.trip_update.stop_time_update
+        if stu.stop_id == "4577"
+    ]
+    assert arrivals, (
+        "no arrival predictions found for stop 60 / internal id 4577 — "
+        "the busiest stop in Lviv should always have active trips"
+    )
+
+
 # ── Parity with the upstream reference ──────────────────────────────────────
 
 def test_parity_with_reference(worker_feed, reference_feed):
