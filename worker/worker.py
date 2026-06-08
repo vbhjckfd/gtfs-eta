@@ -36,20 +36,31 @@ async def _get_feed_data(env) -> bytes | None:
 
 
 async def on_fetch(request, env, ctx=None):
-    path = request.url.split("?")[0].rstrip("/")
-    if path.endswith("/health"):
-        return await _handle_health(env)
+    # Guard the whole handler: on a cold isolate an awaited R2 promise can
+    # reject in a way that surfaces via Pyodide's event-loop exception handler
+    # rather than propagating, which orphans the response promise and the
+    # runtime reports "code had hung and would never generate a response"
+    # (a 500 with no body).  Catching here turns that into a clean 500 *and*
+    # logs the real traceback so the failure is diagnosable.
+    try:
+        path = request.url.split("?")[0].rstrip("/")
+        if path.endswith("/health"):
+            return await _handle_health(env)
 
-    data = await _get_feed_data(env)
-    if data is None:
-        return Response(
-            "Feed unavailable — push daemon (scripts/push_feed.py) not running",
-            status=503,
-        )
-    return Response(data, headers={
-        "content-type":  "application/x-protobuf",
-        "cache-control": "public, max-age=30",
-    })
+        data = await _get_feed_data(env)
+        if data is None:
+            return Response(
+                "Feed unavailable — push daemon (scripts/push_feed.py) not running",
+                status=503,
+            )
+        return Response(data, headers={
+            "content-type":  "application/x-protobuf",
+            "cache-control": "public, max-age=30",
+        })
+    except Exception as exc:
+        import traceback
+        print(f"[on_fetch] unhandled error: {exc!r}\n{traceback.format_exc()}")
+        return Response(f"Internal error: {exc!r}", status=500)
 
 
 async def _handle_health(env):
