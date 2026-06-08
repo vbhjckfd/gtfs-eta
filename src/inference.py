@@ -212,10 +212,15 @@ def build_features(trip_id: str, current_seq: int, current_delay: float,
 # ---------------------------------------------------------------------------
 
 def encode_trip_updates(updates: list[dict], feed_ts: int) -> bytes:
+    # Use wall-clock time for the header and staleness filter.
+    # feed_ts is the VP feed's capture timestamp and can be 30–90 s behind
+    # real time by the time our feed is read from R2 cache, so filtering
+    # against feed_ts only removes negative predictions, not stale ones.
+    now_ts = int(time.time())
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.header.gtfs_realtime_version = "2.0"
     feed.header.incrementality = gtfs_realtime_pb2.FeedHeader.FULL_DATASET
-    feed.header.timestamp = feed_ts
+    feed.header.timestamp = now_ts
     for u in updates:
         entity = feed.entity.add()
         entity.id = u["vehicle_id"]
@@ -230,7 +235,7 @@ def encode_trip_updates(updates: list[dict], feed_ts: int) -> bytes:
         for pred in u["predictions"]:
             cumulative += pred["seconds"]
             arr_ts = int(t0.timestamp() + cumulative)
-            if arr_ts <= feed_ts:
+            if arr_ts <= now_ts:
                 continue
             stu = tu.stop_time_update.add()
             stu.stop_id = pred["stop_id"]
