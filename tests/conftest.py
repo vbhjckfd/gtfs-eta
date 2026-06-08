@@ -13,9 +13,11 @@ production, a preview deployment, or `pywrangler dev` running locally.
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 import requests
+from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
 
 WORKER_URL = os.environ.get(
@@ -30,13 +32,27 @@ VP_URL = os.environ.get(
 TIMEOUT = float(os.environ.get("SMOKE_TIMEOUT", "30"))
 
 
-def _fetch(url: str, _retries: int = 3) -> requests.Response:
+def _fetch(url: str, _retries: int = 5) -> requests.Response:
     for attempt in range(_retries):
         try:
             return requests.get(url, timeout=TIMEOUT)
-        except requests.exceptions.ChunkedEncodingError:
+        except requests.exceptions.RequestException:
             if attempt == _retries - 1:
                 raise
+            time.sleep(0.2 * (2 ** attempt))
+    raise RuntimeError("unreachable")
+
+
+def _fetch_proto(url: str, _retries: int = 5) -> gtfs_realtime_pb2.FeedMessage:
+    for attempt in range(_retries):
+        try:
+            resp = requests.get(url, timeout=TIMEOUT)
+            resp.raise_for_status()
+            return _parse(resp.content)
+        except (requests.exceptions.RequestException, DecodeError):
+            if attempt == _retries - 1:
+                raise
+            time.sleep(0.2 * (2 ** attempt))
     raise RuntimeError("unreachable")
 
 
@@ -78,15 +94,9 @@ def worker_feed(worker_response) -> gtfs_realtime_pb2.FeedMessage:
 def vehicle_positions_feed() -> gtfs_realtime_pb2.FeedMessage:
     """Parsed VehiclePositions feed from the upstream source (skips if unavailable)."""
     try:
-        resp = _fetch(VP_URL)
-    except requests.RequestException as exc:
-        pytest.skip(f"vehicle positions feed unreachable: {exc}")
-    if resp.status_code != 200:
-        pytest.skip(f"vehicle positions feed returned HTTP {resp.status_code}")
-    try:
-        return _parse(resp.content)
+        return _fetch_proto(VP_URL)
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"vehicle positions body not parseable: {exc}")
+        pytest.skip(f"vehicle positions feed unavailable: {exc}")
 
 
 @pytest.fixture(scope="session")

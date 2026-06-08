@@ -18,12 +18,14 @@ Output format per vehicle:
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
 
 from src.baseline import compute_eta
@@ -51,11 +53,19 @@ _live_prev_trips: dict[str, str | None] = {}
 
 
 def fetch_live_feed() -> gtfs_realtime_pb2.FeedMessage:
-    r = requests.get(GTFS_RT_URL, timeout=10)
-    r.raise_for_status()
-    feed = gtfs_realtime_pb2.FeedMessage()
-    feed.ParseFromString(r.content)
-    return feed
+    for attempt in range(5):
+        try:
+            r = requests.get(GTFS_RT_URL, timeout=10)
+            r.raise_for_status()
+            feed = gtfs_realtime_pb2.FeedMessage()
+            feed.ParseFromString(r.content)
+            return feed
+        except (requests.exceptions.RequestException, DecodeError) as exc:
+            if attempt == 4:
+                raise
+            time.sleep(0.2 * (2 ** attempt))
+            print(f"[warn] VP fetch attempt {attempt + 1} failed: {exc}, retrying…", flush=True)
+    raise RuntimeError("unreachable")
 
 
 def parse_feed(feed: gtfs_realtime_pb2.FeedMessage) -> list[dict]:

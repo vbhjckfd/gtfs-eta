@@ -37,6 +37,8 @@ sys.path.insert(0, ".")
 import boto3
 import requests
 from dotenv import load_dotenv
+from google.protobuf.message import DecodeError
+from google.transit import gtfs_realtime_pb2
 
 from src.inference import run_inference
 
@@ -83,13 +85,21 @@ def _load_resources(client) -> tuple[dict, dict]:
 
 def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> None:
     t0 = time.monotonic()
-    try:
-        resp = requests.get(VP_URL, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        vp_bytes = resp.content
-    except Exception as exc:
-        print(f"[warn] VP fetch failed: {exc}", flush=True)
-        return
+    vp_bytes = None
+    for attempt in range(5):
+        try:
+            resp = requests.get(VP_URL, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            trial = gtfs_realtime_pb2.FeedMessage()
+            trial.ParseFromString(resp.content)
+            vp_bytes = resp.content
+            break
+        except (requests.exceptions.RequestException, DecodeError) as exc:
+            if attempt == 4:
+                print(f"[warn] VP fetch failed after 5 attempts: {exc}", flush=True)
+                return
+            time.sleep(0.2 * (2 ** attempt))
+            print(f"[warn] VP fetch attempt {attempt + 1} failed: {exc}, retrying…", flush=True)
 
     result = run_inference(gtfs_data, model_data, trackers, vp_bytes)
 
