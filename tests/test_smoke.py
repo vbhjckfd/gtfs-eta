@@ -86,7 +86,14 @@ def test_header_timestamp_is_fresh(worker_feed):
 def test_feed_has_entities(worker_feed):
     # During service hours the feed should carry live trip updates. An empty
     # feed is valid protobuf but usually means inference produced nothing —
-    # worth a loud failure so we notice silent breakage.
+    # worth a loud failure so we notice silent breakage. Overnight, though,
+    # transit isn't running and an empty feed is expected, so only assert
+    # during working hours (mirrors worker.py /health).
+    if not _within_working_hours():
+        pytest.skip(
+            f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
+            f"{WORKING_HOURS_UTC}) — an empty feed is expected, not a failure"
+        )
     assert len(worker_feed.entity) > 0, (
         "feed parsed but contains zero entities — no trips were predicted"
     )
@@ -254,7 +261,15 @@ def test_parity_with_reference(worker_feed, reference_feed):
     Not an exact match — our feed is model-predicted while upstream is the
     operator's own ETAs — but a drop-in replacement should cover a meaningful
     share of the same trips and never balloon to an absurd size.
+
+    Only meaningful during working hours: overnight both feeds are empty
+    (transit isn't running), so there's nothing to compare (mirrors worker.py).
     """
+    if not _within_working_hours():
+        pytest.skip(
+            f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
+            f"{WORKING_HOURS_UTC}) — no live trips to compare"
+        )
     ours = {e.trip_update.trip.trip_id for e in worker_feed.entity}
     theirs = {e.trip_update.trip.trip_id for e in reference_feed.entity}
 
