@@ -101,4 +101,9 @@ def reference_feed() -> gtfs_realtime_pb2.FeedMessage:
     try:
         return _parse(resp.content)
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"reference body not parseable: {exc}")
+        ctype = resp.headers.get("content-type", "<no content-type>")
+        preview = resp.content[:120]
+        pytest.skip(
+            f"reference body not parseable ({exc}); "
+            f"content-type={ctype!r}, first bytes={preview!r}"
+        )

@@ -165,7 +165,7 @@ def main():
 
     # ── GTFS ──
     print("Loading GTFS static…")
-    gtfs = get_gtfs()
+    gtfs = get_gtfs(force_download=True, force_rebuild=True)
     worker_data = build_gtfs_worker_data(gtfs)
 
     print(f"Serialising GTFS data…")
