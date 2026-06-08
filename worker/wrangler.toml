@@ -18,3 +18,7 @@ FEED_KEY = "feed/trip_updates.pb"
 GITHUB_REPO = "vbhjckfd/gtfs-eta"
 GITHUB_WORKFLOW = "push-feed.yml"
 GITHUB_REF = "main"
+
+[observability.logs]
+enabled = true
+invocation_logs = true
