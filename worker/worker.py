@@ -3,8 +3,11 @@ Cloudflare Python Worker — GTFS-RT TripUpdates passthrough.
 
 on_fetch: serves the pre-computed TripUpdates protobuf from R2.
   GET /        — raw protobuf feed (drop-in replacement for upstream)
-  GET /health  — checks that stop 60 (Захисників України, internal id 4577)
-                 has at least one predicted arrival; returns JSON 200/503.
+  GET /health  — returns JSON 200/503.  Always requires a fresh feed header
+                 timestamp (< MAX_FEED_AGE_SEC); additionally, during working
+                 hours, requires stop 60 to have predicted arrivals.  Overnight
+                 0 arrivals is healthy (transit isn't running), so the arrivals
+                 check is gated on working hours to avoid false alarms.
 
 on_scheduled: fires every 5 minutes (wrangler.toml [triggers]) and dispatches
   the GitHub Actions push-feed workflow via the GitHub API.  The workflow runs
@@ -22,9 +25,26 @@ from cloudflare.workers import Response
 
 FEED_KEY = "feed/trip_updates.pb"
 
-# Stop sign-code 60 (Захисників України) — highest-traffic stop in Lviv.
-# Internal GTFS stop_id as it appears in stop_time_update.stop_id.
+# /health is layered:
+#   1. The feed must be *fresh* — the push pipeline (Cloudflare cron → GitHub
+#      Actions → R2) republishes every ~30 s, 24/7.  A stale header timestamp
+#      means the pipeline stalled.  Allows one missed 5-min cron cycle + slack.
+#   2. During working hours, stop 60 (busiest in Lviv) must also have at least
+#      one predicted arrival — the real end-to-end signal that inference is
+#      producing predictions, not just that the pipeline is pushing.
+# Overnight, Lviv transit isn't running, so 0 arrivals is correct and healthy;
+# the arrivals check is therefore gated on working hours.
+MAX_FEED_AGE_SEC = 10 * 60
+
+# Stop sign-code 60 (Захисників України) → internal GTFS stop_id 4577.
 HEALTH_CHECK_STOP_ID = "4577"
+
+# Working-hours window for the arrivals check, expressed in UTC so we need no
+# tzdata/DST logic in the worker.  Lviv is UTC+3 (summer) / UTC+2 (winter), so
+# 05:00–18:00 UTC is ~07:00–21:00 local in *both* states — unambiguously inside
+# the service day, when the city's busiest stop always has active trips.  The
+# edges fall back to the freshness-only check, avoiding false alarms.
+WORKING_HOURS_UTC = range(5, 18)
 
 
 async def _get_feed_data(env) -> bytes | None:
@@ -64,6 +84,8 @@ async def on_fetch(request, env, ctx=None):
 
 
 async def _handle_health(env):
+    import time
+
     data = await _get_feed_data(env)
     if data is None:
         return Response(
@@ -76,21 +98,47 @@ async def _handle_health(env):
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.ParseFromString(data)
 
-    count = sum(
+    now = int(time.time())
+    feed_ts = feed.header.timestamp
+    age = now - feed_ts
+    entities = len(feed.entity)
+
+    if feed_ts == 0 or age > MAX_FEED_AGE_SEC:
+        return Response(
+            json.dumps({
+                "status": "stale",
+                "feed_timestamp": feed_ts,
+                "age_sec": age,
+                "max_age_sec": MAX_FEED_AGE_SEC,
+                "entities": entities,
+                "detail": "feed not fresh — push pipeline may be stalled",
+            }),
+            status=503,
+            headers={"content-type": "application/json"},
+        )
+
+    # During working hours the busiest stop must have predicted arrivals;
+    # outside them, 0 arrivals is expected (transit isn't running).
+    working_hours = time.gmtime(now).tm_hour in WORKING_HOURS_UTC
+    arrivals = sum(
         1
         for e in feed.entity
         for stu in e.trip_update.stop_time_update
         if stu.stop_id == HEALTH_CHECK_STOP_ID
     )
 
-    if count == 0:
+    if working_hours and arrivals == 0:
         return Response(
             json.dumps({
                 "status": "degraded",
+                "feed_timestamp": feed_ts,
+                "age_sec": age,
+                "entities": entities,
                 "stop_code": 60,
                 "stop_id": HEALTH_CHECK_STOP_ID,
                 "arrivals": 0,
-                "detail": "no predicted arrivals for stop 60 — inference may be stalled",
+                "detail": "no predicted arrivals for stop 60 during working "
+                          "hours — inference may be stalled",
             }),
             status=503,
             headers={"content-type": "application/json"},
@@ -99,9 +147,13 @@ async def _handle_health(env):
     return Response(
         json.dumps({
             "status": "ok",
+            "feed_timestamp": feed_ts,
+            "age_sec": age,
+            "entities": entities,
             "stop_code": 60,
             "stop_id": HEALTH_CHECK_STOP_ID,
-            "arrivals": count,
+            "arrivals": arrivals,
+            "working_hours": working_hours,
         }),
         status=200,
         headers={"content-type": "application/json"},

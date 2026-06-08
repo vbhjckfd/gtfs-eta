@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import time
 
+import pytest
 from google.transit import gtfs_realtime_pb2
 
 # Lviv trip IDs are always three underscore-separated groups of digits,
@@ -24,6 +25,19 @@ MAX_STOPS_AHEAD = 10
 # Feed header timestamp must be fresh — upstream vehicle positions are
 # republished every few seconds; allow generous slack for clock skew / caching.
 MAX_FEED_AGE_SEC = 15 * 60
+
+# Stop sign-code 60 (Захисників України) → internal GTFS stop_id 4577.
+HEALTH_CHECK_STOP_ID = "4577"
+# Working-hours window for the arrivals check (mirrors worker.py WORKING_HOURS_UTC).
+# Lviv transit doesn't run overnight, so 0 arrivals off-hours is healthy, not a
+# regression. Expressed in UTC: 05:00–18:00 UTC ≈ 07:00–21:00 Lviv in both DST
+# states — unambiguously inside the service day. Outside it, the arrivals
+# assertion is skipped rather than failing a perfectly healthy feed.
+WORKING_HOURS_UTC = range(5, 18)
+
+
+def _within_working_hours() -> bool:
+    return time.gmtime().tm_hour in WORKING_HOURS_UTC
 
 
 # ── Reachability & transport ────────────────────────────────────────────────
@@ -211,12 +225,20 @@ def test_stop_60_has_arrivals(worker_feed):
 
     The feed uses internal GTFS stop_id values, not sign codes. Sign code 60
     maps to internal stop_id 4577 (stops.txt: stop_code=60, stop_id=4577).
+
+    Only asserted during working hours: overnight Lviv transit isn't running,
+    so 0 arrivals is healthy, not a regression (mirrors worker.py /health).
     """
+    if not _within_working_hours():
+        pytest.skip(
+            f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
+            f"{WORKING_HOURS_UTC}) — 0 arrivals is expected, not a failure"
+        )
     arrivals = [
         (e.trip_update.trip.trip_id, stu)
         for e in worker_feed.entity
         for stu in e.trip_update.stop_time_update
-        if stu.stop_id == "4577"
+        if stu.stop_id == HEALTH_CHECK_STOP_ID
     ]
     assert arrivals, (
         "no arrival predictions found for stop 60 / internal id 4577 — "
