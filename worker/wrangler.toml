@@ -22,3 +22,6 @@ GITHUB_REF = "main"
 [observability.logs]
 enabled = true
 invocation_logs = true
+
+[observability.traces]
+enabled = true
