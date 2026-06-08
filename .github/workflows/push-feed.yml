@@ -25,22 +25,20 @@ jobs:
         run: |
           SIX_MIN_S=360
           proceed=true
-          runs=$(gh api "repos/$REPO/actions/workflows/push-feed.yml/runs" \
-            --jq '.workflow_runs[] | select(.status=="in_progress") | [.id, .run_started_at] | @tsv' \
-            -F per_page=20)
           now=$(date +%s)
           while IFS=$'\t' read -r id started_at; do
             [ "$id" = "$RUN_ID" ] && continue
-            started_s=$(date -d "$started_at" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$started_at" +%s)
+            started_s=$(date -d "$started_at" +%s)
             age_s=$(( now - started_s ))
             if [ "$age_s" -ge "$SIX_MIN_S" ]; then
               echo "Cancelling stale run $id (${age_s}s old)"
-              gh api -X POST "repos/$REPO/actions/runs/$id/cancel"
+              gh run cancel "$id" --repo "$REPO"
             else
               echo "Skipping: run $id already in progress (${age_s}s old)"
               proceed=false
             fi
-          done <<< "$runs"
+          done < <(gh run list --repo "$REPO" --workflow push-feed.yml --status in_progress \
+            --json databaseId,startedAt --jq '.[] | [.databaseId, .startedAt] | @tsv')
           echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
 
   push-feed:
