@@ -64,13 +64,14 @@ WORKING_HOURS_UTC = range(5, 18)
 # aggregates as scriptThrewException).  Wrapping the read in asyncio.wait_for
 # keeps a live timer on the loop (so the runtime doesn't hang-cancel) and lets
 # us return a clean 503 on timeout instead.  Normal reads finish in <1.5 s.
+#
+# NB: do NOT try to surface the diverted rejection by installing an asyncio
+# loop exception handler — the loop is reused across requests, and any Python
+# state left on it (a handler closure, a create_task'd coroutine) is touched by
+# the next request's preparePython without the GIL held, which throws
+# "NoGilError: Attempted to use PyProxy when Python GIL not held".  Keep all
+# Python work strictly inside an awaited call within the request.
 R2_READ_TIMEOUT_SEC = 5
-
-# The event-loop exception handler installed by _prepare_loop_reporting() runs
-# without access to `env`, so each invocation stashes the current env here for
-# Sentry reporting.  _loop_handler_installed guards one-time installation.
-_last_env = None
-_loop_handler_installed = False
 
 
 async def _send_sentry_event(env, fields: dict) -> None:
@@ -155,42 +156,6 @@ async def _report_message(env, message: str, where: str, level: str = "error") -
     })
 
 
-def _prepare_loop_reporting(env) -> None:
-    """Stash env for the loop handler and install that handler once.
-
-    Pyodide routes rejected JS promises (e.g. a cold-isolate R2 reject) into the
-    asyncio event-loop exception handler rather than raising them in the awaiting
-    `await`, so on_fetch's try/except never sees them.  Overriding the handler
-    lets us at least surface these otherwise-invisible failures to Sentry.
-    """
-    global _last_env, _loop_handler_installed
-    _last_env = env
-    if _loop_handler_installed:
-        return
-    import asyncio
-
-    def _handler(loop, context):
-        msg = context.get("message", "event-loop exception")
-        exc = context.get("exception")
-        print(f"[loop] unhandled event-loop exception: {msg} exc={exc!r}")
-        env_ = _last_env
-        if env_ is None:
-            return
-        try:  # best-effort — reporting must never break the worker
-            if exc is not None:
-                loop.create_task(_report_exception(env_, exc, "event_loop"))
-            else:
-                loop.create_task(_report_message(env_, str(msg), "event_loop"))
-        except Exception as report_exc:  # noqa: BLE001
-            print(f"[loop] failed to schedule report: {report_exc!r}")
-
-    try:
-        asyncio.get_event_loop().set_exception_handler(_handler)
-        _loop_handler_installed = True
-    except Exception as install_exc:  # noqa: BLE001 — never break the worker
-        print(f"[loop] failed to install exception handler: {install_exc!r}")
-
-
 async def _get_feed_data(env) -> bytes | None:
     import asyncio
 
@@ -215,7 +180,6 @@ async def on_fetch(request, env, ctx=None):
     # logs the real traceback so the failure is diagnosable.
     import asyncio
 
-    _prepare_loop_reporting(env)
     try:
         path = request.url.split("?")[0].rstrip("/")
         if path.endswith("/health"):
@@ -327,8 +291,6 @@ async def _handle_health(env):
 async def on_scheduled(event, env, ctx):
     import json
     from pyodide.ffi import to_js
-
-    _prepare_loop_reporting(env)
 
     repo     = getattr(env, "GITHUB_REPO",    "vbhjckfd/gtfs-eta")
     workflow = getattr(env, "GITHUB_WORKFLOW", "push-feed.yml")
