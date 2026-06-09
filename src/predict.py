@@ -96,15 +96,15 @@ def _current_stop_sequence(
     lat: float,
     lon: float,
     gtfs: GTFSStatic,
-) -> tuple[int, float]:
-    """Return (last_passed_stop_sequence, current_delay_sec)."""
+) -> tuple[int, float, float]:
+    """Return (last_passed_stop_sequence, current_delay_sec, vehicle_dist_along_shape_m)."""
     from shapely.geometry import Point
     trip = gtfs.get_trip(trip_id)
     if trip is None:
-        return 0, 0.0
+        return 0, 0.0, 0.0
     shape = gtfs.get_shape_linestring(trip.shape_id)
     if shape is None:
-        return 0, 0.0
+        return 0, 0.0, 0.0
 
     vx, vy = _project_xy(lon, lat)
     vehicle_dist = shape.project(Point(vx, vy))
@@ -114,7 +114,7 @@ def _current_stop_sequence(
         d = gtfs.get_stop_distance_along_shape(trip.shape_id, st.stop_id) or 0.0
         if d <= vehicle_dist:
             last_seq = st.stop_sequence
-    return last_seq, 0.0
+    return last_seq, 0.0, vehicle_dist
 
 
 def _check_off_route(
@@ -245,7 +245,7 @@ def predict_all(
             continue
 
         # --- ETA computation ---
-        current_seq, current_delay = _current_stop_sequence(trip_id, float(lat), float(lon), gtfs)
+        current_seq, current_delay, vehicle_dist = _current_stop_sequence(trip_id, float(lat), float(lon), gtfs)
 
         if model is not None:
             feat_df = compute_features_for_inference(
@@ -255,6 +255,7 @@ def predict_all(
                 current_delay_sec=current_delay,
                 snapshot_time=ts,
                 recent_speed_mps=float(v["speed"]) if v.get("speed") is not None else None,
+                vehicle_dist_along_shape=vehicle_dist,
                 gtfs=gtfs,
             )
             if not feat_df.empty:

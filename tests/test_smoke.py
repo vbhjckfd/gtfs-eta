@@ -187,7 +187,18 @@ def test_predicted_routes_are_currently_active(worker_feed, vehicle_positions_fe
 
 
 def test_vehicle_coverage(worker_feed, vehicle_positions_feed):
-    """We should predict ETAs for the majority of vehicles that report a trip_id."""
+    """We should predict ETAs for the majority of vehicles that report a trip_id.
+
+    Only asserted during working hours: as service winds down overnight, few
+    vehicles run and matching is sparse, so coverage legitimately drops below
+    50% on a perfectly healthy feed (mirrors worker.py /health and the other
+    coverage tests in this file).
+    """
+    if not _within_working_hours():
+        pytest.skip(
+            f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
+            f"{WORKING_HOURS_UTC}) — sparse coverage is expected, not a failure"
+        )
     # Vehicles with a blank trip_id cannot be matched; exclude them.
     vp_trips = {
         str(e.vehicle.trip.trip_id)

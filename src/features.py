@@ -147,6 +147,7 @@ def compute_features_for_inference(
     snapshot_time,
     recent_speed_mps: float | None,
     gtfs: GTFSStatic,
+    vehicle_dist_along_shape: float = 0.0,
 ) -> pd.DataFrame:
     """Build one feature row per future stop for live inference."""
     trip = gtfs.get_trip(trip_id)
@@ -164,9 +165,15 @@ def compute_features_for_inference(
             current_st = st
             break
 
-    d_current = 0.0
+    # d_last_stop: shape distance of the last passed stop (reference for sched scaling)
+    d_last_stop = 0.0
     if current_st:
-        d_current = gtfs.get_stop_distance_along_shape(trip.shape_id, current_st.stop_id) or 0.0
+        d_last_stop = gtfs.get_stop_distance_along_shape(trip.shape_id, current_st.stop_id) or 0.0
+
+    # Use vehicle's actual projected position along shape so segment_dist_m reflects
+    # the true remaining distance rather than the full stop-to-stop segment. This
+    # prevents the model from predicting "1 min" when the vehicle is already at the stop.
+    d_current = vehicle_dist_along_shape if vehicle_dist_along_shape > d_last_stop else d_last_stop
 
     sched_current_utc = None
     if current_st:
@@ -186,7 +193,11 @@ def compute_features_for_inference(
             st.arrival_time or st.departure_time, d, gtfs.feed_tz
         )
         if sched_current_utc and sched_target_utc:
-            sched_seg = max(0.0, (sched_target_utc - sched_current_utc).total_seconds())
+            sched_seg_full = max(0.0, (sched_target_utc - sched_current_utc).total_seconds())
+            # Scale scheduled time proportionally to remaining distance from vehicle position
+            seg_full_m = max(1.0, d_target - d_last_stop)
+            remaining_frac = min(1.0, max(0.0, (d_target - d_current) / seg_full_m))
+            sched_seg = sched_seg_full * remaining_frac
         else:
             sched_seg = 0.0
 
