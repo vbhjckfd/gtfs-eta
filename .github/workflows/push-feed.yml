@@ -68,3 +68,5 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET:            gtfs-lviv
           GTFS_RT_URL:          https://track.ua-gis.com/gtfs/lviv/vehicle_position
+          SENTRY_DSN:           ${{ secrets.SENTRY_DSN }}
+          SENTRY_RELEASE:       ${{ github.sha }}

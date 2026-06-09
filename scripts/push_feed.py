@@ -36,6 +36,7 @@ sys.path.insert(0, ".")
 
 import boto3
 import requests
+import sentry_sdk
 from dotenv import load_dotenv
 from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
@@ -55,6 +56,30 @@ VP_URL              = os.environ.get(
     "GTFS_RT_URL", "https://track.ua-gis.com/gtfs/lviv/vehicle_position"
 )
 REQUEST_TIMEOUT = 20
+
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+
+
+def _init_sentry() -> None:
+    """Enable Sentry error reporting when SENTRY_DSN is configured.
+
+    No-op without a DSN, so local runs and tests stay unchanged. Only
+    exceptions are reported (no performance tracing) to keep quota usage low.
+    """
+    if not SENTRY_DSN:
+        return
+    # A missing DSN is the normal "disabled" path above; a *malformed* one must
+    # also never take down the feed pipeline, so fall back to silent no-logging.
+    try:
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+            release=os.environ.get("SENTRY_RELEASE"),
+            traces_sample_rate=0.0,
+        )
+        print("Sentry error reporting enabled.", flush=True)
+    except Exception as exc:  # noqa: BLE001 — Sentry must never break startup
+        print(f"[warn] Sentry init failed, continuing without it: {exc!r}", flush=True)
 
 
 def _make_client():
@@ -127,6 +152,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    _init_sentry()
+
     client = _make_client()
     gtfs_data, model_data = _load_resources(client)
     trackers: dict = {}
@@ -135,13 +162,25 @@ def main() -> None:
         n = 0
         print(f"Looping every {args.loop:.0f}s — Ctrl-C to stop.", flush=True)
         while True:
-            _push_once(client, gtfs_data, model_data, trackers)
+            # A single failed iteration (inference bug, transient R2 error) is
+            # reported to Sentry but must not kill the daemon — the next cycle
+            # 30 s later usually recovers, keeping the feed fresh.
+            try:
+                _push_once(client, gtfs_data, model_data, trackers)
+            except Exception as exc:  # noqa: BLE001 — daemon must stay alive
+                sentry_sdk.capture_exception(exc)
+                print(f"[error] push iteration failed: {exc!r}", flush=True)
             n += 1
             if args.count and n >= args.count:
                 break
             time.sleep(args.loop)
     else:
-        _push_once(client, gtfs_data, model_data, trackers)
+        # One-shot mode: report, then re-raise so the exit code reflects failure.
+        try:
+            _push_once(client, gtfs_data, model_data, trackers)
+        except Exception as exc:  # noqa: BLE001
+            sentry_sdk.capture_exception(exc)
+            raise
 
 
 if __name__ == "__main__":
