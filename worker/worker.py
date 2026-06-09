@@ -56,6 +56,22 @@ HEALTH_CHECK_STOP_ID = "4577"
 # edges fall back to the freshness-only check, avoiding false alarms.
 WORKING_HOURS_UTC = range(5, 18)
 
+# Bound every R2 read.  On some (notably cold) isolates the awaited R2 promise's
+# *rejection* is delivered to Pyodide's asyncio event-loop exception handler
+# instead of raising inside the `await`, so the read hangs forever, on_fetch's
+# try/except never sees it, no Response is produced, and the Workers runtime
+# kills the request ("code had hung and would never generate a response" — which
+# aggregates as scriptThrewException).  Wrapping the read in asyncio.wait_for
+# keeps a live timer on the loop (so the runtime doesn't hang-cancel) and lets
+# us return a clean 503 on timeout instead.  Normal reads finish in <1.5 s.
+R2_READ_TIMEOUT_SEC = 5
+
+# The event-loop exception handler installed by _prepare_loop_reporting() runs
+# without access to `env`, so each invocation stashes the current env here for
+# Sentry reporting.  _loop_handler_installed guards one-time installation.
+_last_env = None
+_loop_handler_installed = False
+
 
 async def _send_sentry_event(env, fields: dict) -> None:
     """POST a single event to Sentry's envelope API. No-op without SENTRY_DSN.
@@ -139,12 +155,55 @@ async def _report_message(env, message: str, where: str, level: str = "error") -
     })
 
 
+def _prepare_loop_reporting(env) -> None:
+    """Stash env for the loop handler and install that handler once.
+
+    Pyodide routes rejected JS promises (e.g. a cold-isolate R2 reject) into the
+    asyncio event-loop exception handler rather than raising them in the awaiting
+    `await`, so on_fetch's try/except never sees them.  Overriding the handler
+    lets us at least surface these otherwise-invisible failures to Sentry.
+    """
+    global _last_env, _loop_handler_installed
+    _last_env = env
+    if _loop_handler_installed:
+        return
+    import asyncio
+
+    def _handler(loop, context):
+        msg = context.get("message", "event-loop exception")
+        exc = context.get("exception")
+        print(f"[loop] unhandled event-loop exception: {msg} exc={exc!r}")
+        env_ = _last_env
+        if env_ is None:
+            return
+        try:  # best-effort — reporting must never break the worker
+            if exc is not None:
+                loop.create_task(_report_exception(env_, exc, "event_loop"))
+            else:
+                loop.create_task(_report_message(env_, str(msg), "event_loop"))
+        except Exception as report_exc:  # noqa: BLE001
+            print(f"[loop] failed to schedule report: {report_exc!r}")
+
+    try:
+        asyncio.get_event_loop().set_exception_handler(_handler)
+        _loop_handler_installed = True
+    except Exception as install_exc:  # noqa: BLE001 — never break the worker
+        print(f"[loop] failed to install exception handler: {install_exc!r}")
+
+
 async def _get_feed_data(env) -> bytes | None:
+    import asyncio
+
     feed_key = getattr(env, "FEED_KEY", FEED_KEY)
-    obj = await env.R2.get(feed_key)
-    if obj is None:
-        return None
-    return bytes(js.Uint8Array.new(await obj.arrayBuffer()))
+
+    async def _read() -> bytes | None:
+        obj = await env.R2.get(feed_key)
+        if obj is None:
+            return None
+        return bytes(js.Uint8Array.new(await obj.arrayBuffer()))
+
+    # See R2_READ_TIMEOUT_SEC: a bare `await` here can hang the whole request.
+    return await asyncio.wait_for(_read(), R2_READ_TIMEOUT_SEC)
 
 
 async def on_fetch(request, env, ctx=None):
@@ -154,6 +213,9 @@ async def on_fetch(request, env, ctx=None):
     # runtime reports "code had hung and would never generate a response"
     # (a 500 with no body).  Catching here turns that into a clean 500 *and*
     # logs the real traceback so the failure is diagnosable.
+    import asyncio
+
+    _prepare_loop_reporting(env)
     try:
         path = request.url.split("?")[0].rstrip("/")
         if path.endswith("/health"):
@@ -169,6 +231,15 @@ async def on_fetch(request, env, ctx=None):
             "content-type":  "application/x-protobuf",
             "cache-control": "public, max-age=30",
         })
+    except asyncio.TimeoutError as exc:
+        # R2 read exceeded R2_READ_TIMEOUT_SEC — almost always the diverted-
+        # rejection hang.  Return a clean 503 the caller can retry rather than
+        # letting the runtime hang-cancel the request (scriptThrewException).
+        print(f"[on_fetch] R2 read timed out after {R2_READ_TIMEOUT_SEC}s")
+        await _report_message(
+            env, f"R2 read timed out after {R2_READ_TIMEOUT_SEC}s", "on_fetch"
+        )
+        return Response("Feed read timed out", status=503)
     except Exception as exc:
         import traceback
         print(f"[on_fetch] unhandled error: {exc!r}\n{traceback.format_exc()}")
@@ -256,6 +327,8 @@ async def _handle_health(env):
 async def on_scheduled(event, env, ctx):
     import json
     from pyodide.ffi import to_js
+
+    _prepare_loop_reporting(env)
 
     repo     = getattr(env, "GITHUB_REPO",    "vbhjckfd/gtfs-eta")
     workflow = getattr(env, "GITHUB_WORKFLOW", "push-feed.yml")
