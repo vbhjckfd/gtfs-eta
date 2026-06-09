@@ -16,6 +16,12 @@ on_scheduled: fires every 5 minutes (wrangler.toml [triggers]) and dispatches
 
 Required secret (set via `wrangler secret put GITHUB_TOKEN`):
   GITHUB_TOKEN — a GitHub PAT with the `workflow` scope.
+
+Optional secret (set via `wrangler secret put SENTRY_DSN`):
+  SENTRY_DSN — enables exception reporting to Sentry.  `sentry-sdk` can't run
+  under Pyodide, so we POST events directly to Sentry's envelope HTTP API
+  (see _report_to_sentry).  Every event is tagged service=gtfs-eta-worker so
+  it's distinguishable in a Sentry project shared with other services.
 """
 
 import json
@@ -24,6 +30,10 @@ import js
 from cloudflare.workers import Response
 
 FEED_KEY = "feed/trip_updates.pb"
+
+# This DSN is shared with other services (e.g. timetable-api-node); the
+# service tag below keeps the worker's events unmistakable in the issue stream.
+SENTRY_SERVICE_TAG = "gtfs-eta-worker"
 
 # /health is layered:
 #   1. The feed must be *fresh* — the push pipeline (Cloudflare cron → GitHub
@@ -45,6 +55,88 @@ HEALTH_CHECK_STOP_ID = "4577"
 # the service day, when the city's busiest stop always has active trips.  The
 # edges fall back to the freshness-only check, avoiding false alarms.
 WORKING_HOURS_UTC = range(5, 18)
+
+
+async def _send_sentry_event(env, fields: dict) -> None:
+    """POST a single event to Sentry's envelope API. No-op without SENTRY_DSN.
+
+    sentry-sdk doesn't run under Pyodide, so we build the envelope by hand.
+    Reporting must never break the worker, so all errors here are swallowed.
+    """
+    dsn = getattr(env, "SENTRY_DSN", "")
+    if not dsn:
+        return
+    try:
+        import time
+        import uuid
+        from datetime import datetime, timezone
+
+        from pyodide.ffi import to_js
+
+        # DSN: https://<public_key>@<host>/<project_id>
+        public_key, host_path = dsn.split("://", 1)[1].split("@", 1)
+        host, project_id = host_path.rsplit("/", 1)
+        envelope_url = f"https://{host}/api/{project_id}/envelope/"
+
+        event_id = uuid.uuid4().hex
+        event = {
+            "event_id": event_id,
+            "timestamp": time.time(),
+            "platform": "python",
+            "level": "error",
+            "environment": getattr(env, "SENTRY_ENVIRONMENT", "production"),
+            "server_name": SENTRY_SERVICE_TAG,
+            "tags": {"service": SENTRY_SERVICE_TAG},
+            **fields,
+        }
+        release = getattr(env, "SENTRY_RELEASE", "")
+        if release:
+            event["release"] = release
+
+        body = "\n".join((
+            json.dumps({
+                "event_id": event_id,
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+            }),
+            json.dumps({"type": "event", "content_type": "application/json"}),
+            json.dumps(event),
+        ))
+
+        resp = await js.fetch(envelope_url, to_js({
+            "method": "POST",
+            "headers": {
+                "content-type": "application/x-sentry-envelope",
+                "x-sentry-auth": (
+                    f"Sentry sentry_version=7, sentry_key={public_key}, "
+                    f"sentry_client={SENTRY_SERVICE_TAG}/1.0"
+                ),
+            },
+            "body": body,
+        }, dict_converter=js.Object.fromEntries))
+        if resp.status >= 300:
+            print(f"[sentry] envelope POST failed: HTTP {resp.status}")
+    except Exception as report_exc:  # noqa: BLE001 — never break the worker
+        print(f"[sentry] failed to report event: {report_exc!r}")
+
+
+async def _report_exception(env, exc, where: str) -> None:
+    import traceback
+
+    await _send_sentry_event(env, {
+        "exception": {"values": [{
+            "type": type(exc).__name__,
+            "value": str(exc),
+        }]},
+        "extra": {"where": where, "traceback": traceback.format_exc()},
+    })
+
+
+async def _report_message(env, message: str, where: str, level: str = "error") -> None:
+    await _send_sentry_event(env, {
+        "message": {"formatted": message},
+        "level": level,
+        "extra": {"where": where},
+    })
 
 
 async def _get_feed_data(env) -> bytes | None:
@@ -80,6 +172,7 @@ async def on_fetch(request, env, ctx=None):
     except Exception as exc:
         import traceback
         print(f"[on_fetch] unhandled error: {exc!r}\n{traceback.format_exc()}")
+        await _report_exception(env, exc, "on_fetch")
         return Response(f"Internal error: {exc!r}", status=500)
 
 
@@ -170,18 +263,26 @@ async def on_scheduled(event, env, ctx):
     token    = getattr(env, "GITHUB_TOKEN",   "")
 
     url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/dispatches"
-    resp = await js.fetch(url, to_js({
-        "method": "POST",
-        "headers": {
-            "authorization":       f"Bearer {token}",
-            "accept":              "application/vnd.github+json",
-            "content-type":        "application/json",
-            "user-agent":          "gtfs-eta-worker",
-            "x-github-api-version": "2022-11-28",
-        },
-        "body": json.dumps({"ref": ref}),
-    }, dict_converter=js.Object.fromEntries))
+    try:
+        resp = await js.fetch(url, to_js({
+            "method": "POST",
+            "headers": {
+                "authorization":       f"Bearer {token}",
+                "accept":              "application/vnd.github+json",
+                "content-type":        "application/json",
+                "user-agent":          "gtfs-eta-worker",
+                "x-github-api-version": "2022-11-28",
+            },
+            "body": json.dumps({"ref": ref}),
+        }, dict_converter=js.Object.fromEntries))
+    except Exception as exc:
+        print(f"[scheduled] GitHub dispatch raised: {exc!r}")
+        await _report_exception(env, exc, "on_scheduled")
+        return
 
     if resp.status not in (204, 200):
         text = await resp.text()
-        print(f"[scheduled] GitHub dispatch failed: HTTP {resp.status} — {text}")
+        msg = f"GitHub dispatch failed: HTTP {resp.status} — {text}"
+        print(f"[scheduled] {msg}")
+        # A failed dispatch stalls the whole push pipeline, so surface it.
+        await _report_message(env, msg, "on_scheduled")

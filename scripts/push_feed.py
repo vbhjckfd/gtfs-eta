@@ -77,7 +77,10 @@ def _init_sentry() -> None:
             release=os.environ.get("SENTRY_RELEASE"),
             traces_sample_rate=0.0,
         )
-        print("Sentry error reporting enabled.", flush=True)
+        # This DSN is shared with other services (e.g. timetable-api-node), so
+        # tag every event to make gtfs-eta's daemon issues unmistakable.
+        sentry_sdk.set_tag("service", "gtfs-eta-daemon")
+        print("Sentry error reporting enabled (service=gtfs-eta-daemon).", flush=True)
     except Exception as exc:  # noqa: BLE001 — Sentry must never break startup
         print(f"[warn] Sentry init failed, continuing without it: {exc!r}", flush=True)
 
