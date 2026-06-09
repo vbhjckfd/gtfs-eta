@@ -57,7 +57,30 @@ VP_URL              = os.environ.get(
 )
 REQUEST_TIMEOUT = 20
 
+# Stale-on-error fallback for the upstream vehicle-position fetch (mirrors
+# timetable-api's getVehiclesLocations). A brief upstream blip shouldn't cost us
+# a whole inference cycle, so when a fetch fails after all retries we reuse the
+# last feed we successfully decoded — but only while it's still recent, so we
+# never publish ETAs computed off badly stale positions.
+#
+# This daemon is a single long-lived process (`python scripts/push_feed.py
+# --loop 30`), so a module-level cache lives for the whole run and is shared
+# across iterations — exactly what we want. (The Cloudflare Worker in
+# worker/worker.py can't rely on module state this way, since its isolates are
+# ephemeral — but it only reads a pre-computed blob from R2; the upstream fetch
+# that needs this fallback happens here, in the daemon.)
+STALE_MAX_AGE_MS = 3 * 60 * 1000
+
+# Last successfully fetched+decoded VP feed: {"vp_bytes": bytes, "at": int(ms)}.
+_vp_cache: dict | None = None
+
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+
+
+def __reset_cache() -> None:
+    """Test seam: drop the cached last-good VP feed so cases stay isolated."""
+    global _vp_cache
+    _vp_cache = None
 
 
 def _init_sentry() -> None:
@@ -111,23 +134,59 @@ def _load_resources(client) -> tuple[dict, dict]:
     return gtfs_data, model_data
 
 
-def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> None:
-    t0 = time.monotonic()
-    vp_bytes = None
+def _fetch_vp_bytes() -> bytes:
+    """Fetch + validate the upstream vehicle-position feed, with backoff.
+
+    Retries transient HTTP and protobuf-decode errors up to 5 times, then
+    re-raises the last error. Returns the raw protobuf bytes on success.
+    """
+    last_exc: Exception | None = None
     for attempt in range(5):
         try:
             resp = requests.get(VP_URL, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             trial = gtfs_realtime_pb2.FeedMessage()
             trial.ParseFromString(resp.content)
-            vp_bytes = resp.content
-            break
+            return resp.content
         except (requests.exceptions.RequestException, DecodeError) as exc:
+            last_exc = exc
             if attempt == 4:
-                print(f"[warn] VP fetch failed after 5 attempts: {exc}", flush=True)
-                return
+                break
             time.sleep(0.2 * (2 ** attempt))
             print(f"[warn] VP fetch attempt {attempt + 1} failed: {exc}, retrying…", flush=True)
+    assert last_exc is not None  # the loop always sets it before breaking
+    raise last_exc
+
+
+def _get_vp_bytes() -> bytes:
+    """Return fresh VP bytes, or the last-good feed during a brief outage.
+
+    On success, caches the bytes with a millisecond timestamp. If the fetch
+    fails after all retries, serves the cached feed when it's within
+    STALE_MAX_AGE_MS (logging the age); otherwise — older than the window, or
+    nothing ever cached — re-raises the original error.
+    """
+    global _vp_cache
+    try:
+        vp_bytes = _fetch_vp_bytes()
+        _vp_cache = {"vp_bytes": vp_bytes, "at": int(time.time() * 1000)}
+        return vp_bytes
+    except (requests.exceptions.RequestException, DecodeError) as exc:
+        if _vp_cache is not None:
+            age_ms = int(time.time() * 1000) - _vp_cache["at"]
+            if age_ms <= STALE_MAX_AGE_MS:
+                print(
+                    f"[warn] VP fetch failed, serving cached feed "
+                    f"({round(age_ms / 1000)}s old): {exc}",
+                    flush=True,
+                )
+                return _vp_cache["vp_bytes"]
+        raise
+
+
+def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> None:
+    t0 = time.monotonic()
+    vp_bytes = _get_vp_bytes()
 
     result = run_inference(gtfs_data, model_data, trackers, vp_bytes)
 
