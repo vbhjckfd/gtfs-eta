@@ -1,14 +1,17 @@
 """
-Train a sklearn HistGradientBoostingRegressor to predict seconds_to_target_stop.
+Train a sklearn HistGradientBoostingRegressor to predict seconds_to_arrival
+(snapshot → target stop, direct multi-horizon).
 
 Uses a Pipeline (OrdinalEncoder for route_id + HistGBT) so a single joblib file
 contains everything needed for inference — no separate encoder step.
 
-Baseline: scheduled_segment_sec (schedule's own prediction for each segment).
+Baseline: sched_remaining_sec (the schedule's own prediction for the remaining
+distance from the vehicle's position to the target stop).
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import time
@@ -28,6 +31,11 @@ MODEL_DIR = Path(__file__).parent.parent / "models"
 MODEL_PATH = MODEL_DIR / "eta_pipeline.joblib"
 
 TEST_FRACTION = 0.2
+
+# Snapshot-anchored labeling yields ~3M rows/day — far more than HistGBT needs.
+# Cap the loaded dataset with uniform per-file sampling to keep memory and fit
+# time sane; override via GTFS_ETA_MAX_ROWS.
+MAX_TRAINING_ROWS = int(os.environ.get("GTFS_ETA_MAX_ROWS", 8_000_000))
 
 _CAT_COLS = ["route_id"]
 _NUM_COLS = [c for c in FEATURE_COLS if c not in _CAT_COLS]
@@ -66,14 +74,25 @@ def _load_features(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def _load_labeled_dir(directory: Path) -> pd.DataFrame:
+def _load_training_dir(directory: Path, max_rows: int = MAX_TRAINING_ROWS) -> pd.DataFrame:
     files = sorted(directory.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No .parquet files found in {directory}")
-    print(f"  Loading {len(files)} labeled parquets…")
-    pieces = [pd.read_parquet(f) for f in files]
+
+    import pyarrow.parquet as pq
+    total = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
+    frac = min(1.0, max_rows / max(total, 1))
+    print(f"  Loading {len(files)} training parquets "
+          f"({total:,} rows, sampling {frac:.0%})…")
+
+    pieces = []
+    for f in files:
+        piece = pd.read_parquet(f)
+        if frac < 1.0:
+            piece = piece.sample(frac=frac, random_state=42)
+        pieces.append(piece)
     df = pd.concat(pieces, ignore_index=True)
-    print(f"  {len(df):,} labeled rows across {df['date'].nunique()} dates")
+    print(f"  {len(df):,} training rows across {df['date'].nunique()} dates")
     return df
 
 
@@ -101,10 +120,10 @@ def train(
         from src.gtfs_static import get_gtfs
         print("Loading GTFS static…")
         gtfs = get_gtfs()
-        print("Building feature matrix from labeled parquets…")
+        print("Building feature matrix from training parquets…")
         t_feat = time.monotonic()
-        labeled = _load_labeled_dir(input_path)
-        df = compute_features_for_training(labeled, gtfs)
+        training_rows = _load_training_dir(input_path)
+        df = compute_features_for_training(training_rows, gtfs)
         print(f"  Feature matrix: {len(df):,} rows × {len(FEATURE_COLS)} features  ({time.monotonic() - t_feat:.1f}s)")
     else:
         print(f"Loading pre-built features from {input_path}…")
@@ -139,8 +158,8 @@ def train(
     train_mae = mean_absolute_error(y_train, y_pred_train)
     test_mae  = mean_absolute_error(y_test,  y_pred_test)
 
-    if "scheduled_segment_sec" in test_df.columns:
-        baseline_pred = test_df["scheduled_segment_sec"].values
+    if "sched_remaining_sec" in test_df.columns:
+        baseline_pred = test_df["sched_remaining_sec"].values
     else:
         baseline_pred = np.full(len(y_test), y_train.mean())
     baseline_mae = mean_absolute_error(y_test, baseline_pred)
@@ -156,7 +175,7 @@ def train(
     print(f"\n{'─'*50}")
     print(f"Train MAE:    {train_mae:6.1f}s")
     print(f"Test  MAE:    {test_mae:6.1f}s")
-    print(f"Baseline MAE: {baseline_mae:6.1f}s  (schedule + propagated delay)")
+    print(f"Baseline MAE: {baseline_mae:6.1f}s  (scheduled remaining time)")
     print(f"Improvement:  {improvement_pct:+.1f}% vs baseline")
     print(f"Model saved → {model_path}")
     print(f"Done in {total_str}")
@@ -194,7 +213,7 @@ def predict(pipeline, X: pd.DataFrame) -> np.ndarray:
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("Usage: python -m src.train data/labeled/")
+        print("Usage: python -m src.train data/training/")
         print("       python -m src.train data/features.parquet")
         sys.exit(1)
     train(sys.argv[1])

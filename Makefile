@@ -1,6 +1,10 @@
-.PHONY: install pipeline pipeline-date train export deploy \
+.PHONY: install pipeline pipeline-date train learn export deploy \
         sanity validate-off-route check-gtfs check-snapshots \
         push-feed serve-feed smoke help
+
+# Days processed concurrently by `make pipeline` / `make learn`.
+# Each worker peaks at ~2 GB — keep ≤ 4-5 on a 16 GB machine.
+PARALLEL ?= 4
 
 # ── Setup ──────────────────────────────────────────────────────────────────
 
@@ -11,7 +15,7 @@ install:
 
 ## Run the full pipeline for all available days (skips already-done days)
 pipeline:
-	python scripts/run_pipeline.py --all
+	python scripts/run_pipeline.py --all --parallel $(PARALLEL)
 
 ## Run the pipeline for a single date: make pipeline-date DATE=2026-06-01
 pipeline-date:
@@ -19,9 +23,12 @@ pipeline-date:
 
 # ── Model ──────────────────────────────────────────────────────────────────
 
-## Build features from data/labeled/ and train the sklearn model
+## Build features from data/training/ and train the sklearn model
 train:
-	python -m src.train data/labeled/
+	python -m src.train data/training/
+
+## Full learning cycle: regenerate training data (parallel) + train the model
+learn: pipeline train
 
 # ── Cloudflare Worker ──────────────────────────────────────────────────────
 
@@ -42,9 +49,9 @@ release: export deploy
 push-feed:
 	python scripts/push_feed.py
 
-## Push to R2 continuously every 30 s (keeps the live feed fresh)
+## Push to R2 continuously every 15 s (keeps the live feed fresh)
 serve-feed:
-	python scripts/push_feed.py --loop 30
+	python scripts/push_feed.py --loop 15
 
 ## Smoke-test the live worker as a drop-in TripUpdates feed.
 ## Override target with SMOKE_URL=... (e.g. a preview deploy or local dev).
@@ -73,16 +80,17 @@ help:
 	@echo ""
 	@echo "  install              Install Python dependencies"
 	@echo ""
-	@echo "  pipeline             Run pipeline for all days (incremental)"
+	@echo "  pipeline             Run pipeline for all days (incremental, PARALLEL=$(PARALLEL))"
 	@echo "  pipeline-date DATE=  Run pipeline for a single date"
 	@echo "  train                Build features + train model"
+	@echo "  learn                pipeline + train in one step"
 	@echo ""
 	@echo "  export               Upload GTFS + model to R2"
 	@echo "  deploy               Deploy Cloudflare Worker"
 	@echo "  release              export + deploy"
 	@echo ""
 	@echo "  push-feed            Push one TripUpdates snapshot to R2"
-	@echo "  serve-feed           Push to R2 every 30 s (live feed daemon)"
+	@echo "  serve-feed           Push to R2 every 15 s (live feed daemon)"
 	@echo "  smoke                Smoke-test the live worker feed"
 	@echo "  sanity               Check R2 collection health"
 	@echo "  validate-off-route   Validate off-route detection"

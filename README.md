@@ -11,7 +11,7 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
   Cloudflare R2 (Bronze)           raw/*.pb  — immutable protobuf snapshots
         │  run_pipeline.py
         ▼
-  data/labeled/YYYY-MM-DD.parquet  (Gold)    — stop-crossing events with actual arrivals
+  data/training/YYYY-MM-DD.parquet (Gold)    — snapshot-anchored rows with actual arrivals
         │  make train
         ▼
   models/eta_pipeline.joblib       HistGradientBoostingRegressor
@@ -26,7 +26,7 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
   Cloudflare Worker  →  consumers (apps, journey planners, …)
 ```
 
-**Cron reliability trick**: GitHub Actions scheduled triggers are unreliable on low-activity repos. Instead, a Cloudflare Worker cron fires every 5 minutes and dispatches the `push-feed.yml` GitHub Actions workflow, which pushes a fresh feed snapshot every 30 seconds for ~4 minutes.
+**Cron reliability trick**: GitHub Actions scheduled triggers are unreliable on low-activity repos. Instead, a Cloudflare Worker cron fires every 5 minutes and dispatches the `push-feed.yml` GitHub Actions workflow, which pushes a fresh feed snapshot every 15 seconds for ~4 minutes.
 
 ## Repository layout
 
@@ -37,7 +37,7 @@ worker/              Cloudflare Worker — JS feed passthrough + /health (wrangl
 tests/               Smoke tests against the live worker
 data/
   gtfs_static/       Local copy of GTFS static (stops, trips, shapes)
-  labeled/           Gold parquets — one per day, training input
+  training/          Gold parquets — one per day, training input
 models/              Trained sklearn pipeline (joblib)
 docs/
   collector_rules.md Data contract for R2 storage (medallion architecture)
@@ -60,15 +60,16 @@ cp .env.example .env   # fill in R2 credentials
 ## Common commands
 
 ```bash
-make pipeline            # process all days from R2 → labeled parquets (incremental)
+make pipeline            # process all days from R2 → training parquets (incremental, PARALLEL=4)
 make pipeline-date DATE=2026-06-01   # single date
-make train               # build features + train model from data/labeled/
+make train               # build features + train model from data/training/
+make learn               # pipeline + train in one step
 make export              # serialise GTFS + model, upload to R2
 make deploy              # deploy Cloudflare Worker
 make release             # export + deploy in one step
 
 make push-feed           # push one TripUpdates snapshot to R2 now
-make serve-feed          # push every 30 s (local daemon)
+make serve-feed          # push every 15 s (local daemon)
 make smoke               # smoke-test the live worker against the network
 make sanity              # check R2 collection health (snapshot counts, staleness)
 make check-gtfs          # verify GTFS static loading
@@ -96,7 +97,9 @@ wrangler secret put SENTRY_DSN    # optional — enables error reporting to Sent
 
 ## Model
 
-**Target**: `seconds_to_target` — inter-stop travel time from the vehicle's current position to each upcoming stop.
+**Target**: `seconds_to_arrival` — time from the snapshot to the actual arrival at each upcoming stop (direct multi-horizon, up to 10 stops ahead).
+
+Training examples are **snapshot-anchored**: every vehicle position snapshot yields one row per upcoming stop, so the model sees vehicles mid-segment and dwelling at stops — not only at stop crossings. This is what lets it predict ≈0 s when a bus is already at the stop.
 
 **Algorithm**: `sklearn.ensemble.HistGradientBoostingRegressor` wrapped in a `Pipeline` with `OrdinalEncoder` for `route_id`. The full pipeline is saved to `models/eta_pipeline.joblib` — a single file contains everything needed for inference.
 
@@ -106,25 +109,25 @@ wrangler secret put SENTRY_DSN    # optional — enables error reporting to Sent
 |---|---|
 | `route_id` | Route identifier (categorical) |
 | `stop_sequence` | Target stop index in the trip |
-| `prediction_stop_sequence` | Current stop (context) |
+| `stops_ahead` | Prediction horizon in stops (1 = next stop) |
 | `hour`, `day_of_week`, `month` | Temporal context |
 | `is_weekend`, `is_holiday` | Calendar flags (Ukrainian holidays) |
-| `current_delay_sec` | Observed delay at the prediction point |
-| `segment_distance_m` | Shape-projected distance to target stop |
-| `scheduled_segment_sec` | Schedule's own prediction (strong prior) |
+| `remaining_dist_m` | Shape distance from the vehicle's projected position to the target stop |
+| `sched_remaining_sec` | Schedule's expectation for that remaining distance (interpolated at the vehicle's position) |
+| `progress_speed_mps` | Observed speed over the last snapshot interval (−1 when unknown) |
 | `stops_remaining` | Stops left after the target |
 | `trip_progress_frac` | Position along route [0, 1] |
 
-**Baseline**: scheduled inter-stop time (`scheduled_segment_sec`). The model is evaluated against this baseline and must beat it on the held-out test set (last 20% of days by date).
+**Baseline**: scheduled remaining time (`sched_remaining_sec`). The model is evaluated against this baseline and must beat it on the held-out test set (last 20% of days by date).
 
 ## Inference & serving
 
 Inference runs in `scripts/push_feed.py` (the GitHub Actions push pipeline), using a compact, pure-Python re-implementation of GBT tree traversal (`src/inference.py`) — no sklearn or pandas at runtime.
 
-Per cycle (every ~30 s):
+Per cycle (every ~15 s):
 1. Fetch the current vehicle positions GTFS-RT feed from upstream.
-2. For each vehicle: project lat/lon to UTM, match to the best trip shape (off-route filter with hysteresis), find the current stop sequence.
-3. Build feature rows for the next ≤10 stops.
+2. For each vehicle: project lat/lon to UTM, match to the best trip shape (off-route filter with hysteresis), project the vehicle's exact position along the shape, and measure progress speed vs the previous cycle.
+3. Build feature rows for the next ≤10 stops, anchored at the vehicle's projected position.
 4. Run the serialised GBT model.
 5. Encode a GTFS-RT TripUpdates protobuf and upload it to R2.
 

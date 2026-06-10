@@ -11,7 +11,7 @@
  *
  * scheduled: fires every 5 minutes (wrangler.toml [triggers]) and dispatches
  *   the GitHub Actions push-feed workflow via the GitHub API.  The workflow runs
- *   for ~4 minutes pushing a fresh feed to R2 every 30 s — Cloudflare's cron is
+ *   for ~4 minutes pushing a fresh feed to R2 every 15 s — Cloudflare's cron is
  *   far more reliable than GitHub's own scheduled triggers on low-activity repos.
  *
  * This worker was originally a Python Worker (worker.py, git history).  Pyodide
@@ -40,7 +40,7 @@ const SENTRY_SERVICE_TAG = "gtfs-eta-worker";
 
 // /health is layered:
 //   1. The feed must be *fresh* — the push pipeline (Cloudflare cron → GitHub
-//      Actions → R2) republishes every ~30 s, 24/7.  A stale header timestamp
+//      Actions → R2) republishes every ~15 s, 24/7.  A stale header timestamp
 //      means the pipeline stalled.  Allows one missed 5-min cron cycle + slack.
 //   2. During working hours, stop 60 (busiest in Lviv) must also have at least
 //      one predicted arrival — the real end-to-end signal that inference is

@@ -48,29 +48,32 @@ def build_gtfs_worker_data(gtfs) -> dict:
     """
     Serialise GTFSStatic to a plain-dict format loadable without pyproj/pyproject.
 
-    The shapes are kept as shapely LineStrings (Pyodide has shapely).
-    Scheduled segment times (sched_sec_from_prev) are baked into stop_times.
+    Scheduled times are baked into stop_times as *cumulative* seconds since
+    the trip's first stop (sched_cum_sec), so inference can interpolate the
+    schedule at the vehicle's projected position — matching how
+    sched_remaining_sec is computed at training time (src/features.py).
     """
     print("Building worker GTFS data…")
 
-    # Trips: route_id, shape_id, stop_times with sched_sec_from_prev
+    from src.gtfs_static import _parse_gtfs_time
+    from datetime import date
+    base = date(2000, 1, 1)  # dummy date — only schedule deltas are used
+
+    # Trips: route_id, shape_id, stop_times with sched_cum_sec
     trip_index = {}
     for trip_id, info in gtfs._trip_index.items():
         stop_times = []
-        prev_sched = None
+        t0 = None
+        cum = 0.0
         for st in info.stop_times:
-            from src.gtfs_static import _parse_gtfs_time
-            from datetime import date
-            base = date(2000, 1, 1)  # dummy date — only care about delta
             t = _parse_gtfs_time(st.arrival_time or st.departure_time, base)
-            sched_sec_from_prev = 0.0
-            if prev_sched is not None and t is not None:
-                sched_sec_from_prev = max(0.0, (t - prev_sched).total_seconds())
-            prev_sched = t if t is not None else prev_sched
-
-            # Compact tuple (stop_id, stop_sequence, sched_sec_from_prev) —
-            # arrival_time is unused by the worker so we drop it here.
-            stop_times.append((st.stop_id, st.stop_sequence, sched_sec_from_prev))
+            if t is not None:
+                if t0 is None:
+                    t0 = t
+                cum = max(cum, (t - t0).total_seconds())
+            # Compact tuple (stop_id, stop_sequence, sched_cum_sec) —
+            # unparseable times carry the previous cumulative value.
+            stop_times.append((st.stop_id, st.stop_sequence, cum))
 
         trip_index[trip_id] = {
             "route_id": info.route_id,
@@ -114,18 +117,19 @@ def _extract_trees(pipeline) -> dict:
       trees         : list of list of 6-tuples
                       (feat_idx, threshold, left, right, is_leaf, value)
 
-    Feature vector order after ColumnTransformer (matches train.py):
+    Feature vector order after ColumnTransformer (matches FEATURE_COLS in
+    src/features.py — keep in sync with build_features in src/inference.py):
       0  route_id (encoded)
       1  stop_sequence
-      2  prediction_stop_sequence
+      2  stops_ahead
       3  hour
       4  day_of_week
       5  month
       6  is_weekend
       7  is_holiday
-      8  current_delay_sec
-      9  segment_distance_m
-      10 scheduled_segment_sec
+      8  remaining_dist_m
+      9  sched_remaining_sec
+      10 progress_speed_mps
       11 stops_remaining
       12 trip_progress_frac
     """

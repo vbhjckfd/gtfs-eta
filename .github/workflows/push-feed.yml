@@ -2,7 +2,7 @@ name: Push GTFS-RT feed
 
 on:
   schedule:
-    # Every 5 minutes (GitHub's minimum). The job runs an internal 30 s loop
+    # Every 5 minutes (GitHub's minimum). The job runs an internal 15 s loop
     # for ~4 min, so there is always a fresh process ready well before the
     # next trigger fires.
     - cron: '*/5 * * * *'
@@ -58,10 +58,12 @@ jobs:
       - name: Install dependencies
         run: pip install -e .
 
-      # Load GTFS + model from R2 once, push 8 times at 30 s intervals (~4 min).
-      # Resources stay in memory across pushes; only one R2 load per job.
-      - name: Push feed every 30 s
-        run: python scripts/push_feed.py --loop 30 --count 8
+      # Load GTFS + model from R2 once, push 16 times at 15 s intervals (~4 min).
+      # The loop is drift-free (the interval includes inference time), so the
+      # job finishes before the next cron trigger. Resources stay in memory
+      # across pushes; only one R2 load per job.
+      - name: Push feed every 15 s
+        run: python scripts/push_feed.py --loop 15 --count 16
         env:
           R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}

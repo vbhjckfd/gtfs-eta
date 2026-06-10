@@ -29,7 +29,7 @@ from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
 
 from src.baseline import compute_eta
-from src.features import FEATURE_COLS, compute_features_for_inference
+from src.features import FEATURE_COLS, SPEED_UNKNOWN, compute_features_for_inference
 from src.gtfs_static import GTFSStatic, _project_xy, get_gtfs
 from src.train import MODEL_PATH, load_model, predict as pipeline_predict
 from src.trip_inference import (
@@ -50,6 +50,9 @@ MAX_STOPS_AHEAD = 10
 # so the off-route state machine sees a real history of snapshots.
 _live_trackers: dict[str, VehicleRouteTracker] = {}
 _live_prev_trips: dict[str, str | None] = {}
+# vid → (epoch_sec, dist_along_m, trip_id, last_speed) from the previous call,
+# for the progress-speed feature (mirrors src/inference.py progress_speed).
+_live_positions: dict[str, tuple[float, float, str, float]] = {}
 
 
 def fetch_live_feed() -> gtfs_realtime_pb2.FeedMessage:
@@ -91,30 +94,40 @@ def parse_feed(feed: gtfs_realtime_pb2.FeedMessage) -> list[dict]:
     return vehicles
 
 
-def _current_stop_sequence(
+def _vehicle_dist_along(
     trip_id: str,
     lat: float,
     lon: float,
     gtfs: GTFSStatic,
-) -> tuple[int, float, float]:
-    """Return (last_passed_stop_sequence, current_delay_sec, vehicle_dist_along_shape_m)."""
+) -> float:
+    """Vehicle's projected distance (m) along the trip's shape."""
     from shapely.geometry import Point
     trip = gtfs.get_trip(trip_id)
     if trip is None:
-        return 0, 0.0, 0.0
+        return 0.0
     shape = gtfs.get_shape_linestring(trip.shape_id)
     if shape is None:
-        return 0, 0.0, 0.0
-
+        return 0.0
     vx, vy = _project_xy(lon, lat)
-    vehicle_dist = shape.project(Point(vx, vy))
+    return shape.project(Point(vx, vy))
 
-    last_seq = 0
-    for st in trip.stop_times:
-        d = gtfs.get_stop_distance_along_shape(trip.shape_id, st.stop_id) or 0.0
-        if d <= vehicle_dist:
-            last_seq = st.stop_sequence
-    return last_seq, 0.0, vehicle_dist
+
+def _progress_speed(vid: str, trip_id: str, v_dist: float, ts_sec: float) -> float:
+    """Speed (m/s) vs the previous call's projection; SPEED_UNKNOWN without
+    usable history (mirrors src/inference.py progress_speed)."""
+    prev = _live_positions.get(vid)
+    # Same snapshot re-served (dt ≈ 0): keep the anchor and last measurement
+    if prev is not None and prev[2] == trip_id and ts_sec - prev[0] < 3.0:
+        return prev[3]
+    speed = SPEED_UNKNOWN
+    if prev is not None:
+        prev_ts, prev_dist, prev_trip, _ = prev
+        dt = ts_sec - prev_ts
+        dd = v_dist - prev_dist
+        if prev_trip == trip_id and 3.0 <= dt <= 120.0 and dd >= -30.0:
+            speed = max(0.0, dd) / dt
+    _live_positions[vid] = (ts_sec, v_dist, trip_id, speed)
+    return speed
 
 
 def _check_off_route(
@@ -245,21 +258,19 @@ def predict_all(
             continue
 
         # --- ETA computation ---
-        current_seq, current_delay, vehicle_dist = _current_stop_sequence(trip_id, float(lat), float(lon), gtfs)
+        vehicle_dist = _vehicle_dist_along(trip_id, float(lat), float(lon), gtfs)
+        speed = _progress_speed(vid, trip_id, vehicle_dist, pd.Timestamp(ts).timestamp())
 
         if model is not None:
             feat_df = compute_features_for_inference(
-                vehicle_id=vid,
                 trip_id=trip_id,
-                current_stop_sequence=current_seq,
-                current_delay_sec=current_delay,
+                vehicle_dist_m=vehicle_dist,
                 snapshot_time=ts,
-                recent_speed_mps=float(v["speed"]) if v.get("speed") is not None else None,
-                vehicle_dist_along_shape=vehicle_dist,
+                progress_speed_mps=speed,
                 gtfs=gtfs,
+                max_stops_ahead=MAX_STOPS_AHEAD,
             )
             if not feat_df.empty:
-                feat_df = feat_df.head(MAX_STOPS_AHEAD)
                 preds_sec = pipeline_predict(model, feat_df[FEATURE_COLS])
                 snap_ts = pd.Timestamp(ts)
                 base["predictions"] = [
@@ -295,6 +306,7 @@ def reset_live_state() -> None:
     """Clear persistent tracker state — useful for testing."""
     _live_trackers.clear()
     _live_prev_trips.clear()
+    _live_positions.clear()
 
 
 if __name__ == "__main__":

@@ -6,7 +6,12 @@ For each (vehicle_id, inferred_trip_id) trajectory:
   2. Detect when the vehicle passes each scheduled stop.
   3. Record the actual passing timestamp.
 
-Output: long-format DataFrame with actual arrival times per stop.
+Two outputs:
+  build_labels        — arrival events per stop (one row per stop crossing).
+  build_training_rows — snapshot-anchored examples: one row per
+                        (snapshot, upcoming stop) pair, so the model sees the
+                        vehicle at every point along a segment (including
+                        sitting right at a stop), not only at stop crossings.
 """
 
 from __future__ import annotations
@@ -170,6 +175,188 @@ def label_trajectory(
         return None
 
     return pd.DataFrame(rows)
+
+
+# Snapshot-anchored training rows ------------------------------------------
+
+MAX_STOPS_AHEAD = 10
+
+# Progress speed is only trusted when the gap between consecutive snapshots is
+# sane; otherwise the row gets SPEED_UNKNOWN and the model treats it as its
+# own category (no NaN handling needed in the exported pure-Python trees).
+SPEED_UNKNOWN = -1.0
+_SPEED_MIN_GAP_SEC = 3.0
+_SPEED_MAX_GAP_SEC = 120.0
+_SPEED_MAX_BACKWARD_M = 30.0  # projection jitter tolerance
+
+MAX_HORIZON_SEC = 3600.0
+
+
+def _progress_speeds(dists: np.ndarray, times_sec: np.ndarray) -> np.ndarray:
+    """Per-snapshot speed (m/s) from consecutive shape projections."""
+    speeds = np.full(len(dists), SPEED_UNKNOWN)
+    for i in range(1, len(dists)):
+        dt = times_sec[i] - times_sec[i - 1]
+        dd = dists[i] - dists[i - 1]
+        if not (_SPEED_MIN_GAP_SEC <= dt <= _SPEED_MAX_GAP_SEC):
+            continue
+        if dd < -_SPEED_MAX_BACKWARD_M:
+            continue  # projection glitch (jumped backwards) — don't trust
+        speeds[i] = max(0.0, dd) / dt
+    return speeds
+
+
+def training_rows_for_trajectory(
+    vehicle_id: str,
+    trip_id: str,
+    traj: pd.DataFrame,
+    gtfs: GTFSStatic,
+    max_stops_ahead: int = MAX_STOPS_AHEAD,
+) -> pd.DataFrame | None:
+    """
+    Snapshot-anchored rows for one (vehicle, trip) trajectory.
+
+    For every snapshot, emit one row per upcoming stop (up to max_stops_ahead)
+    with the observed arrival time at that stop as the target. This matches
+    the live-serving question exactly: "given the vehicle *here*, when does it
+    reach stop S?" — including remaining distances near zero.
+    """
+    trip = gtfs.get_trip(trip_id)
+    if trip is None:
+        return None
+
+    shape = gtfs.get_shape_linestring(trip.shape_id)
+    if shape is None:
+        return None
+
+    if traj.empty or traj["lat"].isna().all():
+        return None
+
+    traj = traj.copy()
+    if "off_route" in traj.columns:
+        traj = traj[~traj["off_route"]].copy()
+        if traj.empty:
+            return None
+
+    traj["dist_along"] = _project_vehicle_positions(traj, shape)
+    traj = traj.dropna(subset=["dist_along"]).sort_values("timestamp")
+    if traj.empty:
+        return None
+
+    # Stop distances along the shape
+    stop_dists: list[tuple[str, int, float]] = []
+    base_date = traj["timestamp"].iloc[0].date()
+    for st in trip.stop_times:
+        d = gtfs.get_stop_distance_along_shape(trip.shape_id, st.stop_id)
+        if d is None:
+            stop_info = gtfs.get_stop(st.stop_id)
+            if stop_info is None:
+                continue
+            d = shape.project(Point(stop_info.x, stop_info.y))
+        stop_dists.append((st.stop_id, st.stop_sequence, d))
+
+    crossings = _detect_stop_crossings(traj, "dist_along", stop_dists)
+    if not crossings:
+        return None
+
+    # Stops that were actually reached, ordered by distance along the shape
+    arrived = [
+        (sd[0], sd[1], sd[2], c["actual_arrival"])
+        for sd, c in zip(stop_dists, crossings)
+        if c["actual_arrival"] is not None
+    ]
+    arrived.sort(key=lambda t: t[2])
+    if not arrived:
+        return None
+
+    n_stops_total = len(trip.stop_times)
+    seq_to_index = {st.stop_sequence: i for i, st in enumerate(trip.stop_times)}
+
+    dists = traj["dist_along"].to_numpy(dtype=float)
+    times = traj["timestamp"].to_numpy()
+    times_sec = np.array([pd.Timestamp(t).timestamp() for t in times])
+    speeds = _progress_speeds(dists, times_sec)
+    arr_dists = np.array([a[2] for a in arrived])
+
+    rows = []
+    for i in range(len(traj)):
+        d_vehicle = dists[i]
+        t_vehicle = times_sec[i]
+        # Upcoming = stops strictly ahead of the vehicle's projected position
+        start = int(np.searchsorted(arr_dists, d_vehicle, side="right"))
+        emitted = 0
+        for stop_id, stop_seq, stop_dist, arrival in arrived[start:]:
+            if emitted >= max_stops_ahead:
+                break
+            seconds_to_arrival = arrival.timestamp() - t_vehicle
+            if seconds_to_arrival < 0:
+                continue  # already passed in time despite distance jitter
+            if seconds_to_arrival > MAX_HORIZON_SEC:
+                break
+            emitted += 1
+            rows.append({
+                "vehicle_id": vehicle_id,
+                "trip_id": trip_id,
+                "route_id": trip.route_id,
+                "date": base_date,
+                "snapshot_ts": datetime.fromtimestamp(t_vehicle, tz=timezone.utc),
+                "dist_along_m": d_vehicle,
+                "progress_speed_mps": speeds[i],
+                "stop_id": stop_id,
+                "stop_sequence": stop_seq,
+                "stop_dist_along_m": stop_dist,
+                "stops_ahead": emitted,
+                "stops_remaining": n_stops_total - 1 - seq_to_index.get(stop_seq, 0),
+                "actual_arrival": arrival,
+                "seconds_to_arrival": seconds_to_arrival,
+            })
+
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
+def build_training_rows(
+    df: pd.DataFrame,
+    gtfs: GTFSStatic,
+    trip_col: str = "inferred_trip_id",
+    max_stops_ahead: int = MAX_STOPS_AHEAD,
+) -> pd.DataFrame:
+    """
+    Build the snapshot-anchored training dataset from a snapshot DataFrame.
+
+    Input: snapshot df with columns vehicle_id, trip_id / inferred_trip_id,
+           lat, lon, timestamp (and optionally off_route).
+
+    Output: one row per (snapshot, upcoming stop) — see
+    training_rows_for_trajectory for the schema.
+    """
+    if "off_route" in df.columns:
+        df = df[~df["off_route"]].copy()
+
+    groups = df.groupby(["vehicle_id", trip_col], sort=False)
+    pieces: list[pd.DataFrame] = []
+
+    for (vehicle_id, trip_id), traj in groups:
+        if not trip_id or pd.isna(trip_id):
+            continue
+        result = training_rows_for_trajectory(
+            vehicle_id=str(vehicle_id),
+            trip_id=str(trip_id),
+            traj=traj.sort_values("timestamp"),
+            gtfs=gtfs,
+            max_stops_ahead=max_stops_ahead,
+        )
+        if result is not None:
+            pieces.append(result)
+
+    if not pieces:
+        return pd.DataFrame()
+
+    out = pd.concat(pieces, ignore_index=True)
+    out.sort_values(["date", "trip_id", "snapshot_ts", "stop_sequence"],
+                    inplace=True, ignore_index=True)
+    return out
 
 
 def build_labels(

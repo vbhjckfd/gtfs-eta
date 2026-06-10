@@ -13,7 +13,7 @@ free-plan 10 ms CPU budget.
 
 Usage:
     python scripts/push_feed.py              # push once and exit
-    python scripts/push_feed.py --loop 30   # push every 30 seconds
+    python scripts/push_feed.py --loop 15   # push every 15 seconds
 
 Environment (read from .env):
     R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
@@ -64,7 +64,7 @@ REQUEST_TIMEOUT = 20
 # never publish ETAs computed off badly stale positions.
 #
 # This daemon is a single long-lived process (`python scripts/push_feed.py
-# --loop 30`), so a module-level cache lives for the whole run and is shared
+# --loop 15`), so a module-level cache lives for the whole run and is shared
 # across iterations — exactly what we want. (The Cloudflare Worker in
 # worker/worker.py can't rely on module state this way, since its isolates are
 # ephemeral — but it only reads a pre-computed blob from R2; the upstream fetch
@@ -226,7 +226,8 @@ def main() -> None:
         while True:
             # A single failed iteration (inference bug, transient R2 error) is
             # reported to Sentry but must not kill the daemon — the next cycle
-            # 30 s later usually recovers, keeping the feed fresh.
+            # usually recovers, keeping the feed fresh.
+            iter_start = time.monotonic()
             try:
                 _push_once(client, gtfs_data, model_data, trackers)
             except Exception as exc:  # noqa: BLE001 — daemon must stay alive
@@ -235,7 +236,11 @@ def main() -> None:
             n += 1
             if args.count and n >= args.count:
                 break
-            time.sleep(args.loop)
+            # Drift-free cadence: the interval covers fetch+inference+upload,
+            # so N pushes take ~N×loop seconds (keeps the CI job inside its
+            # 5-minute cron window).
+            elapsed = time.monotonic() - iter_start
+            time.sleep(max(0.0, args.loop - elapsed))
     else:
         # One-shot mode: report, then re-raise so the exit code reflects failure.
         try:

@@ -26,7 +26,7 @@ gtfs-lviv/
   _meta/      collector_health.json              # last run, counts, last feed_ts
 ```
 
-`data/labeled/YYYY-MM-DD.parquet` (Gold) is produced locally by the pipeline and
+`data/training/YYYY-MM-DD.parquet` (Gold) is produced locally by the pipeline and
 is out of scope for the collector.
 
 ---
