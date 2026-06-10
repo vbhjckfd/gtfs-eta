@@ -1,10 +1,6 @@
 name = "gtfs-eta"
-main = "worker.py"
-compatibility_date = "2024-12-01"
-compatibility_flags = ["python_workers"]
-
-[python_modules]
-excludes = [".venv/**", ".venv-workers/**"]
+main = "worker.js"
+compatibility_date = "2026-06-01"
 
 [[r2_buckets]]
 binding = "R2"

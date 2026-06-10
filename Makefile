@@ -29,9 +29,9 @@ train:
 export:
 	python scripts/export_worker_data.py
 
-## Deploy the Cloudflare Worker (requires uv + workers-py, Node >=18)
+## Deploy the Cloudflare Worker (requires Node >=22)
 deploy:
-	cd worker && bash -c 'source ~/.nvm/nvm.sh && nvm use 24 && uvx --from workers-py pywrangler deploy'
+	cd worker && bash -c 'source ~/.nvm/nvm.sh && nvm use 24 && npx wrangler deploy'
 
 ## Export then deploy in one step
 release: export deploy
