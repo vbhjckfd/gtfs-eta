@@ -17,11 +17,11 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
   models/eta_pipeline.joblib       HistGradientBoostingRegressor
         │  make export
         ▼
-  R2: gtfs-data.msgpack + model    compact format for Pyodide
+  R2: worker/*.pkl                 compact GTFS + model for inference
         │  push_feed.py (GitHub Actions, every 5 min)
         ▼
   R2: feed/trip_updates.pb         pre-computed GTFS-RT TripUpdates
-        │  on_fetch
+        │  GET /
         ▼
   Cloudflare Worker  →  consumers (apps, journey planners, …)
 ```
@@ -33,7 +33,7 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
 ```
 src/                 Python library (features, labeling, training, inference)
 scripts/             Pipeline and operational scripts
-worker/              Cloudflare Python Worker (wrangler)
+worker/              Cloudflare Worker — JS feed passthrough + /health (wrangler)
 tests/               Smoke tests against the live worker
 data/
   gtfs_static/       Local copy of GTFS static (stops, trips, shapes)
@@ -46,7 +46,7 @@ docs/
 ## Requirements
 
 - Python ≥ 3.11
-- Node ≥ 18 (for `wrangler deploy`)
+- Node ≥ 22 (for `wrangler deploy`)
 - Cloudflare account with R2 enabled
 - `.env` populated from `.env.example`
 
@@ -91,6 +91,7 @@ The worker also requires a Cloudflare secret:
 
 ```bash
 wrangler secret put GITHUB_TOKEN   # PAT with workflow scope
+wrangler secret put SENTRY_DSN    # optional — enables error reporting to Sentry
 ```
 
 ## Model
@@ -116,16 +117,23 @@ wrangler secret put GITHUB_TOKEN   # PAT with workflow scope
 
 **Baseline**: scheduled inter-stop time (`scheduled_segment_sec`). The model is evaluated against this baseline and must beat it on the held-out test set (last 20% of days by date).
 
-## Worker inference
+## Inference & serving
 
-The `worker/` directory is a Cloudflare Python Worker that runs inside Pyodide. It uses a compact, pure-Python re-implementation of GBT tree traversal (`src/inference.py`) — no sklearn or pandas at runtime.
+Inference runs in `scripts/push_feed.py` (the GitHub Actions push pipeline), using a compact, pure-Python re-implementation of GBT tree traversal (`src/inference.py`) — no sklearn or pandas at runtime.
 
-Per request:
-1. Fetch the current vehicle positions GTFS-RT feed from R2.
+Per cycle (every ~30 s):
+1. Fetch the current vehicle positions GTFS-RT feed from upstream.
 2. For each vehicle: project lat/lon to UTM, match to the best trip shape (off-route filter with hysteresis), find the current stop sequence.
 3. Build feature rows for the next ≤10 stops.
 4. Run the serialised GBT model.
-5. Encode and return a GTFS-RT TripUpdates protobuf.
+5. Encode a GTFS-RT TripUpdates protobuf and upload it to R2.
+
+The `worker/` directory is a plain JS Cloudflare Worker that serves the pre-computed feed — no inference CPU at request time:
+- `GET /` — streams `feed/trip_updates.pb` from R2.
+- `GET /health` — parses the feed (hand-rolled protobuf wire walk, no deps) and returns 200/503 based on header freshness and, during working hours, predicted arrivals at stop 60.
+- cron (every 5 min) — dispatches `push-feed.yml` (see the cron reliability trick above).
+
+It was originally a Python Worker; Pyodide isolates intermittently entered a poisoned state where every request failed in ~2 ms before handler code ran (`scriptThrewException` storms), so it was rewritten in JS.
 
 ## R2 storage layout (medallion)
 
@@ -136,9 +144,9 @@ gtfs-lviv/
   static/     <feedVersion>/static.zip         # Versioned GTFS static
   static/     index.json                       # day → feedVersion mapping
   _meta/      collector_health.json            # collection health counters
-  feed/       trip_updates.pb                  # served by the worker on_fetch
-  gtfs-data.msgpack                            # compact GTFS for the worker
-  model.msgpack                                # serialised GBT for the worker
+  feed/       trip_updates.pb                  # pre-computed feed served by the worker
+  worker/     gtfs_worker_data.pkl             # compact GTFS for push_feed.py inference
+  worker/     eta_pipeline.pkl                 # serialised GBT for push_feed.py inference
 ```
 
 See [docs/collector_rules.md](docs/collector_rules.md) for the full data contract.

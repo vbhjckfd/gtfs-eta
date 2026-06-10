@@ -20,7 +20,7 @@ from google.transit import gtfs_realtime_pb2
 # e.g. "29734_3_1".  Any other format means our inference produced garbage.
 _LVIV_TRIP_ID_RE = re.compile(r"^\d+_\d+_\d+$")
 
-# Worker caps upcoming stops per trip (worker.py: MAX_STOPS_AHEAD).
+# Worker caps upcoming stops per trip (src/predict.py: MAX_STOPS_AHEAD).
 MAX_STOPS_AHEAD = 10
 # Feed header timestamp must be fresh — upstream vehicle positions are
 # republished every few seconds; allow generous slack for clock skew / caching.
@@ -28,7 +28,7 @@ MAX_FEED_AGE_SEC = 15 * 60
 
 # Stop sign-code 60 (Захисників України) → internal GTFS stop_id 4577.
 HEALTH_CHECK_STOP_ID = "4577"
-# Working-hours window for the arrivals check (mirrors worker.py WORKING_HOURS_UTC).
+# Working-hours window for the arrivals check (mirrors worker/worker.js WORKING_HOURS_UTC).
 # Lviv transit doesn't run overnight, so 0 arrivals off-hours is healthy, not a
 # regression. Expressed in UTC: 05:00–18:00 UTC ≈ 07:00–21:00 Lviv in both DST
 # states — unambiguously inside the service day. Outside it, the arrivals
@@ -88,7 +88,7 @@ def test_feed_has_entities(worker_feed):
     # feed is valid protobuf but usually means inference produced nothing —
     # worth a loud failure so we notice silent breakage. Overnight, though,
     # transit isn't running and an empty feed is expected, so only assert
-    # during working hours (mirrors worker.py /health).
+    # during working hours (mirrors worker/worker.js /health).
     if not _within_working_hours():
         pytest.skip(
             f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
@@ -191,7 +191,7 @@ def test_vehicle_coverage(worker_feed, vehicle_positions_feed):
 
     Only asserted during working hours: as service winds down overnight, few
     vehicles run and matching is sparse, so coverage legitimately drops below
-    50% on a perfectly healthy feed (mirrors worker.py /health and the other
+    50% on a perfectly healthy feed (mirrors worker/worker.js /health and the other
     coverage tests in this file).
     """
     if not _within_working_hours():
@@ -245,7 +245,7 @@ def test_stop_60_has_arrivals(worker_feed):
     maps to internal stop_id 4577 (stops.txt: stop_code=60, stop_id=4577).
 
     Only asserted during working hours: overnight Lviv transit isn't running,
-    so 0 arrivals is healthy, not a regression (mirrors worker.py /health).
+    so 0 arrivals is healthy, not a regression (mirrors worker/worker.js /health).
     """
     if not _within_working_hours():
         pytest.skip(
@@ -274,7 +274,7 @@ def test_parity_with_reference(worker_feed, reference_feed):
     share of the same trips and never balloon to an absurd size.
 
     Only meaningful during working hours: overnight both feeds are empty
-    (transit isn't running), so there's nothing to compare (mirrors worker.py).
+    (transit isn't running), so there's nothing to compare (mirrors worker/worker.js).
     """
     if not _within_working_hours():
         pytest.skip(
