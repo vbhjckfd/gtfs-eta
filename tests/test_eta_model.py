@@ -321,6 +321,56 @@ class TestCompactInference:
 
 
 # ---------------------------------------------------------------------------
+# Exported-tree parity with sklearn
+# ---------------------------------------------------------------------------
+
+class TestTreeExportParity:
+    def test_predict_rows_matches_sklearn_predict(self):
+        """The compact tree traversal must reproduce sklearn's predict exactly.
+
+        Regression: HistGradientBoosting leaf values already include the
+        learning rate (shrinkage is applied at fit time); multiplying by it
+        again during traversal collapsed every prediction to ≈ baseline.
+        """
+        import os
+        # export_worker_data reads R2 credentials at import time
+        for var in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
+            os.environ.setdefault(var, "test-dummy")
+        from scripts.export_worker_data import _extract_trees
+        from src.inference import predict_rows
+        from src.train import _build_pipeline
+
+        rng = np.random.default_rng(42)
+        n = 2000
+        df = pd.DataFrame({
+            "route_id": rng.choice(["10", "25", "117"], n),
+            "stop_sequence": rng.integers(1, 60, n),
+            "stops_ahead": rng.integers(1, 11, n),
+            "hour": rng.integers(5, 23, n),
+            "day_of_week": rng.integers(0, 7, n),
+            "month": rng.integers(1, 13, n),
+            "is_weekend": rng.integers(0, 2, n),
+            "is_holiday": np.zeros(n, dtype=int),
+            "remaining_dist_m": rng.uniform(0, 5000, n),
+            "sched_remaining_sec": rng.uniform(0, 1200, n),
+            "progress_speed_mps": rng.uniform(-1, 15, n),
+            "stops_remaining": rng.integers(1, 40, n),
+            "trip_progress_frac": rng.uniform(0, 1, n),
+        })
+        y = (df["remaining_dist_m"] / 6.0 + rng.normal(0, 10, n)).clip(0)
+
+        pipeline = _build_pipeline()
+        pipeline.set_params(model__max_iter=25, model__early_stopping=False)
+        pipeline.fit(df[FEATURE_COLS], y)
+
+        tree_data = _extract_trees(pipeline)
+        sample = df[FEATURE_COLS].head(100)
+        compact = predict_rows(tree_data, sample.values.tolist())
+        expected = pipeline.predict(sample)
+        np.testing.assert_allclose(compact, expected, rtol=1e-9, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # Schedule interpolation helper
 # ---------------------------------------------------------------------------
 

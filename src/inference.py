@@ -150,7 +150,6 @@ def _traverse_tree(nodes, feat):
 def predict_rows(model_data: dict, rows: list) -> list:
     route_to_int = model_data["route_to_int"]
     baseline     = model_data["baseline"]
-    lr           = model_data["learning_rate"]
     trees        = model_data["trees"]
     preds = []
     for row in rows:
@@ -158,7 +157,9 @@ def predict_rows(model_data: dict, rows: list) -> list:
         feat = [route_int] + [float(v) for v in row[1:]]
         total = baseline
         for tree_nodes in trees:
-            total += lr * _traverse_tree(tree_nodes, feat)
+            # HistGradientBoosting leaf values already include the learning
+            # rate (shrinkage is applied at fit time), so they are summed raw.
+            total += _traverse_tree(tree_nodes, feat)
         preds.append(total)
     return preds
 
