@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import subprocess
 import sys
 import time
 
@@ -75,6 +76,28 @@ STALE_MAX_AGE_MS = 3 * 60 * 1000
 _vp_cache: dict | None = None
 
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+
+
+def _git_commit() -> str:
+    """Short commit of the inference code producing this feed.
+
+    GitHub Actions exposes GITHUB_SHA; local runs fall back to git. Stamped on
+    the R2 feed object so the worker's /health can report which revision the
+    live predictions came from.
+    """
+    commit = os.environ.get("GITHUB_SHA", "")
+    if not commit:
+        try:
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except Exception:  # noqa: BLE001 — version stamp must never break a push
+            commit = ""
+    return commit[:7] or "unknown"
+
+
+FEED_COMMIT = _git_commit()
 
 
 def __reset_cache() -> None:
@@ -195,6 +218,7 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
         Key=FEED_KEY,
         Body=result,
         ContentType="application/x-protobuf",
+        Metadata={"commit": FEED_COMMIT},
     )
     elapsed = (time.monotonic() - t0) * 1000
     print(f"Pushed {len(result):,} B → R2:{FEED_KEY}  ({elapsed:.0f} ms)", flush=True)

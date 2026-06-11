@@ -38,7 +38,8 @@ export:
 
 ## Deploy the Cloudflare Worker (requires Node >=22)
 deploy:
-	cd worker && bash -c 'source ~/.nvm/nvm.sh && nvm use 24 && npx wrangler deploy'
+	cd worker && bash -c 'source ~/.nvm/nvm.sh && nvm use 24 && \
+		npx wrangler deploy --var GIT_COMMIT:$$(git rev-parse --short HEAD)'
 
 ## Export then deploy in one step
 release: export deploy

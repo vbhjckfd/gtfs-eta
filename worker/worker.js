@@ -254,10 +254,16 @@ function jsonResponse(payload, status) {
 }
 
 async function handleHealth(env) {
+  // worker_commit: this worker's revision (injected by `make deploy`).
+  // feed_commit: revision of the push daemon that produced the feed blob
+  // (stamped as R2 object metadata) — the one that matters for predictions.
+  const versions = { worker_commit: env.GIT_COMMIT ?? null, feed_commit: null };
+
   const obj = await env.R2.get(env.FEED_KEY ?? FEED_KEY);
   if (obj === null) {
-    return jsonResponse({ status: "error", detail: "feed not in R2" }, 503);
+    return jsonResponse({ status: "error", detail: "feed not in R2", ...versions }, 503);
   }
+  versions.feed_commit = obj.customMetadata?.commit ?? null;
 
   const data = new Uint8Array(await obj.arrayBuffer());
   const { timestamp, entities, arrivals } = parseFeedStats(data, HEALTH_CHECK_STOP_ID);
@@ -273,6 +279,7 @@ async function handleHealth(env) {
       max_age_sec: MAX_FEED_AGE_SEC,
       entities,
       detail: "feed not fresh — push pipeline may be stalled",
+      ...versions,
     }, 503);
   }
 
@@ -293,6 +300,7 @@ async function handleHealth(env) {
       detail:
         "no predicted arrivals for stop 60 during working hours — " +
         "inference may be stalled",
+      ...versions,
     }, 503);
   }
 
@@ -305,6 +313,7 @@ async function handleHealth(env) {
     stop_id: HEALTH_CHECK_STOP_ID,
     arrivals,
     working_hours: workingHours,
+    ...versions,
   }, 200);
 }
 
