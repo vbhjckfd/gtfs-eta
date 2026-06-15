@@ -28,6 +28,12 @@ dev = [
     "matplotlib>=3.8",
     "seaborn>=0.13",
 ]
+# AI quality-diagnosis layer (score-quality.yml). Kept out of the base deps so
+# the per-15s push-feed job doesn't pull the Anthropic SDK it never uses.
+ai = [
+    "anthropic>=0.69",
+    "pydantic>=2.6",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

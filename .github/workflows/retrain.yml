@@ -1,0 +1,54 @@
+name: Retrain model
+
+# Regenerates the training data, retrains the model, and exports the fresh
+# artifacts to R2. Triggered manually, or automatically by the quality gate in
+# scripts/score_quality.py (src/gate.py) when rolling MAE/coverage breaches its
+# threshold — the "auto-retrain" half of the feedback loop.
+#
+# NB: this does NOT redeploy the worker. The worker is a passthrough; push_feed.py
+# reloads `worker/eta_pipeline.pkl` from R2 on its next run, so `make export`
+# alone is enough to put the new model live — no Cloudflare deploy creds needed.
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why this retrain was triggered'
+        required: false
+        default: 'manual'
+
+concurrency:
+  group: retrain
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # full pipeline over ~a month of snapshots + training
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Show trigger reason
+        run: echo "Retrain reason — ${{ github.event.inputs.reason }}"
+
+      # PARALLEL=2 keeps the pipeline within the runner's ~7 GB (each day-worker
+      # peaks ~2 GB). learn = pipeline + train; export uploads both pkls to R2.
+      - name: Learn + export to R2
+        run: |
+          make learn PARALLEL=2
+          make export
+        env:
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET:            gtfs-lviv
+          SENTRY_DSN:           ${{ secrets.SENTRY_DSN }}
+          SENTRY_RELEASE:       ${{ github.sha }}

@@ -1,0 +1,232 @@
+"""
+AI diagnosis of the daily ETA-quality report (step 4 of the feedback loop).
+
+Feeds the scored metrics + worst-case exemplars to Claude (claude-opus-4-8) and
+asks for a structured, ranked diagnosis — each finding tied to a concrete model
+lever (a feature, a hyperparameter, the off-route filter, schedule drift, …) —
+then upserts a single GitHub issue so findings accumulate in one place instead
+of one issue per day.
+
+Both stages degrade gracefully: no ANTHROPIC_API_KEY → skip the LLM call; no
+GitHub token/repo → skip the issue. Scoring + publication (score_quality.py)
+never depends on either succeeding.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Literal
+
+import requests
+
+MODEL = "claude-opus-4-8"
+ISSUE_TITLE = "📉 Live ETA quality — automated diagnosis"
+ISSUE_LABEL = "eta-quality"
+
+# The model's job is to map error patterns to fixes; keep the response bounded.
+_MAX_TOKENS = 8000
+_HTTP_TIMEOUT = 30
+
+
+# --------------------------------------------------------------------------
+# LLM diagnosis
+# --------------------------------------------------------------------------
+
+def _build_prompt(report: dict) -> str:
+    """A compact, fully-contextualised prompt — metrics + system background."""
+    metrics = {
+        k: report.get(k)
+        for k in (
+            "date", "n_predictions_scored", "n_actual_arrivals", "coverage_frac",
+            "overall", "by_lead_bucket", "by_hour", "by_stops_ahead",
+            "arriving_now", "worst_routes",
+        )
+    }
+    return (
+        "You are diagnosing the live accuracy of a GTFS-RT arrival-time prediction "
+        "feed for Lviv, Ukraine public transport. A gradient-boosted model "
+        "(sklearn HistGradientBoostingRegressor) predicts seconds-to-arrival per "
+        "upcoming stop, anchored at each vehicle position snapshot. Features: "
+        "route_id, stop_sequence, stops_ahead, hour, day_of_week, month, "
+        "is_weekend, is_holiday, remaining_dist_m, sched_remaining_sec, "
+        "progress_speed_mps, stops_remaining, trip_progress_frac. The baseline it "
+        "must beat is the schedule's own remaining time.\n\n"
+        "Below is one day of scored quality, joining what the feed *predicted* "
+        "against what *actually* happened (derived from raw vehicle positions). "
+        "error_sec is signed: positive = predicted arrival LATER than reality "
+        "(pessimistic); negative = predicted EARLIER (optimistic). lead buckets are "
+        "the horizon the rider saw. coverage_frac is the share of real arrivals "
+        "that received any prediction.\n\n"
+        f"{json.dumps(metrics, indent=2, default=str)}\n\n"
+        "Diagnose the most actionable problems. For each finding: tie it to a "
+        "specific lever (a named feature, a hyperparameter, the off-route/"
+        "trip-matching filter, schedule drift, an infra/coverage gap, or training "
+        "data), give a concrete hypothesis for the cause, and a specific suggested "
+        "change. Rank by impact. Do not invent metrics not present above; if the "
+        "data is insufficient for a confident call, say so and lower confidence. "
+        "Recommend a retrain only for systemic degradation a retrain would plausibly "
+        "fix (drift, broad bias), not for a single route or hour."
+    )
+
+
+def diagnose(report: dict) -> dict | None:
+    """Return a structured diagnosis dict, or None if unavailable/failed."""
+    if report.get("status") != "ok":
+        return None
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("  [diagnose] ANTHROPIC_API_KEY not set — skipping AI diagnosis", flush=True)
+        return None
+
+    try:
+        import anthropic
+        from pydantic import BaseModel, Field
+    except ImportError:
+        print("  [diagnose] anthropic/pydantic not installed (pip install -e '.[ai]')", flush=True)
+        return None
+
+    class Finding(BaseModel):
+        title: str = Field(description="One-line summary of the problem")
+        severity: Literal["low", "medium", "high"]
+        lever: Literal[
+            "feature", "hyperparameter", "training-data",
+            "off-route", "infra", "schedule-drift", "other",
+        ]
+        hypothesis: str = Field(description="Likely cause, grounded in the metrics")
+        suggested_action: str = Field(description="A specific, concrete change")
+        confidence: Literal["low", "medium", "high"]
+
+    class Diagnosis(BaseModel):
+        summary: str = Field(description="2-3 sentence overall read of the day")
+        findings: list[Finding]
+        recommend_retrain: bool
+        retrain_reason: str
+
+    client = anthropic.Anthropic()
+    try:
+        resp = client.messages.parse(
+            model=MODEL,
+            max_tokens=_MAX_TOKENS,
+            thinking={"type": "adaptive"},
+            messages=[{"role": "user", "content": _build_prompt(report)}],
+            output_format=Diagnosis,
+        )
+    except Exception as exc:  # never let a model/API hiccup fail the job
+        print(f"  [diagnose] Claude call failed: {exc}", flush=True)
+        return None
+
+    if resp.stop_reason == "refusal" or resp.parsed_output is None:
+        print(f"  [diagnose] no structured output (stop_reason={resp.stop_reason})", flush=True)
+        return None
+
+    return resp.parsed_output.model_dump()
+
+
+# --------------------------------------------------------------------------
+# GitHub issue upsert
+# --------------------------------------------------------------------------
+
+def _render_issue_body(diagnosis: dict, report: dict) -> str:
+    o = report.get("overall") or {}
+    lines = [
+        f"_Automated daily diagnosis — latest run scored **{report.get('date')}**._",
+        "",
+        f"**{diagnosis.get('summary', '').strip()}**",
+        "",
+        f"- MAE **{o.get('mae_sec')}s** · median **{o.get('median_ae_sec')}s** · "
+        f"bias **{o.get('bias_sec'):+}s** · coverage **{report.get('coverage_frac', 0):.0%}** "
+        f"({report.get('n_predictions_scored', 0):,} predictions)",
+    ]
+    if diagnosis.get("recommend_retrain"):
+        lines.append(f"- ⚠️ **Retrain recommended:** {diagnosis.get('retrain_reason', '').strip()}")
+    lines += ["", "## Findings", ""]
+    sev_rank = {"high": 0, "medium": 1, "low": 2}
+    findings = sorted(diagnosis.get("findings", []), key=lambda f: sev_rank.get(f["severity"], 3))
+    if not findings:
+        lines.append("_No actionable findings this run._")
+    for f in findings:
+        lines += [
+            f"### [{f['severity'].upper()}] {f['title']}  ·  `{f['lever']}`  (confidence: {f['confidence']})",
+            f"- **Cause:** {f['hypothesis']}",
+            f"- **Fix:** {f['suggested_action']}",
+            "",
+        ]
+    lines += [
+        "---",
+        "<sub>Generated by `score-quality.yml` → `scripts/diagnose.py`. "
+        "Body reflects the most recent run; per-day history is in `quality/DATE.json` on R2.</sub>",
+    ]
+    return "\n".join(lines)
+
+
+def _gh(method: str, url: str, token: str, **kwargs) -> requests.Response:
+    headers = {
+        "authorization": f"Bearer {token}",
+        "accept": "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "gtfs-eta-quality-bot",
+    }
+    return requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
+
+
+def upsert_issue(diagnosis: dict, report: dict) -> str | None:
+    """Create or update the single rolling quality issue. Returns its URL or None."""
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")  # "owner/name" (set in Actions)
+    if not token or not repo:
+        print("  [diagnose] GITHUB_TOKEN/GITHUB_REPOSITORY not set — skipping issue", flush=True)
+        return None
+
+    body = _render_issue_body(diagnosis, report)
+    api = f"https://api.github.com/repos/{repo}/issues"
+
+    try:
+        existing = _gh("GET", f"{api}?state=open&per_page=100", token)
+        existing.raise_for_status()
+        match = next((i for i in existing.json()
+                      if i.get("title") == ISSUE_TITLE and "pull_request" not in i), None)
+
+        if match:
+            num = match["number"]
+            _gh("PATCH", f"{api}/{num}", token, json={"body": body}).raise_for_status()
+            comment = (
+                f"Updated diagnosis for **{report.get('date')}** — "
+                f"MAE {(report.get('overall') or {}).get('mae_sec')}s, "
+                f"coverage {report.get('coverage_frac', 0):.0%}"
+                f"{' · ⚠️ retrain recommended' if diagnosis.get('recommend_retrain') else ''}."
+            )
+            _gh("POST", f"{api}/{num}/comments", token, json={"body": comment}).raise_for_status()
+            print(f"  [diagnose] updated issue #{num}", flush=True)
+            return match["html_url"]
+
+        created = _gh("POST", api, token, json={
+            "title": ISSUE_TITLE, "body": body, "labels": [ISSUE_LABEL],
+        })
+        created.raise_for_status()
+        url = created.json()["html_url"]
+        print(f"  [diagnose] opened {url}", flush=True)
+        return url
+    except Exception as exc:
+        print(f"  [diagnose] GitHub issue upsert failed: {exc}", flush=True)
+        return None
+
+
+def comment_on_quality_issue(text: str) -> bool:
+    """Post a comment on the open rolling quality issue, if one exists."""
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        return False
+    api = f"https://api.github.com/repos/{repo}/issues"
+    try:
+        existing = _gh("GET", f"{api}?state=open&per_page=100", token)
+        existing.raise_for_status()
+        match = next((i for i in existing.json()
+                      if i.get("title") == ISSUE_TITLE and "pull_request" not in i), None)
+        if not match:
+            return False
+        _gh("POST", f"{api}/{match['number']}/comments", token, json={"body": text}).raise_for_status()
+        return True
+    except Exception as exc:
+        print(f"  [diagnose] issue comment failed: {exc}", flush=True)
+        return False

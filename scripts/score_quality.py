@@ -15,8 +15,8 @@ Usage:
 
 The worker's daily cron dispatches this workflow at 02:15 UTC, by which point
 the previous UTC day is fully archived (Lviv's service day closes ~21:00 UTC).
-The AI diagnosis and auto-retrain gate are layered on in later steps; this
-script owns scoring + publication.
+This script owns scoring + publication, then runs the AI diagnosis
+(scripts/diagnose.py) and the numeric auto-retrain gate (src/gate.py).
 """
 
 from __future__ import annotations
@@ -26,13 +26,15 @@ import io
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import boto3
+import requests
 from dotenv import load_dotenv
 
 sys.path.insert(0, ".")
 
+from src.gate import DEFAULT_WINDOW_DAYS, evaluate_gate  # noqa: E402
 from src.scoring import score_date  # noqa: E402
 
 load_dotenv()
@@ -43,6 +45,12 @@ R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
 R2_BUCKET = os.environ.get("R2_BUCKET", "gtfs-lviv")
 
 QUALITY_PREFIX = "quality/"
+RETRAIN_MARKER_KEY = QUALITY_PREFIX + "_last_retrain.txt"
+RETRAIN_WORKFLOW = "retrain.yml"
+# Don't retrain more often than this — a retrain is a heavy ~hour-long job and
+# the model only drifts slowly. Guards against a sustained breach re-triggering
+# every day while the new model is still propagating.
+GATE_COOLDOWN_DAYS = int(os.environ.get("GATE_COOLDOWN_DAYS", "14"))
 
 
 def _make_client():
@@ -57,6 +65,92 @@ def _make_client():
 
 def _put(client, key: str, body: bytes, content_type: str) -> None:
     client.put_object(Bucket=R2_BUCKET, Key=key, Body=body, ContentType=content_type)
+
+
+# --------------------------------------------------------------------------
+# Auto-retrain gate (src.gate decides; this dispatches + tracks cooldown)
+# --------------------------------------------------------------------------
+
+def _load_recent_reports(client, window_days: int) -> list[dict]:
+    """Load the most recent per-day `quality/YYYY-MM-DD.json` reports from R2."""
+    paginator = client.get_paginator("list_objects_v2")
+    keys: list[str] = []
+    for page in paginator.paginate(Bucket=R2_BUCKET, Prefix=QUALITY_PREFIX):
+        for o in page.get("Contents", []):
+            name = o["Key"][len(QUALITY_PREFIX):]
+            # YYYY-MM-DD.json — exclude latest.json / latest.md / _last_retrain.txt
+            if len(name) == 15 and name.endswith(".json") and name[4] == "-" == name[7]:
+                keys.append(o["Key"])
+    out: list[dict] = []
+    for key in sorted(keys)[-window_days:]:
+        try:
+            out.append(json.loads(client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read()))
+        except Exception:
+            pass
+    return out
+
+
+def _last_retrain_date(client) -> date | None:
+    try:
+        raw = client.get_object(Bucket=R2_BUCKET, Key=RETRAIN_MARKER_KEY)["Body"].read()
+        return date.fromisoformat(raw.decode().strip())
+    except Exception:
+        return None
+
+
+def _dispatch_retrain(token: str, repo: str, reason: str) -> bool:
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{RETRAIN_WORKFLOW}/dispatches"
+    resp = requests.post(
+        url,
+        headers={
+            "authorization": f"Bearer {token}",
+            "accept": "application/vnd.github+json",
+            "x-github-api-version": "2022-11-28",
+            "user-agent": "gtfs-eta-quality-bot",
+        },
+        json={"ref": "main", "inputs": {"reason": reason[:280]}},
+        timeout=30,
+    )
+    if resp.status_code not in (204, 200):
+        print(f"  [gate] retrain dispatch failed: HTTP {resp.status_code} — {resp.text}", flush=True)
+        return False
+    return True
+
+
+def maybe_retrain(report: dict, client) -> None:
+    """Evaluate the rolling gate and auto-dispatch a retrain if it's breached."""
+    reports = _load_recent_reports(client, DEFAULT_WINDOW_DAYS)
+    # The just-scored report may not be back from R2's read-after-write yet.
+    if report.get("date") not in {r.get("date") for r in reports}:
+        reports.append(report)
+
+    result = evaluate_gate(reports)
+    print(f"  [gate] {result.reason}", flush=True)
+    if not result.breach:
+        return
+
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        print("  [gate] breach detected but GITHUB_TOKEN/REPOSITORY unset — not dispatching", flush=True)
+        return
+
+    today = date.fromisoformat(str(report["date"]))
+    last = _last_retrain_date(client)
+    if last is not None and (today - last).days < GATE_COOLDOWN_DAYS:
+        print(f"  [gate] breach, but last retrain {last} is within {GATE_COOLDOWN_DAYS}d cooldown", flush=True)
+        return
+
+    reason = f"auto-retrain: {result.reason} (as of {report['date']})"
+    if _dispatch_retrain(token, repo, reason):
+        _put(client, RETRAIN_MARKER_KEY, today.isoformat().encode(), "text/plain")
+        print(f"  [gate] 🔁 retrain dispatched — {result.reason}", flush=True)
+        try:
+            from diagnose import comment_on_quality_issue
+
+            comment_on_quality_issue(f"🔁 **Auto-retrain dispatched** — {result.reason}.")
+        except Exception:
+            pass
 
 
 def _render_markdown(report: dict) -> str:
@@ -121,6 +215,12 @@ def main() -> int:
     parser.add_argument(
         "--no-publish", action="store_true", help="print the report but don't write to R2"
     )
+    parser.add_argument(
+        "--no-diagnose", action="store_true", help="skip the AI diagnosis + GitHub issue"
+    )
+    parser.add_argument(
+        "--no-retrain", action="store_true", help="skip the auto-retrain gate"
+    )
     args = parser.parse_args()
 
     print(f"Scoring live ETA quality for {args.date}…", flush=True)
@@ -140,6 +240,27 @@ def main() -> int:
     if not args.no_publish:
         publish(report)
         print(f"  published quality/{args.date}.json + latest.json + latest.md", flush=True)
+
+    # AI diagnosis + GitHub issue (best-effort; both no-op without their creds).
+    if not args.no_diagnose and report.get("status") == "ok":
+        from diagnose import diagnose, upsert_issue
+
+        diagnosis = diagnose(report)
+        if diagnosis:
+            url = upsert_issue(diagnosis, report)
+            report["diagnosis"] = diagnosis
+            report["diagnosis_issue"] = url
+            if not args.no_publish:
+                publish(report)  # republish so the JSON carries the diagnosis
+            if diagnosis.get("recommend_retrain"):
+                print("  [diagnose] AI recommends a retrain", flush=True)
+
+    # Numeric auto-retrain gate (authoritative; advisory diagnosis is separate).
+    if not args.no_retrain and report.get("status") == "ok":
+        try:
+            maybe_retrain(report, _make_client())
+        except Exception as exc:
+            print(f"  [gate] evaluation failed: {exc}", flush=True)
 
     return 0
 
