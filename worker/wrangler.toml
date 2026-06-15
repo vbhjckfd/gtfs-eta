@@ -6,13 +6,18 @@ compatibility_date = "2026-06-01"
 binding = "R2"
 bucket_name = "gtfs-lviv"
 
+# */5 — archive served feed + dispatch push-feed.yml
+# 15 2 — dispatch score-quality.yml for the UTC day that just closed
+# (the handler branches on event.cron; keep SCORE_CRON below in sync).
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "15 2 * * *"]
 
 [vars]
 FEED_KEY = "feed/trip_updates.pb"
 GITHUB_REPO = "vbhjckfd/gtfs-eta"
 GITHUB_WORKFLOW = "push-feed.yml"
+SCORE_WORKFLOW = "score-quality.yml"
+SCORE_CRON = "15 2 * * *"
 GITHUB_REF = "main"
 
 [observability.logs]

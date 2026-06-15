@@ -297,6 +297,46 @@ async function archiveFeed(env) {
   });
 }
 
+/**
+ * Trigger a GitHub Actions workflow via the REST dispatch API.  Used by the
+ * cron handler for both push-feed.yml (every 5 min) and score-quality.yml
+ * (daily).  A failed dispatch is surfaced to Sentry — it stalls whichever
+ * pipeline it drives — but never throws back into the cron handler.
+ */
+async function dispatchWorkflow(env, workflow) {
+  const repo = env.GITHUB_REPO ?? "vbhjckfd/gtfs-eta";
+  const ref = env.GITHUB_REF ?? "main";
+  const token = env.GITHUB_TOKEN ?? "";
+
+  const url =
+    `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "authorization": `Bearer ${token}`,
+        "accept": "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "gtfs-eta-worker",
+        "x-github-api-version": "2022-11-28",
+      },
+      body: JSON.stringify({ ref }),
+    });
+  } catch (exc) {
+    console.error(`[scheduled] dispatch of ${workflow} raised: ${exc}`);
+    await reportException(env, exc, `scheduled.dispatch:${workflow}`);
+    return;
+  }
+
+  if (resp.status !== 204 && resp.status !== 200) {
+    const text = await resp.text();
+    const msg = `GitHub dispatch of ${workflow} failed: HTTP ${resp.status} — ${text}`;
+    console.error(`[scheduled] ${msg}`);
+    await reportMessage(env, msg, `scheduled.dispatch:${workflow}`);
+  }
+}
+
 function jsonResponse(payload, status) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -395,6 +435,16 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    // Two cron schedules share this handler (wrangler.toml [triggers]):
+    //   */5 * * * *  — archive the served feed, then dispatch push-feed.yml
+    //   15 2 * * *   — dispatch score-quality.yml for the day that just closed
+    // event.cron is the exact expression that fired, so we branch on it.
+    const scoreCron = env.SCORE_CRON ?? "15 2 * * *";
+    if (event.cron === scoreCron) {
+      await dispatchWorkflow(env, env.SCORE_WORKFLOW ?? "score-quality.yml");
+      return;
+    }
+
     // Snapshot the feed that consumers saw over the last cycle before we kick a
     // refresh, so quality scoring measures the *served* predictions.  Isolated
     // from the dispatch below: a failed archive must never stall the pipeline.
@@ -405,38 +455,6 @@ export default {
       await reportException(env, exc, "scheduled.archive");
     }
 
-    const repo = env.GITHUB_REPO ?? "vbhjckfd/gtfs-eta";
-    const workflow = env.GITHUB_WORKFLOW ?? "push-feed.yml";
-    const ref = env.GITHUB_REF ?? "main";
-    const token = env.GITHUB_TOKEN ?? "";
-
-    const url =
-      `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
-    let resp;
-    try {
-      resp = await fetch(url, {
-        method: "POST",
-        headers: {
-          "authorization": `Bearer ${token}`,
-          "accept": "application/vnd.github+json",
-          "content-type": "application/json",
-          "user-agent": "gtfs-eta-worker",
-          "x-github-api-version": "2022-11-28",
-        },
-        body: JSON.stringify({ ref }),
-      });
-    } catch (exc) {
-      console.error(`[scheduled] GitHub dispatch raised: ${exc}`);
-      await reportException(env, exc, "scheduled");
-      return;
-    }
-
-    if (resp.status !== 204 && resp.status !== 200) {
-      const text = await resp.text();
-      const msg = `GitHub dispatch failed: HTTP ${resp.status} — ${text}`;
-      console.error(`[scheduled] ${msg}`);
-      // A failed dispatch stalls the whole push pipeline, so surface it.
-      await reportMessage(env, msg, "scheduled");
-    }
+    await dispatchWorkflow(env, env.GITHUB_WORKFLOW ?? "push-feed.yml");
   },
 };

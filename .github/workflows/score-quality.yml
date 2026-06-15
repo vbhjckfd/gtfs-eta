@@ -1,0 +1,51 @@
+name: Score ETA quality
+
+# Scores one completed UTC day of live predictions against actual arrivals and
+# publishes the report to R2 (quality/*.json + latest.md).
+#
+# Primary trigger is workflow_dispatch from the Cloudflare Worker's daily cron
+# (GitHub's own scheduled triggers are unreliable on low-activity repos — the
+# same reason push-feed.yml is worker-dispatched). The schedule below is a
+# backstop; both default to scoring *yesterday*.
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'UTC day to score (YYYY-MM-DD); blank = yesterday'
+        required: false
+        default: ''
+  schedule:
+    - cron: '15 2 * * *'  # 02:15 UTC — yesterday's UTC day is fully archived
+
+# One scoring run per day is plenty; never stack them.
+concurrency:
+  group: score-quality
+  cancel-in-progress: false
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # a full day = trip inference over ~1440 snapshots
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Score + publish daily quality
+        run: |
+          python scripts/score_quality.py ${DATE:+--date "$DATE"}
+        env:
+          DATE:                 ${{ github.event.inputs.date }}
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET:            gtfs-lviv
+          SENTRY_DSN:           ${{ secrets.SENTRY_DSN }}
+          SENTRY_RELEASE:       ${{ github.sha }}
