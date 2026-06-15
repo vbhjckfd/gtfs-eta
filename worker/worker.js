@@ -34,6 +34,14 @@
 
 const FEED_KEY = "feed/trip_updates.pb";
 
+// Prefix under which the served feed is archived for offline quality scoring.
+// On every cron fire we copy the *currently served* blob to
+// predictions/YYYY-MM-DD/<feedTsISO>.pb so score-quality.yml can later join it
+// against the actual arrivals derived from raw/ vehicle positions and measure
+// how good the live predictions really were.  These are immutable, small, and
+// expired by an R2 lifecycle rule (see docs/collector_rules.md).
+const PREDICTIONS_PREFIX = "predictions/";
+
 // This DSN is shared with other services (e.g. timetable-api-node); the
 // service tag below keeps the worker's events unmistakable in the issue stream.
 const SENTRY_SERVICE_TAG = "gtfs-eta-worker";
@@ -246,6 +254,49 @@ async function reportMessage(env, message, where, level = "error") {
   });
 }
 
+/**
+ * Archive the currently served feed for later quality scoring.
+ *
+ * Copies the live FEED_KEY blob to predictions/YYYY-MM-DD/<feedTsISO>.pb,
+ * keyed and dated by the feed's *own* header timestamp (not wall-clock), so a
+ * stalled pipeline re-archives to the same idempotent key instead of spamming
+ * duplicates.  The producing revision is preserved as customMetadata.commit so
+ * scoring can attribute errors to the model version that made them.
+ *
+ * Sampling every 5 min (the cron cadence) is deliberate: as a vehicle nears a
+ * stop we naturally collect predictions at decreasing horizons, which is
+ * exactly what horizon-stratified error needs.  Never throws — archival must
+ * not break the feed-push dispatch that shares this cron.
+ */
+async function archiveFeed(env) {
+  const prefix = env.PREDICTIONS_PREFIX ?? PREDICTIONS_PREFIX;
+  const obj = await env.R2.get(env.FEED_KEY ?? FEED_KEY);
+  if (obj === null) {
+    console.warn("[archive] no feed in R2 to archive");
+    return;
+  }
+
+  const data = new Uint8Array(await obj.arrayBuffer());
+  const { timestamp } = parseFeedStats(data, "");
+  if (timestamp === 0) {
+    console.warn("[archive] feed has no header timestamp — skipping");
+    return;
+  }
+
+  // ISO basic-ish form, e.g. 2026-06-15T12:34:56Z; date folder is the UTC day.
+  const iso = new Date(timestamp * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const date = iso.slice(0, 10);
+  const key = `${prefix}${date}/${iso}.pb`;
+
+  await env.R2.put(key, data, {
+    httpMetadata: { contentType: "application/x-protobuf" },
+    customMetadata: {
+      commit: obj.customMetadata?.commit ?? "unknown",
+      feed_timestamp: String(timestamp),
+    },
+  });
+}
+
 function jsonResponse(payload, status) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -344,6 +395,16 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    // Snapshot the feed that consumers saw over the last cycle before we kick a
+    // refresh, so quality scoring measures the *served* predictions.  Isolated
+    // from the dispatch below: a failed archive must never stall the pipeline.
+    try {
+      await archiveFeed(env);
+    } catch (exc) {
+      console.error(`[scheduled] feed archive raised: ${exc}`);
+      await reportException(env, exc, "scheduled.archive");
+    }
+
     const repo = env.GITHUB_REPO ?? "vbhjckfd/gtfs-eta";
     const workflow = env.GITHUB_WORKFLOW ?? "push-feed.yml";
     const ref = env.GITHUB_REF ?? "main";

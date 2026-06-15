@@ -148,9 +148,16 @@ gtfs-lviv/
   static/     index.json                       # day → feedVersion mapping
   _meta/      collector_health.json            # collection health counters
   feed/       trip_updates.pb                  # pre-computed feed served by the worker
+  predictions/ YYYY-MM-DD/<feedTsISO>.pb       # sampled archive of the served feed (quality scoring)
+  quality/    YYYY-MM-DD.json + latest.json    # scored live-prediction quality
   worker/     gtfs_worker_data.pkl             # compact GTFS for push_feed.py inference
   worker/     eta_pipeline.pkl                 # serialised GBT for push_feed.py inference
 ```
+
+The worker's 5-min cron archives the currently served feed into `predictions/`
+before dispatching the next refresh, so live-prediction quality can be scored
+offline against the actual arrivals derived from `raw/`. The archive is capped
+by a 14-day R2 lifecycle rule (`make r2-lifecycle`).
 
 See [docs/collector_rules.md](docs/collector_rules.md) for the full data contract.
 

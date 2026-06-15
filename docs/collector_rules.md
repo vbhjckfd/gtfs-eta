@@ -24,6 +24,9 @@ gtfs-lviv/
   static/     <feedVersion>/static.zip           # Versioned static GTFS
   static/     index.json                         # day -> feedVersion mapping
   _meta/      collector_health.json              # last run, counts, last feed_ts
+  feed/       trip_updates.pb                     # pre-computed served feed (overwritten ~15 s)
+  predictions/ YYYY-MM-DD/<feedTsISO8601Z>.pb     # sampled archive of the served feed (quality scoring)
+  quality/    YYYY-MM-DD.json + latest.json       # scored prediction quality (score-quality.yml)
 ```
 
 `data/training/YYYY-MM-DD.parquet` (Gold) is produced locally by the pipeline and
@@ -120,6 +123,17 @@ must **never** require re-reading Bronze.
 4. Optional: after Silver is verified for a day, Bronze for that day may be
    tar-archived (`raw_archive/YYYY-MM-DD.tar`) to cut object count, keeping bytes
    intact for replay.
+5. **`predictions/` is a bounded sample, not source of truth** — it records what
+   the live feed served (for quality scoring), and is regenerable in spirit (the
+   feed could be re-inferred from Bronze). Expire it after **14 days** via an R2
+   lifecycle rule so the archive doesn't grow unbounded:
+
+   ```bash
+   make r2-lifecycle   # applies a 14-day expiry on the predictions/ prefix
+   ```
+
+   The worker writes one object per 5-min cron fire, keyed by the feed's own
+   header timestamp (idempotent — a stalled feed re-archives to the same key).
 
 ---
 
