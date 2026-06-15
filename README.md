@@ -157,7 +157,7 @@ gtfs-lviv/
 The worker's 5-min cron archives the currently served feed into `predictions/`
 before dispatching the next refresh, so live-prediction quality can be scored
 offline against the actual arrivals derived from `raw/`. The archive is capped
-by a 14-day R2 lifecycle rule (`make r2-lifecycle`).
+by a 14-day R2 object-lifecycle rule (managed in the Cloudflare R2 dashboard).
 
 See [docs/collector_rules.md](docs/collector_rules.md) for the full data contract.
 

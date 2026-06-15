@@ -1,0 +1,148 @@
+"""Hermetic unit tests for src/scoring.py.
+
+No R2, no GTFS: we build a TripUpdates protobuf in memory, parse it back, and
+drive the join/aggregation with synthetic actuals so the residual maths is
+pinned down exactly.
+"""
+
+from __future__ import annotations
+
+import os
+
+# scoring imports src.snapshots, which reads R2 creds at import time.
+for _k in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
+    os.environ.setdefault(_k, "test")
+
+import pandas as pd  # noqa: E402
+from google.transit import gtfs_realtime_pb2  # noqa: E402
+
+from src import scoring  # noqa: E402
+
+
+def _make_feed(feed_ts: int, entities: list[dict]) -> bytes:
+    """entities: [{vehicle_id, trip_id, route_id, stops: [(stop_id, seq, arr_ts)]}]"""
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    feed.header.timestamp = feed_ts
+    for e in entities:
+        ent = feed.entity.add()
+        ent.id = e["vehicle_id"]
+        tu = ent.trip_update
+        tu.trip.trip_id = e["trip_id"]
+        if e.get("route_id"):
+            tu.trip.route_id = e["route_id"]
+        tu.vehicle.id = e["vehicle_id"]
+        for stop_id, seq, arr in e["stops"]:
+            stu = tu.stop_time_update.add()
+            stu.stop_id = stop_id
+            stu.stop_sequence = seq
+            stu.arrival.time = arr
+            stu.departure.time = arr
+    return feed.SerializeToString()
+
+
+def test_parse_prediction_feed_extracts_rows_and_stops_ahead():
+    data = _make_feed(
+        1000,
+        [{
+            "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+            "stops": [("100", 5, 1120), ("101", 6, 1300)],
+        }],
+    )
+    rows = scoring._parse_prediction_feed(data)
+    assert len(rows) == 2
+    assert rows[0] == {
+        "feed_ts": 1000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+        "stop_id": "100", "stop_sequence": 5, "stops_ahead": 1,
+        "predicted_arrival": 1120,
+    }
+    # stops_ahead is the position within the vehicle's update list.
+    assert rows[1]["stops_ahead"] == 2
+
+
+def test_parse_prediction_feed_ignores_garbage():
+    assert scoring._parse_prediction_feed(b"\xff\xff not a feed") == []
+
+
+def _predictions_df(rows):
+    return pd.DataFrame(rows)
+
+
+def test_join_computes_signed_error_and_lead():
+    # Predicted arrival 1120, actual 1100 → 20 s late; lead = 1120-1010 = 110.
+    preds = _predictions_df([{
+        "feed_ts": 1010, "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+        "stop_id": "100", "stop_sequence": 5, "stops_ahead": 1,
+        "predicted_arrival": 1120,
+    }])
+    actuals = pd.DataFrame([{
+        "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+        "stop_id": "100", "stop_sequence": 5, "actual_arrival_ts": 1100,
+    }])
+    joined = scoring.join_predictions_actuals(preds, actuals)
+    assert len(joined) == 1
+    r = joined.iloc[0]
+    assert r["error_sec"] == 20
+    assert r["abs_error_sec"] == 20
+    assert r["lead_sec"] == 110
+    assert r["lead_bucket"] == "0-2m"  # 110 s lands in [0,120)
+
+
+def test_lead_bucket_boundaries_are_left_closed():
+    # lead_sec exactly 120 should fall into the 2-5m bucket (bins right=False).
+    preds = _predictions_df([{
+        "feed_ts": 1000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+        "stop_id": "100", "stop_sequence": 5, "stops_ahead": 1,
+        "predicted_arrival": 1121,  # lead 121
+    }])
+    actuals = pd.DataFrame([{
+        "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+        "stop_id": "100", "stop_sequence": 5, "actual_arrival_ts": 1121,
+    }])
+    joined = scoring.join_predictions_actuals(preds, actuals)
+    assert joined.iloc[0]["lead_bucket"] == "2-5m"
+
+
+def test_join_drops_past_and_implausible():
+    preds = _predictions_df([
+        # lead <= 0 → dropped (rider never saw a future ETA)
+        {"feed_ts": 2000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "1",
+         "stop_id": "1", "stop_sequence": 1, "stops_ahead": 1, "predicted_arrival": 1900},
+        # implausible residual → dropped (bad join, not bad model)
+        {"feed_ts": 1000, "vehicle_id": "v2", "trip_id": "t2", "route_id": "1",
+         "stop_id": "2", "stop_sequence": 1, "stops_ahead": 1, "predicted_arrival": 1500},
+    ])
+    actuals = pd.DataFrame([
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "1", "stop_id": "1",
+         "stop_sequence": 1, "actual_arrival_ts": 1850},
+        {"vehicle_id": "v2", "trip_id": "t2", "route_id": "1", "stop_id": "2",
+         "stop_sequence": 1, "actual_arrival_ts": 1500 + scoring.MAX_PLAUSIBLE_ERROR_SEC + 10},
+    ])
+    joined = scoring.join_predictions_actuals(preds, actuals)
+    assert joined.empty
+
+
+def test_score_report_metrics_and_coverage():
+    # Two stops actually arrived; only one was predicted → coverage 0.5.
+    preds = _predictions_df([
+        {"feed_ts": 1000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+         "stop_id": "100", "stop_sequence": 5, "stops_ahead": 1, "predicted_arrival": 1130},
+    ])
+    actuals = pd.DataFrame([
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "32", "stop_id": "100",
+         "stop_sequence": 5, "actual_arrival_ts": 1100},  # predicted 30s late
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "32", "stop_id": "101",
+         "stop_sequence": 6, "actual_arrival_ts": 1300},  # never predicted
+    ])
+    joined = scoring.join_predictions_actuals(preds, actuals)
+    report = scoring.score_report(joined, actuals, "2026-06-15")
+    assert report["status"] == "ok"
+    assert report["coverage_frac"] == 0.5
+    assert report["overall"]["bias_sec"] == 30.0
+    assert report["overall"]["mae_sec"] == 30.0
+    assert report["n_actual_arrivals"] == 2
+
+
+def test_score_report_empty_join():
+    report = scoring.score_report(pd.DataFrame(), pd.DataFrame(), "2026-06-15")
+    assert report["status"] == "no_matches"

@@ -1,6 +1,6 @@
 .PHONY: install pipeline pipeline-date train learn export deploy \
         sanity validate-off-route check-gtfs check-snapshots \
-        push-feed serve-feed smoke r2-lifecycle help
+        push-feed serve-feed smoke score help
 
 # Days processed concurrently by `make pipeline` / `make learn`.
 # Each worker peaks at ~2 GB — keep ≤ 4-5 on a 16 GB machine.
@@ -59,9 +59,9 @@ serve-feed:
 smoke:
 	pytest tests/test_smoke.py -v
 
-## Apply the R2 lifecycle policy (expire predictions/ after 14 days)
-r2-lifecycle:
-	python scripts/set_r2_lifecycle.py
+## Score live ETA quality for a day: make score DATE=2026-06-15 [OUT=report.json]
+score:
+	python -m src.scoring --date $(or $(DATE),$(shell date -u +%F)) $(if $(OUT),--out $(OUT),)
 
 ## Sanity-check R2 collection health
 sanity:
@@ -97,7 +97,7 @@ help:
 	@echo "  push-feed            Push one TripUpdates snapshot to R2"
 	@echo "  serve-feed           Push to R2 every 15 s (live feed daemon)"
 	@echo "  smoke                Smoke-test the live worker feed"
-	@echo "  r2-lifecycle         Apply R2 lifecycle (expire predictions/ after 14d)"
+	@echo "  score DATE=          Score live ETA quality for a day (default: today)"
 	@echo "  sanity               Check R2 collection health"
 	@echo "  validate-off-route   Validate off-route detection"
 	@echo "  check-gtfs           Test GTFS static loading"
