@@ -155,12 +155,24 @@ def load_actuals(date_str: str, gtfs, client=None, max_workers: int = 12) -> pd.
         return pd.DataFrame()
 
     labels = labels.copy()
-    labels["actual_arrival_ts"] = (
-        pd.to_datetime(labels["actual_arrival"], utc=True).astype("int64") // 1_000_000_000
-    )
+    labels["actual_arrival_ts"] = _to_epoch_seconds(labels["actual_arrival"])
     return labels[
         ["vehicle_id", "trip_id", "route_id", "stop_id", "stop_sequence", "actual_arrival_ts"]
     ]
+
+
+def _to_epoch_seconds(ts) -> pd.Series:
+    """UTC datetime series → int64 epoch seconds, resolution-independent.
+
+    pandas 3.0 builds datetime64 at microsecond (not nanosecond) resolution, so a
+    hard-coded `.astype("int64") // 1e9` divides microseconds by a nanosecond
+    factor and lands 1000x low — which silently zeroed every join (every residual
+    exceeded the plausibility filter). Subtracting the epoch and floor-dividing by
+    a 1-second Timedelta is correct under ns/us/ms/s alike.
+    """
+    ts = pd.to_datetime(ts, utc=True)
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    return ((ts - epoch) // pd.Timedelta(seconds=1)).astype("int64")
 
 
 # ---------------------------------------------------------------------------

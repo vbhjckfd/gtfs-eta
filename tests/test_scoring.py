@@ -146,3 +146,14 @@ def test_score_report_metrics_and_coverage():
 def test_score_report_empty_join():
     report = scoring.score_report(pd.DataFrame(), pd.DataFrame(), "2026-06-15")
     assert report["status"] == "no_matches"
+
+
+def test_to_epoch_seconds_is_resolution_independent():
+    # 2026-06-15T12:25:46Z = 1781526346 epoch seconds. pandas 3.0 builds
+    # datetime64 at microsecond resolution; the conversion must still land in
+    # seconds (the //1e9 bug returned this 1000x low and zeroed every join).
+    expected = 1781526346
+    for unit in ("s", "ms", "us", "ns"):
+        ts = pd.Series(pd.to_datetime([expected], unit="s", utc=True)).astype(f"datetime64[{unit}, UTC]")
+        out = scoring._to_epoch_seconds(ts)
+        assert int(out.iloc[0]) == expected, f"unit={unit} → {out.iloc[0]}"
