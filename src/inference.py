@@ -265,15 +265,19 @@ def build_features(trip_id: str, v_dist: float, speed: float,
         stops_ahead += 1
         if stops_ahead > MAX_STOPS_AHEAD:
             break
+        sched_rem = max(0.0, sched_cum - sched_at_pos)
+        rem_dist = d_target - v_dist
         feat_row = [
             trip["route_id"], stop_seq, stops_ahead,
             snap_ts.hour, snap_ts.weekday(), snap_ts.month,
             int(snap_ts.weekday() >= 5), is_holiday,
-            d_target - v_dist,
-            max(0.0, sched_cum - sched_at_pos),
+            rem_dist,
+            sched_rem,
             speed,
             n_stops_total - 1 - orig_idx,
             d_target / shape_len,
+            sched_rem / max(1, stops_ahead),   # sched_per_stop_sec (idx 13)
+            rem_dist / max(1, stops_ahead),    # dist_per_stop_m    (idx 14)
         ]
         result.append((feat_row, stop_id, stop_seq))
     return result

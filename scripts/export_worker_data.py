@@ -132,6 +132,8 @@ def _extract_trees(pipeline) -> dict:
       10 progress_speed_mps
       11 stops_remaining
       12 trip_progress_frac
+      13 sched_per_stop_sec
+      14 dist_per_stop_m
     """
     prep = pipeline.named_steps["prep"]
     model = pipeline.named_steps["model"]

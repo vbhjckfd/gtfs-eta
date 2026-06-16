@@ -37,8 +37,27 @@ TEST_FRACTION = 0.2
 # time sane; override via GTFS_ETA_MAX_ROWS.
 MAX_TRAINING_ROWS = int(os.environ.get("GTFS_ETA_MAX_ROWS", 8_000_000))
 
+# Routes with confirmed trip-matching failures (issue #2): their training rows
+# have bad anchors (vehicle matched to wrong trip/direction) that poison the
+# model. Exclude until the pipeline-level trip-matching filter is tightened.
+_BAD_ROUTE_IDS: frozenset[str] = frozenset({"2299", "138"})
+
 _CAT_COLS = ["route_id"]
 _NUM_COLS = [c for c in FEATURE_COLS if c not in _CAT_COLS]
+
+
+def _build_sample_weights(df: pd.DataFrame) -> np.ndarray:
+    """Up-weight underrepresented hours to address time-of-day bias (issue #2).
+
+    Hours are UTC.  Lviv is UTC+2/+3, so:
+      UTC 14-16 ≈ local 17-19 (evening peak, congestion underestimated)
+      UTC 18-20 ≈ local 21-23 (late night, very few training rows)
+    """
+    w = np.ones(len(df), dtype=float)
+    hour = df["hour"].to_numpy()
+    w[(hour >= 14) & (hour <= 16)] = 1.5   # evening peak
+    w[(hour >= 18) | (hour <= 3)] = 2.0    # late night / early morning
+    return w
 
 
 def _build_pipeline() -> Pipeline:
@@ -135,6 +154,11 @@ def train(
     df = df[df[TARGET_COL].between(0, 3600)].copy()
     print(f"  After sanity filter: {len(df):,} rows")
 
+    n_before = len(df)
+    df = df[~df["route_id"].astype(str).isin(_BAD_ROUTE_IDS)].copy()
+    if len(df) < n_before:
+        print(f"  Excluded {n_before - len(df):,} rows from known-bad routes {set(_BAD_ROUTE_IDS)}")
+
     train_df, test_df = _time_split(df, test_fraction)
 
     X_train = train_df[FEATURE_COLS]
@@ -145,7 +169,8 @@ def train(
     print("\nFitting HistGradientBoostingRegressor…")
     t_fit = time.monotonic()
     pipeline = _build_pipeline()
-    pipeline.fit(X_train, y_train)
+    sample_weights = _build_sample_weights(train_df)
+    pipeline.fit(X_train, y_train, model__sample_weight=sample_weights)
     fit_sec = time.monotonic() - t_fit
 
     n_iters = pipeline.named_steps["model"].n_iter_

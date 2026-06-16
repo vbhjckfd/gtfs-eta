@@ -342,20 +342,25 @@ class TestTreeExportParity:
 
         rng = np.random.default_rng(42)
         n = 2000
+        stops_ahead = rng.integers(1, 11, n)
+        sched_remaining_sec = rng.uniform(0, 1200, n)
+        remaining_dist_m = rng.uniform(0, 5000, n)
         df = pd.DataFrame({
             "route_id": rng.choice(["10", "25", "117"], n),
             "stop_sequence": rng.integers(1, 60, n),
-            "stops_ahead": rng.integers(1, 11, n),
+            "stops_ahead": stops_ahead,
             "hour": rng.integers(5, 23, n),
             "day_of_week": rng.integers(0, 7, n),
             "month": rng.integers(1, 13, n),
             "is_weekend": rng.integers(0, 2, n),
             "is_holiday": np.zeros(n, dtype=int),
-            "remaining_dist_m": rng.uniform(0, 5000, n),
-            "sched_remaining_sec": rng.uniform(0, 1200, n),
+            "remaining_dist_m": remaining_dist_m,
+            "sched_remaining_sec": sched_remaining_sec,
             "progress_speed_mps": rng.uniform(-1, 15, n),
             "stops_remaining": rng.integers(1, 40, n),
             "trip_progress_frac": rng.uniform(0, 1, n),
+            "sched_per_stop_sec": sched_remaining_sec / np.maximum(1, stops_ahead),
+            "dist_per_stop_m": remaining_dist_m / np.maximum(1, stops_ahead),
         })
         y = (df["remaining_dist_m"] / 6.0 + rng.normal(0, 10, n)).clip(0)
 
