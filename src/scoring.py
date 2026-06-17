@@ -233,7 +233,9 @@ def _grouped(joined: pd.DataFrame, col: str, top: int | None = None) -> dict:
     return out
 
 
-def score_report(joined: pd.DataFrame, actuals: pd.DataFrame, date_str: str) -> dict:
+def score_report(
+    joined: pd.DataFrame, actuals: pd.DataFrame, date_str: str, feed_tz=None
+) -> dict:
     """Aggregate residuals into the structured quality report."""
     if joined.empty:
         return {"date": date_str, "status": "no_matches", "overall": None}
@@ -270,7 +272,44 @@ def score_report(joined: pd.DataFrame, actuals: pd.DataFrame, date_str: str) -> 
         "by_stops_ahead": _grouped(joined, "stops_ahead"),
         "arriving_now": arriving_now,
         "worst_routes": _worst_routes(joined, top=8),
+        "coverage_gap": _coverage_gap_breakdown(actuals, pred_keys, feed_tz=feed_tz),
     }
+
+
+def _coverage_gap_breakdown(
+    actuals: pd.DataFrame, pred_keys: set, feed_tz=None
+) -> dict:
+    """Per-route and per-hour breakdown of actual arrivals that got no prediction.
+
+    Helps distinguish a concentrated gap (bad feed for a few routes / off-peak
+    hours) from a uniform one (systematic pipeline dropout).
+    """
+    tz = feed_tz or timezone.utc
+    key_cols = ["vehicle_id", "trip_id", "stop_id", "stop_sequence"]
+    df = actuals[key_cols + ["route_id", "actual_arrival_ts"]].copy()
+    df["covered"] = [tuple(row) in pred_keys for row in df[key_cols].values]
+    df["hour"] = (
+        pd.to_datetime(df["actual_arrival_ts"], unit="s", utc=True)
+        .dt.tz_convert(tz)
+        .dt.hour
+    )
+
+    def _gap(g: pd.DataFrame) -> dict:
+        n = len(g)
+        nc = int(g["covered"].sum())
+        return {
+            "n_actual": int(n),
+            "n_uncovered": int(n - nc),
+            "coverage_frac": round(nc / n, 3) if n else 0.0,
+        }
+
+    by_route = {str(k): _gap(g) for k, g in df.groupby("route_id")}
+    # Surface the routes with the most uncovered arrivals first; cap at 20.
+    by_route = dict(
+        sorted(by_route.items(), key=lambda kv: kv[1]["n_uncovered"], reverse=True)[:20]
+    )
+    by_hour = {str(int(k)): _gap(g) for k, g in df.groupby("hour")}
+    return {"by_route": by_route, "by_hour": by_hour}
 
 
 def _worst_routes(joined: pd.DataFrame, top: int = 8, min_n: int = 50) -> list[dict]:
@@ -302,8 +341,9 @@ def score_date(date_str: str, gtfs=None, client=None) -> dict:
     if actuals.empty:
         return {"date": date_str, "status": "no_actuals", "overall": None}
 
-    joined = join_predictions_actuals(predictions, actuals, feed_tz=gtfs.feed_tz)
-    return score_report(joined, actuals, date_str)
+    feed_tz = getattr(gtfs, "feed_tz", None)
+    joined = join_predictions_actuals(predictions, actuals, feed_tz=feed_tz)
+    return score_report(joined, actuals, date_str, feed_tz=feed_tz)
 
 
 def main() -> int:

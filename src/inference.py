@@ -42,6 +42,11 @@ _ON_ROUTE_DIST  = 100.0
 _OFF_CONSEC     = 3
 _ON_CONSEC      = 3
 
+# Routes with confirmed trip-matching failures — excluded from training in
+# src/train.py and suppressed here so their bad predictions don't reach riders
+# or pollute the quality scorer.
+_BAD_ROUTE_IDS: frozenset[str] = frozenset({"2299", "138"})
+
 
 # ---------------------------------------------------------------------------
 # Geometry — shapes stored as packed float64 bytes
@@ -354,6 +359,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         vid           = v.vehicle.id if v.HasField("vehicle") else entity.id
 
         if not route_id or not lat or not lon:
+            continue
+        if route_id in _BAD_ROUTE_IDS:
             continue
 
         vx, vy = project_xy(lon, lat)
