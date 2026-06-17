@@ -251,38 +251,34 @@ def build_features(trip_id: str, v_dist: float, speed: float,
     d = snap_ts.date()
     is_holiday = int((d.month, d.day) in _UA_HOLIDAYS)
 
-    # Per-stop (dist_along, sched_cum_sec), sorted by distance for interpolation
     sts = trip["stop_times"]  # [(stop_id, seq, sched_cum_sec), ...]
     n_stops_total = len(sts)
+    # Sort stops by distance along shape — sched_cum_sec (st[2]) is no longer
+    # used as a feature; only GPS signals matter for prediction.
     entries = sorted(
-        (data["stop_distances"].get((trip["shape_id"], st[0]), 0.0), st[2], st[0], st[1], i)
+        (data["stop_distances"].get((trip["shape_id"], st[0]), 0.0), st[0], st[1], i)
         for i, st in enumerate(sts)
     )
-    stop_dists = [e[0] for e in entries]
-    sched_cums = [e[1] for e in entries]
-    sched_at_pos = _sched_sec_at_dist(stop_dists, sched_cums, v_dist)
 
     result = []
     stops_ahead = 0
-    for d_target, sched_cum, stop_id, stop_seq, orig_idx in entries:
+    for d_target, stop_id, stop_seq, orig_idx in entries:
         if d_target <= v_dist:
             continue
         stops_ahead += 1
         if stops_ahead > MAX_STOPS_AHEAD:
             break
-        sched_rem = max(0.0, sched_cum - sched_at_pos)
         rem_dist = d_target - v_dist
         feat_row = [
             trip["route_id"], stop_seq, stops_ahead,
             snap_ts.hour, snap_ts.weekday(), snap_ts.month,
             int(snap_ts.weekday() >= 5), is_holiday,
-            rem_dist,
-            sched_rem,
-            speed,
-            n_stops_total - 1 - orig_idx,
-            d_target / shape_len,
-            sched_rem / max(1, stops_ahead),   # sched_per_stop_sec (idx 13)
-            rem_dist / max(1, stops_ahead),    # dist_per_stop_m    (idx 14)
+            rem_dist,                               # idx 8
+            speed,                                  # idx 9  progress_speed_mps
+            n_stops_total - 1 - orig_idx,           # idx 10 stops_remaining
+            d_target / shape_len,                   # idx 11 trip_progress_frac
+            rem_dist / max(1, stops_ahead),         # idx 12 dist_per_stop_m
+            rem_dist / speed if speed > 0.0 else -1.0,  # idx 13 speed_eta_sec
         ]
         result.append((feat_row, stop_id, stop_seq))
     return result

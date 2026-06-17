@@ -268,8 +268,8 @@ class TestCompactInference:
         assert stop_seq == 3
         assert feat[2] == 1                                   # stops_ahead
         assert feat[8] == pytest.approx(5.0, abs=1.0)         # remaining_dist_m
-        assert feat[9] == pytest.approx(0.6, abs=0.5)         # sched_remaining_sec
-        assert feat[10] == 8.0                                # progress_speed_mps
+        assert feat[9] == 8.0                                 # progress_speed_mps
+        assert feat[13] == pytest.approx(5.0 / 8.0, abs=0.1) # speed_eta_sec
         assert len(feat) == len(FEATURE_COLS)
 
     def test_build_features_caps_horizon(self, gtfs):
@@ -343,8 +343,8 @@ class TestTreeExportParity:
         rng = np.random.default_rng(42)
         n = 2000
         stops_ahead = rng.integers(1, 11, n)
-        sched_remaining_sec = rng.uniform(0, 1200, n)
         remaining_dist_m = rng.uniform(0, 5000, n)
+        speed_mps = rng.uniform(-1, 15, n)
         df = pd.DataFrame({
             "route_id": rng.choice(["10", "25", "117"], n),
             "stop_sequence": rng.integers(1, 60, n),
@@ -355,12 +355,11 @@ class TestTreeExportParity:
             "is_weekend": rng.integers(0, 2, n),
             "is_holiday": np.zeros(n, dtype=int),
             "remaining_dist_m": remaining_dist_m,
-            "sched_remaining_sec": sched_remaining_sec,
-            "progress_speed_mps": rng.uniform(-1, 15, n),
+            "progress_speed_mps": speed_mps,
             "stops_remaining": rng.integers(1, 40, n),
             "trip_progress_frac": rng.uniform(0, 1, n),
-            "sched_per_stop_sec": sched_remaining_sec / np.maximum(1, stops_ahead),
             "dist_per_stop_m": remaining_dist_m / np.maximum(1, stops_ahead),
+            "speed_eta_sec": np.where(speed_mps > 0, remaining_dist_m / speed_mps, -1.0),
         })
         y = (df["remaining_dist_m"] / 6.0 + rng.normal(0, 10, n)).clip(0)
 

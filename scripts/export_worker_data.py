@@ -128,12 +128,11 @@ def _extract_trees(pipeline) -> dict:
       6  is_weekend
       7  is_holiday
       8  remaining_dist_m
-      9  sched_remaining_sec
-      10 progress_speed_mps
-      11 stops_remaining
-      12 trip_progress_frac
-      13 sched_per_stop_sec
-      14 dist_per_stop_m
+      9  progress_speed_mps
+      10 stops_remaining
+      11 trip_progress_frac
+      12 dist_per_stop_m
+      13 speed_eta_sec        (remaining_dist_m / speed; -1 when speed unknown)
     """
     prep = pipeline.named_steps["prep"]
     model = pipeline.named_steps["model"]

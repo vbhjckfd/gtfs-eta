@@ -40,7 +40,7 @@ def _build_prompt(report: dict) -> str:
         for k in (
             "date", "n_predictions_scored", "n_actual_arrivals", "coverage_frac",
             "overall", "by_lead_bucket", "by_hour", "by_stops_ahead",
-            "arriving_now", "worst_routes",
+            "arriving_now", "worst_routes", "coverage_gap",
         )
     }
     return (
@@ -49,9 +49,15 @@ def _build_prompt(report: dict) -> str:
         "(sklearn HistGradientBoostingRegressor) predicts seconds-to-arrival per "
         "upcoming stop, anchored at each vehicle position snapshot. Features: "
         "route_id, stop_sequence, stops_ahead, hour, day_of_week, month, "
-        "is_weekend, is_holiday, remaining_dist_m, sched_remaining_sec, "
-        "progress_speed_mps, stops_remaining, trip_progress_frac. The baseline it "
-        "must beat is the schedule's own remaining time.\n\n"
+        "is_weekend, is_holiday, remaining_dist_m, progress_speed_mps, "
+        "stops_remaining, trip_progress_frac, dist_per_stop_m, speed_eta_sec "
+        "(remaining_dist_m / progress_speed_mps; -1 sentinel when speed unknown). "
+        "CRITICAL CONTEXT: sched_remaining_sec (GTFS stop departure schedule) has "
+        "been intentionally removed from the model — in-person verification confirmed "
+        "that Lviv transit stop departure times are unreliable, especially at "
+        "terminus/final stops where buses depart whenever operationally convenient. "
+        "Do NOT suggest adding schedule-based features back. The baseline is "
+        "speed_eta_sec (GPS-only naive ETA); improvements must beat that.\n\n"
         "Below is one day of scored quality, joining what the feed *predicted* "
         "against what *actually* happened (derived from raw vehicle positions). "
         "error_sec is signed: positive = predicted arrival LATER than reality "

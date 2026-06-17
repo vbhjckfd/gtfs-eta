@@ -183,11 +183,19 @@ def train(
     train_mae = mean_absolute_error(y_train, y_pred_train)
     test_mae  = mean_absolute_error(y_test,  y_pred_test)
 
-    if "sched_remaining_sec" in test_df.columns:
-        baseline_pred = test_df["sched_remaining_sec"].values
+    # GPS-only baseline: remaining_dist / observed_speed.  -1 is the sentinel
+    # for unknown speed; fill those rows with the median so the baseline is
+    # computable even for first-snapshot rows.
+    if "speed_eta_sec" in test_df.columns:
+        gps_eta = test_df["speed_eta_sec"].replace(-1.0, np.nan)
+        baseline_pred = gps_eta.fillna(gps_eta.median()).values
     else:
         baseline_pred = np.full(len(y_test), y_train.mean())
     baseline_mae = mean_absolute_error(y_test, baseline_pred)
+
+    if "sched_remaining_sec" in test_df.columns:
+        sched_mae = mean_absolute_error(y_test, test_df["sched_remaining_sec"].values)
+        print(f"Schedule MAE:  {sched_mae:6.1f}s  (GTFS remaining — reference only)")
 
     improvement_pct = 100.0 * (baseline_mae - test_mae) / baseline_mae if baseline_mae > 0 else 0.0
 
@@ -200,7 +208,7 @@ def train(
     print(f"\n{'─'*50}")
     print(f"Train MAE:    {train_mae:6.1f}s")
     print(f"Test  MAE:    {test_mae:6.1f}s")
-    print(f"Baseline MAE: {baseline_mae:6.1f}s  (scheduled remaining time)")
+    print(f"Baseline MAE: {baseline_mae:6.1f}s  (GPS speed-based ETA)")
     print(f"Improvement:  {improvement_pct:+.1f}% vs baseline")
     print(f"Model saved → {model_path}")
     print(f"Done in {total_str}")

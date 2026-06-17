@@ -147,6 +147,8 @@ def compute_features_for_training(
         sched_rem = np.maximum(0.0, sched_target - sched_at_pos)
         rem_dist = np.maximum(0.0, d_target - d_vehicle)
         stops_ahead_safe = np.maximum(1, stops_ahead_arr)
+        speed = grp["progress_speed_mps"].to_numpy(dtype=float)
+        speed_eta = np.where(speed > 0, rem_dist / speed, -1.0)
 
         pieces.append(pd.DataFrame({
             "route_id": trip.route_id,
@@ -158,12 +160,14 @@ def compute_features_for_training(
             "is_weekend": (dow >= 5).astype(int),
             "is_holiday": holiday.to_numpy(),
             "remaining_dist_m": rem_dist,
-            "sched_remaining_sec": sched_rem,
-            "progress_speed_mps": grp["progress_speed_mps"].to_numpy(dtype=float),
+            "progress_speed_mps": speed,
             "stops_remaining": grp["stops_remaining"].astype(int).to_numpy(),
             "trip_progress_frac": d_target / shape_len,
-            "sched_per_stop_sec": sched_rem / stops_ahead_safe,
             "dist_per_stop_m": rem_dist / stops_ahead_safe,
+            "speed_eta_sec": speed_eta,
+            # Reference-only (not a model feature): kept so train.py can report
+            # schedule MAE as a comparison point.
+            "sched_remaining_sec": sched_rem,
             "date": grp["date"].to_numpy(),
             TARGET_COL: grp["seconds_to_arrival"].to_numpy(dtype=float),
         }))
@@ -217,12 +221,13 @@ def compute_features_for_inference(
             "is_weekend": int(snap_ts.weekday() >= 5),
             "is_holiday": is_holiday,
             "remaining_dist_m": rem_dist,
-            "sched_remaining_sec": sched_rem,
             "progress_speed_mps": progress_speed_mps,
             "stops_remaining": n_stops_total - 1 - seq_to_index.get(stop_seq, 0),
             "trip_progress_frac": d_target / shape_len,
-            "sched_per_stop_sec": sched_rem / max(1, stops_ahead),
             "dist_per_stop_m": rem_dist / max(1, stops_ahead),
+            "speed_eta_sec": rem_dist / progress_speed_mps if progress_speed_mps > 0 else -1.0,
+            # Reference-only: schedule interpolation kept for sanity checks.
+            "sched_remaining_sec": sched_rem,
         })
 
     return pd.DataFrame(rows)
@@ -230,23 +235,24 @@ def compute_features_for_inference(
 
 # Order matters: the worker export (scripts/export_worker_data.py) and the
 # pure-Python tree traversal (src/inference.py) index features positionally.
+# sched_remaining_sec and sched_per_stop_sec have been removed: GTFS departure
+# schedules are unreliable for Lviv transit (especially at terminus) — only GPS
+# signals are used. speed_eta_sec replaces the schedule as the ETA prior.
 FEATURE_COLS = [
-    "route_id",
-    "stop_sequence",
-    "stops_ahead",
-    "hour",
-    "day_of_week",
-    "month",
-    "is_weekend",
-    "is_holiday",
-    "remaining_dist_m",
-    "sched_remaining_sec",
-    "progress_speed_mps",
-    "stops_remaining",
-    "trip_progress_frac",
-    # per-stop cost signals — address horizon bias (issue #2)
-    "sched_per_stop_sec",   # sched_remaining_sec / stops_ahead
-    "dist_per_stop_m",      # remaining_dist_m / stops_ahead
+    "route_id",           # 0
+    "stop_sequence",      # 1
+    "stops_ahead",        # 2
+    "hour",               # 3
+    "day_of_week",        # 4
+    "month",              # 5
+    "is_weekend",         # 6
+    "is_holiday",         # 7
+    "remaining_dist_m",   # 8
+    "progress_speed_mps", # 9
+    "stops_remaining",    # 10
+    "trip_progress_frac", # 11
+    "dist_per_stop_m",    # 12  remaining_dist_m / stops_ahead
+    "speed_eta_sec",      # 13  remaining_dist_m / speed; -1 when speed unknown
 ]
 
 TARGET_COL = "seconds_to_arrival"
