@@ -18,10 +18,11 @@ import pickle
 from pathlib import Path
 
 import boto3
+import joblib
 from dotenv import load_dotenv
 
 from src.gtfs_static import get_gtfs
-from src.train import MODEL_PATH
+from src.train import MODEL_PATH, PRIORS_PATH
 
 load_dotenv()
 
@@ -91,12 +92,24 @@ def build_gtfs_worker_data(gtfs) -> dict:
         for pts in (list(geom.coords),)
     }
 
+    # Route+hour speed/dwell priors — converted to string keys for fast dict lookup.
+    # Format: {"ROUTE_ID:HOUR": (hist_speed_mps, hist_time_per_stop_sec), "_global": (...)}
+    priors_raw: dict = {}
+    if PRIORS_PATH.exists():
+        raw = joblib.load(PRIORS_PATH)
+        priors_raw = {f"{rh[0]}:{rh[1]}": v for rh, v in raw["lookup"].items()}
+        priors_raw["_global"] = (raw["global_speed"], raw["global_tps"])
+        print(f"  Loaded {len(priors_raw) - 1} route×hour priors")
+    else:
+        print(f"  WARNING: {PRIORS_PATH} not found — priors will use fallback constants")
+
     data = {
         "shapes": shapes_coords,                          # shape_id → bytes (packed float64 pairs)
         "shape_lengths": dict(gtfs._shape_lengths),       # shape_id → float metres
         "stop_distances": dict(gtfs._stop_distances),     # (shape_id, stop_id) → float
         "trip_index": trip_index,
         "route_trips": dict(gtfs._route_trips),           # route_id → [trip_id, ...]
+        "route_hour_priors": priors_raw,                  # route+hour speed/dwell priors
     }
 
     n_shapes = len(data["shapes"])
@@ -132,7 +145,9 @@ def _extract_trees(pipeline) -> dict:
       10 stops_remaining
       11 trip_progress_frac
       12 dist_per_stop_m
-      13 speed_eta_sec        (remaining_dist_m / speed; -1 when speed unknown)
+      13 speed_eta_warm       (remaining_dist / effective_speed, warm-started)
+      14 hist_speed_mps       (route+hour historical median speed)
+      15 hist_travel_time_est (stops_ahead * hist seconds-per-stop, dwell-aware)
     """
     prep = pipeline.named_steps["prep"]
     model = pipeline.named_steps["model"]

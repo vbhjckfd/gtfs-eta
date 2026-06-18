@@ -33,7 +33,24 @@ _HTTP_TIMEOUT = 30
 # LLM diagnosis
 # --------------------------------------------------------------------------
 
-def _build_prompt(report: dict) -> str:
+def _fetch_issue_comments(token: str, repo: str) -> list[dict]:
+    """Return recent comments from the rolling quality issue (best-effort)."""
+    api = f"https://api.github.com/repos/{repo}/issues"
+    try:
+        issues = _gh("GET", f"{api}?state=open&per_page=100", token)
+        issues.raise_for_status()
+        match = next((i for i in issues.json()
+                      if i.get("title") == ISSUE_TITLE and "pull_request" not in i), None)
+        if not match:
+            return []
+        resp = _gh("GET", f"{api}/{match['number']}/comments?per_page=30", token)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return []
+
+
+def _build_prompt(report: dict, issue_comments: list[dict] | None = None) -> str:
     """A compact, fully-contextualised prompt — metrics + system background."""
     metrics = {
         k: report.get(k)
@@ -43,6 +60,18 @@ def _build_prompt(report: dict) -> str:
             "arriving_now", "worst_routes", "coverage_gap",
         )
     }
+
+    comments_block = ""
+    if issue_comments:
+        lines = ["\n\nRecent engineering notes from this issue (read before diagnosing "
+                 "— these document architectural decisions and known changes):"]
+        for c in issue_comments[-8:]:
+            author = c.get("user", {}).get("login", "?")
+            ts     = c.get("created_at", "")[:10]
+            body   = c.get("body", "").strip()[:800]
+            lines.append(f"\n[{ts} @{author}]\n{body}")
+        comments_block = "\n".join(lines)
+
     return (
         "You are diagnosing the live accuracy of a GTFS-RT arrival-time prediction "
         "feed for Lviv, Ukraine public transport. A gradient-boosted model "
@@ -50,27 +79,30 @@ def _build_prompt(report: dict) -> str:
         "upcoming stop, anchored at each vehicle position snapshot. Features: "
         "route_id, stop_sequence, stops_ahead, hour, day_of_week, month, "
         "is_weekend, is_holiday, remaining_dist_m, progress_speed_mps, "
-        "stops_remaining, trip_progress_frac, dist_per_stop_m, speed_eta_sec "
-        "(remaining_dist_m / progress_speed_mps; -1 sentinel when speed unknown). "
-        "CRITICAL CONTEXT: sched_remaining_sec (GTFS stop departure schedule) has "
-        "been intentionally removed from the model — in-person verification confirmed "
-        "that Lviv transit stop departure times are unreliable, especially at "
-        "terminus/final stops where buses depart whenever operationally convenient. "
-        "Do NOT suggest adding schedule-based features back. The baseline is "
-        "speed_eta_sec (GPS-only naive ETA); improvements must beat that.\n\n"
+        "stops_remaining, trip_progress_frac, dist_per_stop_m, "
+        "speed_eta_warm (remaining_dist / effective_speed — warm-started with "
+        "route+hour historical median when current speed is unknown), "
+        "hist_speed_mps (route+hour historical median speed), "
+        "hist_travel_time_est (stops_ahead × historical seconds-per-stop — "
+        "captures accumulated dwell time for long-horizon predictions). "
+        "CRITICAL: sched_remaining_sec (GTFS schedule) has been intentionally "
+        "removed — in-person verification confirmed stop departure times are "
+        "unreliable in Lviv transit, especially at terminus. Do NOT suggest "
+        "re-adding schedule features. The baseline is speed_eta_warm.\n\n"
         "Below is one day of scored quality, joining what the feed *predicted* "
         "against what *actually* happened (derived from raw vehicle positions). "
         "error_sec is signed: positive = predicted arrival LATER than reality "
         "(pessimistic); negative = predicted EARLIER (optimistic). lead buckets are "
         "the horizon the rider saw. coverage_frac is the share of real arrivals "
         "that received any prediction.\n\n"
-        f"{json.dumps(metrics, indent=2, default=str)}\n\n"
+        f"{json.dumps(metrics, indent=2, default=str)}"
+        f"{comments_block}\n\n"
         "Diagnose the most actionable problems. For each finding: tie it to a "
         "specific lever (a named feature, a hyperparameter, the off-route/"
-        "trip-matching filter, schedule drift, an infra/coverage gap, or training "
-        "data), give a concrete hypothesis for the cause, and a specific suggested "
-        "change. Rank by impact. Do not invent metrics not present above; if the "
-        "data is insufficient for a confident call, say so and lower confidence. "
+        "trip-matching filter, an infra/coverage gap, or training data), give a "
+        "concrete hypothesis for the cause, and a specific suggested change. Rank "
+        "by impact. Do not invent metrics not present above; if the data is "
+        "insufficient for a confident call, say so and lower confidence. "
         "Recommend a retrain only for systemic degradation a retrain would plausibly "
         "fix (drift, broad bias), not for a single route or hour."
     )
@@ -108,13 +140,21 @@ def diagnose(report: dict) -> dict | None:
         recommend_retrain: bool
         retrain_reason: str
 
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    repo  = os.environ.get("GITHUB_REPOSITORY")
+    issue_comments: list[dict] = []
+    if token and repo:
+        issue_comments = _fetch_issue_comments(token, repo)
+        if issue_comments:
+            print(f"  [diagnose] loaded {len(issue_comments)} issue comments for context", flush=True)
+
     client = anthropic.Anthropic()
     try:
         resp = client.messages.parse(
             model=MODEL,
             max_tokens=_MAX_TOKENS,
             thinking={"type": "adaptive"},
-            messages=[{"role": "user", "content": _build_prompt(report)}],
+            messages=[{"role": "user", "content": _build_prompt(report, issue_comments)}],
             output_format=Diagnosis,
         )
     except Exception as exc:  # never let a model/API hiccup fail the job

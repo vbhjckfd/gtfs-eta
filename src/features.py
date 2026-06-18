@@ -148,7 +148,6 @@ def compute_features_for_training(
         rem_dist = np.maximum(0.0, d_target - d_vehicle)
         stops_ahead_safe = np.maximum(1, stops_ahead_arr)
         speed = grp["progress_speed_mps"].to_numpy(dtype=float)
-        speed_eta = np.where(speed > 0, rem_dist / speed, -1.0)
 
         pieces.append(pd.DataFrame({
             "route_id": trip.route_id,
@@ -164,9 +163,7 @@ def compute_features_for_training(
             "stops_remaining": grp["stops_remaining"].astype(int).to_numpy(),
             "trip_progress_frac": d_target / shape_len,
             "dist_per_stop_m": rem_dist / stops_ahead_safe,
-            "speed_eta_sec": speed_eta,
-            # Reference-only (not a model feature): kept so train.py can report
-            # schedule MAE as a comparison point.
+            # Reference-only columns (not model features):
             "sched_remaining_sec": sched_rem,
             "date": grp["date"].to_numpy(),
             TARGET_COL: grp["seconds_to_arrival"].to_numpy(dtype=float),
@@ -184,6 +181,7 @@ def compute_features_for_inference(
     progress_speed_mps: float,
     gtfs: GTFSStatic,
     max_stops_ahead: int = 10,
+    priors: dict | None = None,
 ) -> pd.DataFrame:
     """One feature row per upcoming stop for live inference."""
     trip = gtfs.get_trip(trip_id)
@@ -225,20 +223,70 @@ def compute_features_for_inference(
             "stops_remaining": n_stops_total - 1 - seq_to_index.get(stop_seq, 0),
             "trip_progress_frac": d_target / shape_len,
             "dist_per_stop_m": rem_dist / max(1, stops_ahead),
-            "speed_eta_sec": rem_dist / progress_speed_mps if progress_speed_mps > 0 else -1.0,
             # Reference-only: schedule interpolation kept for sanity checks.
             "sched_remaining_sec": sched_rem,
         })
 
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = apply_priors(result, priors)
+    return result
+
+
+# Fallbacks used when priors are unavailable (no lookup match or no priors at all).
+_FALLBACK_SPEED_MPS = 5.0   # ~18 km/h urban bus
+_FALLBACK_TPS_SEC   = 40.0  # seconds per stop including dwell
+
+
+def apply_priors(df: pd.DataFrame, priors: dict | None) -> pd.DataFrame:
+    """Enrich a feature DataFrame with route+hour speed/dwell priors.
+
+    Adds three columns:
+      speed_eta_warm       — remaining_dist / effective_speed (warm-started)
+      hist_speed_mps       — route+hour historical median speed
+      hist_travel_time_est — stops_ahead * historical seconds-per-stop (dwell-aware ETA)
+
+    When priors is None or a lookup is missing, global fallback constants are used.
+    Called by train.py after the time split (so priors are computed on train data only)
+    and by compute_features_for_inference when priors are available.
+    """
+    df = df.copy()
+
+    if priors:
+        lookup = priors["lookup"]
+        g_speed = priors["global_speed"]
+        g_tps   = priors["global_tps"]
+        prior_rows = [
+            {"route_id": str(rh[0]), "hour": int(rh[1]),
+             "_hist_speed": float(v[0]), "_hist_tps": float(v[1])}
+            for rh, v in lookup.items()
+        ]
+        prior_df = pd.DataFrame(prior_rows)
+        df = df.merge(prior_df, on=["route_id", "hour"], how="left")
+        df["_hist_speed"] = df["_hist_speed"].fillna(g_speed)
+        df["_hist_tps"]   = df["_hist_tps"].fillna(g_tps)
+    else:
+        df["_hist_speed"] = _FALLBACK_SPEED_MPS
+        df["_hist_tps"]   = _FALLBACK_TPS_SEC
+
+    speed     = df["progress_speed_mps"].to_numpy(dtype=float)
+    hist_spd  = df["_hist_speed"].to_numpy(dtype=float)
+    eff_speed = np.where(speed > 0, speed, hist_spd)
+
+    df["hist_speed_mps"]        = hist_spd
+    df["speed_eta_warm"]        = df["remaining_dist_m"].to_numpy() / np.maximum(eff_speed, 0.1)
+    df["hist_travel_time_est"]  = df["stops_ahead"].to_numpy() * df["_hist_tps"].to_numpy()
+    df = df.drop(columns=["_hist_speed", "_hist_tps"])
+    return df
 
 
 # Order matters: the worker export (scripts/export_worker_data.py) and the
 # pure-Python tree traversal (src/inference.py) index features positionally.
-# sched_remaining_sec and sched_per_stop_sec have been removed: GTFS departure
-# schedules are unreliable for Lviv transit (especially at terminus) — only GPS
-# signals are used. speed_eta_sec replaces the schedule as the ETA prior.
-FEATURE_COLS = [
+# GTFS schedule features removed — stop departure times are unreliable in Lviv
+# transit. Only GPS-derived signals are used.
+# Prior-derived features (speed_eta_warm, hist_speed_mps, hist_travel_time_est)
+# are added by apply_priors() after compute_features_for_training returns.
+BASE_FEATURE_COLS = [
     "route_id",           # 0
     "stop_sequence",      # 1
     "stops_ahead",        # 2
@@ -252,7 +300,14 @@ FEATURE_COLS = [
     "stops_remaining",    # 10
     "trip_progress_frac", # 11
     "dist_per_stop_m",    # 12  remaining_dist_m / stops_ahead
-    "speed_eta_sec",      # 13  remaining_dist_m / speed; -1 when speed unknown
 ]
+
+PRIOR_FEATURE_COLS = [
+    "speed_eta_warm",        # 13  remaining_dist / effective_speed (warm-started)
+    "hist_speed_mps",        # 14  route+hour historical median speed
+    "hist_travel_time_est",  # 15  stops_ahead * hist seconds-per-stop (dwell-aware)
+]
+
+FEATURE_COLS = BASE_FEATURE_COLS + PRIOR_FEATURE_COLS
 
 TARGET_COL = "seconds_to_arrival"

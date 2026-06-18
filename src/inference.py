@@ -253,12 +253,16 @@ def build_features(trip_id: str, v_dist: float, speed: float,
 
     sts = trip["stop_times"]  # [(stop_id, seq, sched_cum_sec), ...]
     n_stops_total = len(sts)
-    # Sort stops by distance along shape — sched_cum_sec (st[2]) is no longer
-    # used as a feature; only GPS signals matter for prediction.
     entries = sorted(
         (data["stop_distances"].get((trip["shape_id"], st[0]), 0.0), st[0], st[1], i)
         for i, st in enumerate(sts)
     )
+
+    # Route+hour priors for warm-started ETA and dwell-aware estimate.
+    route_id = trip["route_id"]
+    priors   = data.get("route_hour_priors", {})
+    _fallback = priors.get("_global", (5.0, 40.0))
+    hist_speed, hist_tps = priors.get(f"{route_id}:{snap_ts.hour}", _fallback)
 
     result = []
     stops_ahead = 0
@@ -268,17 +272,20 @@ def build_features(trip_id: str, v_dist: float, speed: float,
         stops_ahead += 1
         if stops_ahead > MAX_STOPS_AHEAD:
             break
-        rem_dist = d_target - v_dist
+        rem_dist  = d_target - v_dist
+        eff_speed = speed if speed > 0.0 else hist_speed
         feat_row = [
-            trip["route_id"], stop_seq, stops_ahead,
+            route_id, stop_seq, stops_ahead,
             snap_ts.hour, snap_ts.weekday(), snap_ts.month,
             int(snap_ts.weekday() >= 5), is_holiday,
-            rem_dist,                               # idx 8
-            speed,                                  # idx 9  progress_speed_mps
-            n_stops_total - 1 - orig_idx,           # idx 10 stops_remaining
-            d_target / shape_len,                   # idx 11 trip_progress_frac
-            rem_dist / max(1, stops_ahead),         # idx 12 dist_per_stop_m
-            rem_dist / speed if speed > 0.0 else -1.0,  # idx 13 speed_eta_sec
+            rem_dist,                                    # idx 8  remaining_dist_m
+            speed,                                       # idx 9  progress_speed_mps
+            n_stops_total - 1 - orig_idx,               # idx 10 stops_remaining
+            d_target / shape_len,                        # idx 11 trip_progress_frac
+            rem_dist / max(1, stops_ahead),              # idx 12 dist_per_stop_m
+            rem_dist / max(eff_speed, 0.1),              # idx 13 speed_eta_warm
+            hist_speed,                                  # idx 14 hist_speed_mps
+            stops_ahead * hist_tps,                      # idx 15 hist_travel_time_est
         ]
         result.append((feat_row, stop_id, stop_seq))
     return result

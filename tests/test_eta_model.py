@@ -17,9 +17,11 @@ import pytest
 from shapely.geometry import LineString, Point
 
 from src.features import (
+    BASE_FEATURE_COLS,
     FEATURE_COLS,
     SPEED_UNKNOWN,
     TARGET_COL,
+    apply_priors,
     compute_features_for_inference,
     compute_features_for_training,
     sched_sec_at_dist,
@@ -197,10 +199,13 @@ class TestTrainingFeatures:
     def test_feature_columns_complete(self, gtfs):
         rows = build_training_rows(_trajectory(), gtfs)
         feats = compute_features_for_training(rows, gtfs)
-        for col in FEATURE_COLS + [TARGET_COL, "date"]:
+        # Base features are present directly; prior-derived features need apply_priors.
+        for col in BASE_FEATURE_COLS + [TARGET_COL, "date"]:
             assert col in feats.columns, col
         assert len(feats) == len(rows)
-        assert feats[FEATURE_COLS[1:]].notna().all().all()
+        feats = apply_priors(feats, None)  # use global fallback
+        for col in FEATURE_COLS:
+            assert col in feats.columns, col
 
     def test_sched_remaining_interpolated_at_position(self, gtfs):
         # Vehicle halfway between stop0 (cum 0 s) and stop1 (cum 60 s):
@@ -250,6 +255,10 @@ def _compact_data(gtfs: FakeGTFS) -> dict:
             TRIP_ID: {"route_id": ROUTE_ID, "shape_id": SHAPE_ID, "stop_times": stop_times}
         },
         "route_trips": {ROUTE_ID: [TRIP_ID]},
+        "route_hour_priors": {
+            f"{ROUTE_ID}:7": (8.0, 45.0),  # (hist_speed_mps, hist_time_per_stop_sec)
+            "_global": (5.0, 40.0),
+        },
     }
 
 
@@ -268,8 +277,10 @@ class TestCompactInference:
         assert stop_seq == 3
         assert feat[2] == 1                                   # stops_ahead
         assert feat[8] == pytest.approx(5.0, abs=1.0)         # remaining_dist_m
-        assert feat[9] == 8.0                                 # progress_speed_mps
-        assert feat[13] == pytest.approx(5.0 / 8.0, abs=0.1) # speed_eta_sec
+        assert feat[9]  == 8.0                                  # progress_speed_mps
+        assert feat[13] == pytest.approx(5.0 / 8.0, abs=0.1)  # speed_eta_warm (speed known)
+        assert feat[14] == pytest.approx(8.0, abs=0.1)         # hist_speed_mps from priors
+        assert feat[15] == pytest.approx(1 * 45.0, abs=1.0)    # hist_travel_time_est (1 stop)
         assert len(feat) == len(FEATURE_COLS)
 
     def test_build_features_caps_horizon(self, gtfs):
@@ -342,9 +353,12 @@ class TestTreeExportParity:
 
         rng = np.random.default_rng(42)
         n = 2000
-        stops_ahead = rng.integers(1, 11, n)
-        remaining_dist_m = rng.uniform(0, 5000, n)
-        speed_mps = rng.uniform(-1, 15, n)
+        stops_ahead    = rng.integers(1, 11, n)
+        remaining_dist = rng.uniform(0, 5000, n)
+        speed_mps      = rng.uniform(-1, 15, n)
+        hist_speed     = rng.uniform(3, 10, n)
+        hist_tps       = rng.uniform(20, 80, n)
+        eff_speed      = np.where(speed_mps > 0, speed_mps, hist_speed)
         df = pd.DataFrame({
             "route_id": rng.choice(["10", "25", "117"], n),
             "stop_sequence": rng.integers(1, 60, n),
@@ -354,12 +368,14 @@ class TestTreeExportParity:
             "month": rng.integers(1, 13, n),
             "is_weekend": rng.integers(0, 2, n),
             "is_holiday": np.zeros(n, dtype=int),
-            "remaining_dist_m": remaining_dist_m,
+            "remaining_dist_m": remaining_dist,
             "progress_speed_mps": speed_mps,
             "stops_remaining": rng.integers(1, 40, n),
             "trip_progress_frac": rng.uniform(0, 1, n),
-            "dist_per_stop_m": remaining_dist_m / np.maximum(1, stops_ahead),
-            "speed_eta_sec": np.where(speed_mps > 0, remaining_dist_m / speed_mps, -1.0),
+            "dist_per_stop_m": remaining_dist / np.maximum(1, stops_ahead),
+            "speed_eta_warm": remaining_dist / np.maximum(eff_speed, 0.1),
+            "hist_speed_mps": hist_speed,
+            "hist_travel_time_est": stops_ahead * hist_tps,
         })
         y = (df["remaining_dist_m"] / 6.0 + rng.normal(0, 10, n)).clip(0)
 

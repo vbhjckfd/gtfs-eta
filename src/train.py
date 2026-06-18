@@ -25,10 +25,14 @@ from sklearn.metrics import mean_absolute_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OrdinalEncoder
 
-from src.features import FEATURE_COLS, TARGET_COL, compute_features_for_training
+from src.features import (
+    BASE_FEATURE_COLS, FEATURE_COLS, PRIOR_FEATURE_COLS, TARGET_COL,
+    apply_priors, compute_features_for_training,
+)
 
 MODEL_DIR = Path(__file__).parent.parent / "models"
 MODEL_PATH = MODEL_DIR / "eta_pipeline.joblib"
+PRIORS_PATH = MODEL_DIR / "route_hour_priors.joblib"
 
 TEST_FRACTION = 0.2
 
@@ -58,6 +62,47 @@ def _build_sample_weights(df: pd.DataFrame) -> np.ndarray:
     w[(hour >= 14) & (hour <= 16)] = 1.5   # evening peak
     w[(hour >= 18) | (hour <= 3)] = 2.0    # late night / early morning
     return w
+
+
+def _compute_route_hour_priors(train_df: pd.DataFrame) -> dict:
+    """Per-(route_id, hour) median observed speed and travel-time-per-stop.
+
+    travel-time-per-stop = seconds_to_arrival / stops_ahead — includes dwell,
+    signal delays, and speed variation; the HistGBT uses it to correct the
+    long-horizon optimism that pure-speed extrapolation creates.
+
+    Only rows with known speed are used for the speed median; all rows are used
+    for the per-stop time since low/unknown speed still has a valid target.
+    """
+    known_speed = train_df[train_df["progress_speed_mps"] > 0].copy()
+    all_rows = train_df.copy()
+    all_rows["_tps"] = all_rows[TARGET_COL] / all_rows["stops_ahead"].clip(lower=1)
+
+    speed_by_rh = (
+        known_speed.groupby(["route_id", "hour"])["progress_speed_mps"]
+        .median()
+        .rename("speed")
+    )
+    tps_by_rh = (
+        all_rows.groupby(["route_id", "hour"])["_tps"]
+        .median()
+        .rename("tps")
+    )
+    by_rh = pd.concat([speed_by_rh, tps_by_rh], axis=1).reset_index()
+
+    g_speed = float(known_speed["progress_speed_mps"].median())
+    g_tps   = float(all_rows["_tps"].median())
+
+    lookup = {
+        (str(row["route_id"]), int(row["hour"])): (
+            float(row["speed"]) if pd.notna(row.get("speed")) else g_speed,
+            float(row["tps"])   if pd.notna(row.get("tps"))   else g_tps,
+        )
+        for _, row in by_rh.iterrows()
+    }
+    print(f"  Priors: {len(lookup)} route×hour entries  "
+          f"(global: speed={g_speed:.1f} m/s, tps={g_tps:.0f}s)")
+    return {"lookup": lookup, "global_speed": g_speed, "global_tps": g_tps}
 
 
 def _build_pipeline() -> Pipeline:
@@ -150,7 +195,8 @@ def train(
         df = _load_features(input_path)
         print(f"  Done  ({time.monotonic() - t_feat:.1f}s)")
 
-    df = df.dropna(subset=[TARGET_COL] + FEATURE_COLS).copy()
+    # Sanity filter on base features only — prior-derived features don't exist yet.
+    df = df.dropna(subset=[TARGET_COL] + BASE_FEATURE_COLS).copy()
     df = df[df[TARGET_COL].between(0, 3600)].copy()
     print(f"  After sanity filter: {len(df):,} rows")
 
@@ -160,6 +206,15 @@ def train(
         print(f"  Excluded {n_before - len(df):,} rows from known-bad routes {set(_BAD_ROUTE_IDS)}")
 
     train_df, test_df = _time_split(df, test_fraction)
+
+    # Compute route+hour priors from training split only, then enrich both splits.
+    print("Computing route+hour priors…")
+    priors = _compute_route_hour_priors(train_df)
+    train_df = apply_priors(train_df, priors)
+    test_df  = apply_priors(test_df,  priors)
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(priors, PRIORS_PATH)
+    print(f"  Priors saved → {PRIORS_PATH}")
 
     X_train = train_df[FEATURE_COLS]
     y_train = train_df[TARGET_COL].astype(float)
@@ -183,12 +238,9 @@ def train(
     train_mae = mean_absolute_error(y_train, y_pred_train)
     test_mae  = mean_absolute_error(y_test,  y_pred_test)
 
-    # GPS-only baseline: remaining_dist / observed_speed.  -1 is the sentinel
-    # for unknown speed; fill those rows with the median so the baseline is
-    # computable even for first-snapshot rows.
-    if "speed_eta_sec" in test_df.columns:
-        gps_eta = test_df["speed_eta_sec"].replace(-1.0, np.nan)
-        baseline_pred = gps_eta.fillna(gps_eta.median()).values
+    # GPS warm-started baseline: remaining_dist / effective_speed (no NaN/-1 sentinel).
+    if "speed_eta_warm" in test_df.columns:
+        baseline_pred = test_df["speed_eta_warm"].values
     else:
         baseline_pred = np.full(len(y_test), y_train.mean())
     baseline_mae = mean_absolute_error(y_test, baseline_pred)
