@@ -273,9 +273,13 @@ def apply_priors(df: pd.DataFrame, priors: dict | None) -> pd.DataFrame:
     hist_spd  = df["_hist_speed"].to_numpy(dtype=float)
     eff_speed = np.where(speed > 0, speed, hist_spd)
 
+    # (stops_ahead - 1) excludes the imminent stop's dwell: speed_eta_warm already
+    # covers that segment, and counting the next stop's full per-stop time causes
+    # ~44 s pessimism at stops_ahead=1.  Intermediate stops (2+) still accumulate.
+    stops_for_dwell = np.maximum(0, df["stops_ahead"].to_numpy() - 1)
     df["hist_speed_mps"]        = hist_spd
     df["speed_eta_warm"]        = df["remaining_dist_m"].to_numpy() / np.maximum(eff_speed, 0.1)
-    df["hist_travel_time_est"]  = df["stops_ahead"].to_numpy() * df["_hist_tps"].to_numpy()
+    df["hist_travel_time_est"]  = stops_for_dwell * df["_hist_tps"].to_numpy()
     df = df.drop(columns=["_hist_speed", "_hist_tps"])
     return df
 

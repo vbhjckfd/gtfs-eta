@@ -83,15 +83,18 @@ def _compute_route_hour_priors(train_df: pd.DataFrame) -> dict:
         .median()
         .rename("speed")
     )
+    # p65 (vs median) reduces long-horizon optimism: stops_ahead × p65_tps better
+    # approximates realized cumulative dwell, which is right-skewed (occasional
+    # long waits dominate the 20m+ bucket bias of -64 s).
     tps_by_rh = (
         all_rows.groupby(["route_id", "hour"])["_tps"]
-        .median()
+        .quantile(0.65)
         .rename("tps")
     )
     by_rh = pd.concat([speed_by_rh, tps_by_rh], axis=1).reset_index()
 
     g_speed = float(known_speed["progress_speed_mps"].median())
-    g_tps   = float(all_rows["_tps"].median())
+    g_tps   = float(all_rows["_tps"].quantile(0.65))
 
     lookup = {
         (str(row["route_id"]), int(row["hour"])): (

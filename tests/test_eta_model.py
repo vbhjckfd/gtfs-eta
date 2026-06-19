@@ -280,7 +280,8 @@ class TestCompactInference:
         assert feat[9]  == 8.0                                  # progress_speed_mps
         assert feat[13] == pytest.approx(5.0 / 8.0, abs=0.1)  # speed_eta_warm (speed known)
         assert feat[14] == pytest.approx(8.0, abs=0.1)         # hist_speed_mps from priors
-        assert feat[15] == pytest.approx(1 * 45.0, abs=1.0)    # hist_travel_time_est (1 stop)
+        # At stops_ahead=1, dwell=(1-1)*tps=0: imminent stop dwell not counted
+        assert feat[15] == pytest.approx(0.0, abs=1.0)         # hist_travel_time_est
         assert len(feat) == len(FEATURE_COLS)
 
     def test_build_features_caps_horizon(self, gtfs):
@@ -375,7 +376,7 @@ class TestTreeExportParity:
             "dist_per_stop_m": remaining_dist / np.maximum(1, stops_ahead),
             "speed_eta_warm": remaining_dist / np.maximum(eff_speed, 0.1),
             "hist_speed_mps": hist_speed,
-            "hist_travel_time_est": stops_ahead * hist_tps,
+            "hist_travel_time_est": np.maximum(0, stops_ahead - 1) * hist_tps,
         })
         y = (df["remaining_dist_m"] / 6.0 + rng.normal(0, 10, n)).clip(0)
 

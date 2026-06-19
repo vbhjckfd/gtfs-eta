@@ -274,6 +274,8 @@ def build_features(trip_id: str, v_dist: float, speed: float,
             break
         rem_dist  = d_target - v_dist
         eff_speed = speed if speed > 0.0 else hist_speed
+        # (stops_ahead - 1): exclude imminent stop's dwell (mirrors apply_priors in features.py)
+        dwell_stops = max(0, stops_ahead - 1)
         feat_row = [
             route_id, stop_seq, stops_ahead,
             snap_ts.hour, snap_ts.weekday(), snap_ts.month,
@@ -285,7 +287,7 @@ def build_features(trip_id: str, v_dist: float, speed: float,
             rem_dist / max(1, stops_ahead),              # idx 12 dist_per_stop_m
             rem_dist / max(eff_speed, 0.1),              # idx 13 speed_eta_warm
             hist_speed,                                  # idx 14 hist_speed_mps
-            stops_ahead * hist_tps,                      # idx 15 hist_travel_time_est
+            dwell_stops * hist_tps,                      # idx 15 hist_travel_time_est
         ]
         result.append((feat_row, stop_id, stop_seq))
     return result
@@ -368,7 +370,23 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
 
         vx, vy = project_xy(lon, lat)
         trip_id, min_dist = infer_trip(route_id, reported_tid, vx, vy, gtfs_data)
-        if update_tracker(trackers, vid, min_dist) or trip_id is None:
+        if trip_id is None:
+            continue
+
+        # When a vehicle starts a new trip its previous off-route history is stale.
+        # Reset the state machine so the new trip gets predictions immediately
+        # rather than waiting 3 on-route snapshots to recover.  Early-morning trips
+        # are especially affected: the terminus of trip N can be 150+ m from the
+        # shape start of trip N+1, marking the bus "off-route" during transition.
+        state = trackers.get(vid)
+        if state is not None:
+            prev_pos = state.get("pos")
+            if prev_pos is not None and prev_pos[2] != trip_id:
+                state["status"] = "on_route"
+                state["off"] = 0
+                state["on"] = 0
+
+        if update_tracker(trackers, vid, min_dist):
             continue
 
         v_dist = vehicle_dist_along(trip_id, vx, vy, gtfs_data)
