@@ -134,7 +134,16 @@ class GTFSStatic:
     # ------------------------------------------------------------------
 
     def _extract(self, zip_path: Path) -> None:
+        _REQUIRED = ("stop_times.txt", "trips.txt", "routes.txt", "stops.txt")
         with zipfile.ZipFile(zip_path) as zf:
+            names = set(zf.namelist())
+            for req in _REQUIRED:
+                if req not in names or zf.getinfo(req).file_size == 0:
+                    zip_path.unlink()
+                    raise RuntimeError(
+                        f"GTFS static feed is corrupt: {req} is missing or empty — "
+                        f"zip deleted so next run will re-download"
+                    )
             zf.extractall(DATA_DIR)
 
     def _parse(self) -> None:
