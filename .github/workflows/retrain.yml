@@ -43,7 +43,8 @@ jobs:
       # peaks ~2 GB). learn = pipeline + train; export uploads both pkls to R2.
       - name: Learn + export to R2
         run: |
-          make learn PARALLEL=2
+          set -o pipefail
+          make learn PARALLEL=2 2>&1 | tee /tmp/train.log
           make export
         env:
           R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
@@ -52,3 +53,30 @@ jobs:
           R2_BUCKET:            gtfs-lviv
           SENTRY_DSN:           ${{ secrets.SENTRY_DSN }}
           SENTRY_RELEASE:       ${{ github.sha }}
+
+      - name: Post summary to retrain log issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STATUS="${{ job.status }}"
+          REASON="${{ github.event.inputs.reason }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SHA="${{ github.sha }}"
+
+          if [ "$STATUS" = "success" ]; then
+            TEST_MAE=$(grep -oP 'Test  MAE:\s+\K[\d.]+' /tmp/train.log | tail -1 || echo "N/A")
+            TRAIN_MAE=$(grep -oP 'Train MAE:\s+\K[\d.]+' /tmp/train.log | tail -1 || echo "N/A")
+            IMPROVEMENT=$(grep -oP 'Improvement:\s+\K[^\s]+' /tmp/train.log | tail -1 || echo "N/A")
+            ROWS=$(grep -oP '[\d,]+(?= training rows across)' /tmp/train.log | tail -1 || echo "N/A")
+            DATES=$(grep -oP '\d+(?= dates)' /tmp/train.log | tail -1 || echo "N/A")
+            printf '### ✅ Retrain succeeded — [run](%s)\n\n| Metric | Value |\n|--------|-------|\n| Test MAE | %ss |\n| Train MAE | %ss |\n| vs baseline | %s%% |\n| Rows | %s across %s days |\n| Reason | %s |\n| Commit | %s |\n' \
+              "$RUN_URL" "$TEST_MAE" "$TRAIN_MAE" "$IMPROVEMENT" "$ROWS" "$DATES" "$REASON" "$SHA" \
+              > /tmp/retrain_body.md
+          else
+            printf '### ❌ Retrain failed — [run](%s)\n\n| | |\n|--|--|\n| Reason | %s |\n| Commit | %s |\n' \
+              "$RUN_URL" "$REASON" "$SHA" \
+              > /tmp/retrain_body.md
+          fi
+
+          gh issue comment 4 --body-file /tmp/retrain_body.md --repo "${{ github.repository }}"
