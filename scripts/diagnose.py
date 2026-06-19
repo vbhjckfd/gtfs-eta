@@ -34,7 +34,12 @@ _HTTP_TIMEOUT = 30
 # --------------------------------------------------------------------------
 
 def _fetch_issue_comments(token: str, repo: str) -> list[dict]:
-    """Return recent comments from the rolling quality issue (best-effort)."""
+    """Return all human engineering notes from the rolling quality issue (best-effort).
+
+    Excludes automated github-actions one-liners ("Updated diagnosis for…") since
+    they just restate the metrics already in the prompt and crowd out the real
+    architectural context.  Fetches up to 100 comments (paginated if needed).
+    """
     api = f"https://api.github.com/repos/{repo}/issues"
     try:
         issues = _gh("GET", f"{api}?state=open&per_page=100", token)
@@ -43,9 +48,23 @@ def _fetch_issue_comments(token: str, repo: str) -> list[dict]:
                       if i.get("title") == ISSUE_TITLE and "pull_request" not in i), None)
         if not match:
             return []
-        resp = _gh("GET", f"{api}/{match['number']}/comments?per_page=30", token)
-        resp.raise_for_status()
-        return resp.json()
+        all_comments: list[dict] = []
+        page = 1
+        while True:
+            resp = _gh("GET", f"{api}/{match['number']}/comments?per_page=100&page={page}", token)
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            all_comments.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        # Drop automated bot comments — they restate metrics already in the prompt.
+        return [
+            c for c in all_comments
+            if c.get("user", {}).get("login") != "github-actions"
+        ]
     except Exception:
         return []
 
@@ -63,12 +82,13 @@ def _build_prompt(report: dict, issue_comments: list[dict] | None = None) -> str
 
     comments_block = ""
     if issue_comments:
-        lines = ["\n\nRecent engineering notes from this issue (read before diagnosing "
-                 "— these document architectural decisions and known changes):"]
-        for c in issue_comments[-8:]:
+        lines = ["\n\nEngineering notes from this issue (ALL of them — read carefully "
+                 "before diagnosing; they document architectural decisions, confirmed "
+                 "root causes, and changes that are already in production):"]
+        for c in issue_comments:
             author = c.get("user", {}).get("login", "?")
             ts     = c.get("created_at", "")[:10]
-            body   = c.get("body", "").strip()[:800]
+            body   = c.get("body", "").strip()[:4000]
             lines.append(f"\n[{ts} @{author}]\n{body}")
         comments_block = "\n".join(lines)
 
@@ -151,7 +171,7 @@ def diagnose(report: dict) -> dict | None:
     if token and repo:
         issue_comments = _fetch_issue_comments(token, repo)
         if issue_comments:
-            print(f"  [diagnose] loaded {len(issue_comments)} issue comments for context", flush=True)
+            print(f"  [diagnose] loaded {len(issue_comments)} engineering notes for context", flush=True)
 
     client = anthropic.Anthropic()
     try:
