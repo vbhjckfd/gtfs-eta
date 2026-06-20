@@ -1,5 +1,5 @@
 .PHONY: install pipeline pipeline-date train learn export deploy \
-        sanity validate-off-route check-gtfs check-snapshots \
+        sanity validate-off-route validate-horizon check-gtfs check-snapshots \
         push-feed serve-feed smoke score review-quality diagnose help
 
 # Days processed concurrently by `make pipeline` / `make learn`.
@@ -29,6 +29,10 @@ train:
 
 ## Full learning cycle: regenerate training data (parallel) + train the model
 learn: pipeline train
+
+## Report held-out bias + MAE per stops_ahead (curve should stay flat, near zero)
+validate-horizon:
+	python scripts/validate_horizon_bias.py
 
 # ── Cloudflare Worker ──────────────────────────────────────────────────────
 
@@ -97,6 +101,7 @@ help:
 	@echo "  pipeline-date DATE=  Run pipeline for a single date"
 	@echo "  train                Build features + train model"
 	@echo "  learn                pipeline + train in one step"
+	@echo "  validate-horizon     Held-out bias + MAE per stops_ahead (post-retrain check)"
 	@echo ""
 	@echo "  export               Upload GTFS + model to R2"
 	@echo "  deploy               Deploy Cloudflare Worker"

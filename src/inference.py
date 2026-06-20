@@ -274,8 +274,6 @@ def build_features(trip_id: str, v_dist: float, speed: float,
             break
         rem_dist  = d_target - v_dist
         eff_speed = speed if speed > 0.0 else hist_speed
-        # (stops_ahead - 1): exclude imminent stop's dwell (mirrors apply_priors in features.py)
-        dwell_stops = max(0, stops_ahead - 1)
         feat_row = [
             route_id, stop_seq, stops_ahead,
             snap_ts.hour, snap_ts.weekday(), snap_ts.month,
@@ -287,7 +285,7 @@ def build_features(trip_id: str, v_dist: float, speed: float,
             rem_dist / max(1, stops_ahead),              # idx 12 dist_per_stop_m
             rem_dist / max(eff_speed, 0.1),              # idx 13 speed_eta_warm
             hist_speed,                                  # idx 14 hist_speed_mps
-            dwell_stops * hist_tps,                      # idx 15 hist_travel_time_est
+            stops_ahead * hist_tps,                      # idx 15 hist_travel_time_est
         ]
         result.append((feat_row, stop_id, stop_seq))
     return result
