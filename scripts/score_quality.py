@@ -67,6 +67,15 @@ def _put(client, key: str, body: bytes, content_type: str) -> None:
     client.put_object(Bucket=R2_BUCKET, Key=key, Body=body, ContentType=content_type)
 
 
+def _report_exists(client, date_str: str) -> bool:
+    """True if quality/<date>.json is already published (this day was scored)."""
+    try:
+        client.head_object(Bucket=R2_BUCKET, Key=f"{QUALITY_PREFIX}{date_str}.json")
+        return True
+    except client.exceptions.ClientError:
+        return False
+
+
 # --------------------------------------------------------------------------
 # Auto-retrain gate (src.gate decides; this dispatches + tracks cooldown)
 # --------------------------------------------------------------------------
@@ -221,7 +230,28 @@ def main() -> int:
     parser.add_argument(
         "--no-retrain", action="store_true", help="skip the auto-retrain gate"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="re-score even if quality/<date>.json already exists (overrides the "
+        "idempotency guard that keeps the schedule backstop from duplicating the "
+        "worker-dispatched run)",
+    )
     args = parser.parse_args()
+
+    # Idempotency guard: this workflow fires twice a day — once from the worker's
+    # 02:15 UTC workflow_dispatch, once from the GitHub `schedule` backstop (which
+    # lands hours late). Both default to scoring *yesterday*. Without this guard
+    # the second run re-scores the same day, posts a duplicate "Updated diagnosis"
+    # comment, and re-evaluates the retrain gate. If the day is already published,
+    # the primary run did everything — the backstop should no-op.
+    if not args.no_publish and not args.force and _report_exists(_make_client(), args.date):
+        print(
+            f"  quality/{args.date}.json already exists — already scored; "
+            f"skipping (use --force to re-score).",
+            flush=True,
+        )
+        return 0
 
     print(f"Scoring live ETA quality for {args.date}…", flush=True)
     report = score_date(args.date)
