@@ -197,6 +197,119 @@ def diagnose(report: dict) -> dict | None:
 # GitHub issue upsert
 # --------------------------------------------------------------------------
 
+def _signed(v) -> str:
+    """`+12`/`-7`, or `?` when the metric is missing (never raises on None)."""
+    return f"{v:+g}" if isinstance(v, (int, float)) else "?"
+
+
+def _late_early(bias) -> str:
+    return "late" if isinstance(bias, (int, float)) and bias >= 0 else "early"
+
+
+def _findings_md(diagnosis: dict) -> list[str]:
+    """The ranked findings, most-severe first — the heart of the diagnosis."""
+    sev_rank = {"high": 0, "medium": 1, "low": 2}
+    findings = sorted(diagnosis.get("findings", []), key=lambda f: sev_rank.get(f["severity"], 3))
+    if not findings:
+        return ["_No actionable findings this run._"]
+    lines: list[str] = []
+    for f in findings:
+        lines += [
+            f"### [{f['severity'].upper()}] {f['title']}  ·  `{f['lever']}`  (confidence: {f['confidence']})",
+            f"- **Cause:** {f['hypothesis']}",
+            f"- **Fix:** {f['suggested_action']}",
+            "",
+        ]
+    return lines
+
+
+def _render_comment(diagnosis: dict, report: dict) -> str:
+    """The deeply technical per-day record posted as an issue comment.
+
+    Unlike the issue body (a single overwritten "latest" snapshot), each comment
+    is permanent — so the full error breakdown for every scored day accumulates
+    in one timeline. Renders the metric strata the body omits: lead-time, hour,
+    stops-ahead, arriving-now calibration, worst routes, and coverage gaps.
+    """
+    o = report.get("overall") or {}
+    L: list[str] = [f"## 🔬 ETA quality — {report.get('date')}", ""]
+
+    summary = (diagnosis.get("summary") or "").strip()
+    if summary:
+        L += [summary, ""]
+
+    L.append(
+        f"**Headline** · MAE **{o.get('mae_sec')}s** · median **{o.get('median_ae_sec')}s** · "
+        f"p90 **{o.get('p90_ae_sec')}s** · bias **{_signed(o.get('bias_sec'))}s** "
+        f"({_late_early(o.get('bias_sec'))}) · coverage **{report.get('coverage_frac', 0):.0%}** "
+        f"({report.get('n_predictions_scored', 0):,} preds / {report.get('n_actual_arrivals', 0):,} arrivals)"
+    )
+    if diagnosis.get("recommend_retrain"):
+        L.append(f"- ⚠️ **Retrain recommended:** {(diagnosis.get('retrain_reason') or '').strip()}")
+    L.append("")
+
+    # Error by lead time — the horizon the rider actually saw (most informative).
+    by_lead = report.get("by_lead_bucket") or {}
+    if by_lead:
+        L += ["### Error by lead time (rider's horizon)", "",
+              "| horizon | n | MAE | median | p90 | bias |", "|---|---:|---:|---:|---:|---:|"]
+        for bucket, m in by_lead.items():
+            L.append(f"| {bucket} | {m['n']:,} | {m['mae_sec']:.0f}s | {m['median_ae_sec']:.0f}s "
+                     f"| {m['p90_ae_sec']:.0f}s | {_signed(m['bias_sec'])}s |")
+        L.append("")
+
+    # Error by stops-ahead — separates near-stop dwell error from long-horizon drift.
+    by_sa = report.get("by_stops_ahead") or {}
+    if by_sa:
+        ordered = sorted(by_sa.items(), key=lambda kv: int(kv[0]))[:15]
+        L += ["### Error by stops ahead", "",
+              "| stops ahead | n | MAE | bias |", "|---:|---:|---:|---:|"]
+        for sa, m in ordered:
+            L.append(f"| {sa} | {m['n']:,} | {m['mae_sec']:.0f}s | {_signed(m['bias_sec'])}s |")
+        L.append("")
+
+    # Worst hours by MAE — surfaces peak-load or off-hours degradation.
+    by_hour = {h: m for h, m in (report.get("by_hour") or {}).items() if m["n"] >= 20}
+    if by_hour:
+        worst_hours = sorted(by_hour.items(), key=lambda kv: kv[1]["mae_sec"], reverse=True)[:6]
+        L += ["### Worst hours by MAE (n ≥ 20)", "",
+              "| hour (feed TZ) | n | MAE | bias |", "|---:|---:|---:|---:|"]
+        for h, m in worst_hours:
+            L.append(f"| {int(h):02d}:00 | {m['n']:,} | {m['mae_sec']:.0f}s | {_signed(m['bias_sec'])}s |")
+        L.append("")
+
+    an = report.get("arriving_now") or {}
+    if an.get("within_window_frac") is not None:
+        L += [f"### Arriving-now calibration\n\n**{an['within_window_frac']:.0%}** of ≤60 s "
+              f"predictions actually arrived within the minute ({an['n']:,} preds).", ""]
+
+    worst = report.get("worst_routes") or []
+    if worst:
+        L += ["### Worst routes by MAE", "",
+              "| route | n | MAE | median | p90 | bias |", "|---|---:|---:|---:|---:|---:|"]
+        for m in worst:
+            L.append(f"| {m['route_id']} | {m['n']:,} | {m['mae_sec']:.0f}s | {m['median_ae_sec']:.0f}s "
+                     f"| {m['p90_ae_sec']:.0f}s | {_signed(m['bias_sec'])}s |")
+        L.append("")
+
+    # Coverage gaps — which arrivals got no prediction at all (feed/pipeline holes).
+    cov_routes = ((report.get("coverage_gap") or {}).get("by_route")) or {}
+    gappy = [(r, g) for r, g in cov_routes.items() if g["n_uncovered"] > 0][:8]
+    if gappy:
+        L += ["### Coverage gaps (most uncovered arrivals)", "",
+              "| route | actual | uncovered | coverage |", "|---|---:|---:|---:|"]
+        for r, g in gappy:
+            L.append(f"| {r} | {g['n_actual']:,} | {g['n_uncovered']:,} | {g['coverage_frac']:.0%} |")
+        L.append("")
+
+    L += ["## Findings", ""]
+    L += _findings_md(diagnosis)
+    L += ["---",
+          "<sub>Per-day technical record from `score-quality.yml` → `scripts/diagnose.py`. "
+          "Full JSON: `quality/" + str(report.get("date")) + ".json` on R2.</sub>"]
+    return "\n".join(L)
+
+
 def _render_issue_body(diagnosis: dict, report: dict) -> str:
     o = report.get("overall") or {}
     lines = [
@@ -211,21 +324,12 @@ def _render_issue_body(diagnosis: dict, report: dict) -> str:
     if diagnosis.get("recommend_retrain"):
         lines.append(f"- ⚠️ **Retrain recommended:** {diagnosis.get('retrain_reason', '').strip()}")
     lines += ["", "## Findings", ""]
-    sev_rank = {"high": 0, "medium": 1, "low": 2}
-    findings = sorted(diagnosis.get("findings", []), key=lambda f: sev_rank.get(f["severity"], 3))
-    if not findings:
-        lines.append("_No actionable findings this run._")
-    for f in findings:
-        lines += [
-            f"### [{f['severity'].upper()}] {f['title']}  ·  `{f['lever']}`  (confidence: {f['confidence']})",
-            f"- **Cause:** {f['hypothesis']}",
-            f"- **Fix:** {f['suggested_action']}",
-            "",
-        ]
+    lines += _findings_md(diagnosis)
     lines += [
         "---",
-        "<sub>Generated by `score-quality.yml` → `scripts/diagnose.py`. "
-        "Body reflects the most recent run; per-day history is in `quality/DATE.json` on R2.</sub>",
+        "<sub>Generated by `score-quality.yml` → `scripts/diagnose.py`. Body reflects the "
+        "most recent run; the full per-day technical breakdown is in each day's comment "
+        "below, and the raw JSON in `quality/DATE.json` on R2.</sub>",
     ]
     return "\n".join(lines)
 
@@ -241,7 +345,12 @@ def _gh(method: str, url: str, token: str, **kwargs) -> requests.Response:
 
 
 def upsert_issue(diagnosis: dict, report: dict) -> str | None:
-    """Create or update the single rolling quality issue. Returns its URL or None."""
+    """Create or update the single rolling quality issue. Returns its URL or None.
+
+    The issue body is the at-a-glance dashboard (latest run); the deeply technical
+    per-day record is posted as a comment so each scored day accumulates in one
+    timeline.
+    """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")  # "owner/name" (set in Actions)
     if not token or not repo:
@@ -249,6 +358,7 @@ def upsert_issue(diagnosis: dict, report: dict) -> str | None:
         return None
 
     body = _render_issue_body(diagnosis, report)
+    comment = _render_comment(diagnosis, report)
     api = f"https://api.github.com/repos/{repo}/issues"
 
     try:
@@ -260,12 +370,6 @@ def upsert_issue(diagnosis: dict, report: dict) -> str | None:
         if match:
             num = match["number"]
             _gh("PATCH", f"{api}/{num}", token, json={"body": body}).raise_for_status()
-            comment = (
-                f"Updated diagnosis for **{report.get('date')}** — "
-                f"MAE {(report.get('overall') or {}).get('mae_sec')}s, "
-                f"coverage {report.get('coverage_frac', 0):.0%}"
-                f"{' · ⚠️ retrain recommended' if diagnosis.get('recommend_retrain') else ''}."
-            )
             _gh("POST", f"{api}/{num}/comments", token, json={"body": comment}).raise_for_status()
             print(f"  [diagnose] updated issue #{num}", flush=True)
             return match["html_url"]
@@ -274,6 +378,8 @@ def upsert_issue(diagnosis: dict, report: dict) -> str | None:
             "title": ISSUE_TITLE, "body": body, "labels": [ISSUE_LABEL],
         })
         created.raise_for_status()
+        num = created.json()["number"]
+        _gh("POST", f"{api}/{num}/comments", token, json={"body": comment}).raise_for_status()
         url = created.json()["html_url"]
         print(f"  [diagnose] opened {url}", flush=True)
         return url
