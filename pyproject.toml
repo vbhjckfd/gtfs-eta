@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gtfs-eta"
-version = "0.1.4"
+version = "0.1.5"
 requires-python = ">=3.11"
 dependencies = [
     "gtfs-realtime-bindings>=1.0.0",
@@ -28,8 +28,9 @@ dev = [
     "matplotlib>=3.8",
     "seaborn>=0.13",
 ]
-# AI quality-diagnosis layer (score-quality.yml). Kept out of the base deps so
-# the per-15s push-feed job doesn't pull the Anthropic SDK it never uses.
+# AI quality-diagnosis layer (the on-demand `scripts/diagnose.py` tool). Kept out
+# of the base deps so neither the per-15s push-feed job nor the daily metrics-only
+# score-quality job pulls the Anthropic SDK they never use.
 ai = [
     "anthropic>=0.69",
     "pydantic>=2.6",

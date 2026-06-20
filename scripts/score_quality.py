@@ -15,8 +15,11 @@ Usage:
 
 The worker's daily cron dispatches this workflow at 02:15 UTC, by which point
 the previous UTC day is fully archived (Lviv's service day closes ~21:00 UTC).
-This script owns scoring + publication, then runs the AI diagnosis
-(scripts/diagnose.py). Retraining is done manually (locally) — see the Makefile.
+This script owns scoring + publication, and posts a *metrics-only* debug comment
+to the rolling quality issue (no AI call). The AI review is run on demand —
+`python scripts/diagnose.py [--date …]` or interactively — which reads the latest
+metrics, drives the fixes, and leaves a round-summary comment for the next cycle.
+Retraining is done manually (locally) — see the Makefile.
 """
 
 from __future__ import annotations
@@ -131,7 +134,7 @@ def main() -> int:
         "--no-publish", action="store_true", help="print the report but don't write to R2"
     )
     parser.add_argument(
-        "--no-diagnose", action="store_true", help="skip the AI diagnosis + GitHub issue"
+        "--no-issue", action="store_true", help="skip posting the metrics comment to the GitHub issue"
     )
     parser.add_argument(
         "--force",
@@ -174,19 +177,17 @@ def main() -> int:
         publish(report)
         print(f"  published quality/{args.date}.json + latest.json + latest.md", flush=True)
 
-    # AI diagnosis + GitHub issue (best-effort; both no-op without their creds).
-    if not args.no_diagnose and report.get("status") == "ok":
-        from diagnose import diagnose, upsert_issue
+    # Post the metrics-only debug comment to the rolling GitHub issue (no AI call;
+    # the AI review is run on demand via scripts/diagnose.py, or interactively).
+    # Best-effort: no-op without GITHUB_TOKEN/GITHUB_REPOSITORY.
+    if not args.no_issue and report.get("status") == "ok":
+        from diagnose import upsert_issue
 
-        diagnosis = diagnose(report)
-        if diagnosis:
-            url = upsert_issue(diagnosis, report)
-            report["diagnosis"] = diagnosis
-            report["diagnosis_issue"] = url
+        url = upsert_issue(report)
+        if url:
+            report["quality_issue"] = url
             if not args.no_publish:
-                publish(report)  # republish so the JSON carries the diagnosis
-            if diagnosis.get("recommend_retrain"):
-                print("  [diagnose] AI recommends a retrain", flush=True)
+                publish(report)  # republish so the JSON carries the issue link
 
     return 0
 

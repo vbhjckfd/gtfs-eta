@@ -24,7 +24,7 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write  # diagnose.py upserts the rolling quality issue
+  issues: write  # posts the metrics-only comment to the rolling quality issue
 
 jobs:
   score:
@@ -40,7 +40,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[ai]"
+        run: pip install -e .  # metrics-only job — no AI extra needed
 
       - name: Score + publish daily quality
         run: |
@@ -51,7 +51,6 @@ jobs:
           R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET:            gtfs-lviv
-          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN:         ${{ github.token }}
           SENTRY_DSN:           ${{ secrets.SENTRY_DSN }}
           SENTRY_RELEASE:       ${{ github.sha }}

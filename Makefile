@@ -1,6 +1,6 @@
 .PHONY: install pipeline pipeline-date train learn export deploy \
         sanity validate-off-route check-gtfs check-snapshots \
-        push-feed serve-feed smoke score help
+        push-feed serve-feed smoke score review-quality diagnose help
 
 # Days processed concurrently by `make pipeline` / `make learn`.
 # Each worker peaks at ~2 GB — keep ≤ 4-5 on a 16 GB machine.
@@ -63,6 +63,14 @@ smoke:
 score:
 	python -m src.scoring --date $(or $(DATE),$(shell date -u +%F)) $(if $(OUT),--out $(OUT),)
 
+## Gather a day's quality report + issue notes for review (default: yesterday)
+review-quality:
+	python scripts/review_quality.py $(if $(DATE),--date $(DATE),)
+
+## On-demand AI diagnosis of a scored day, posted to the issue (needs .[ai])
+diagnose:
+	python scripts/diagnose.py $(if $(DATE),--date $(DATE),)
+
 ## Sanity-check R2 collection health
 sanity:
 	python scripts/sanity_check.py
@@ -98,6 +106,8 @@ help:
 	@echo "  serve-feed           Push to R2 every 15 s (live feed daemon)"
 	@echo "  smoke                Smoke-test the live worker feed"
 	@echo "  score DATE=          Score live ETA quality for a day (default: today)"
+	@echo "  review-quality DATE= Gather a day's report + issue notes for review (default: yesterday)"
+	@echo "  diagnose DATE=       On-demand AI diagnosis posted to the issue (default: yesterday)"
 	@echo "  sanity               Check R2 collection health"
 	@echo "  validate-off-route   Validate off-route detection"
 	@echo "  check-gtfs           Test GTFS static loading"
