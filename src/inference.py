@@ -425,7 +425,28 @@ def _isotonic(values: list[float]) -> list[float]:
     return out
 
 
-def encode_trip_updates(updates: list[dict], feed_ts: int) -> bytes:
+def _uncertainty_for(table: dict | None, horizon: int) -> int | None:
+    """Per-horizon prediction uncertainty (seconds), or None when unavailable.
+
+    *table* maps a prediction horizon (stops ahead, 1-based) to a ± band in
+    seconds — the model's per-horizon test-set MAE, baked in at training time.
+    Error grows with horizon, so horizons past the largest measured key reuse
+    that last (widest) band rather than dropping the field.
+    """
+    if not table:
+        return None
+    v = table.get(horizon)
+    if v is None:
+        keys = [k for k in table if isinstance(k, int)]
+        if not keys:
+            return None
+        v = table[min(max(keys), horizon)] if horizon < min(keys) else table[max(keys)]
+    return int(v)
+
+
+def encode_trip_updates(
+    updates: list[dict], feed_ts: int, uncertainty_by_horizon: dict | None = None
+) -> bytes:
     # Use wall-clock time for the header and staleness filter.
     # feed_ts is the VP feed's capture timestamp and can be 30–90 s behind
     # real time by the time our feed is read from R2 cache, so filtering
@@ -461,10 +482,80 @@ def encode_trip_updates(updates: list[dict], feed_ts: int) -> bytes:
             stu.stop_sequence = pred["stop_sequence"]
             stu.arrival.time = arr_ts
             stu.departure.time = arr_ts
+            # Publish the model's confidence so consumers can widen the window
+            # for far-horizon stops. Keyed by the true horizon when carried,
+            # else by emitted position (matches the scorer's stops_ahead proxy).
+            unc = _uncertainty_for(
+                uncertainty_by_horizon, pred.get("stops_ahead", stop_count + 1)
+            )
+            if unc is not None:
+                stu.arrival.uncertainty = unc
+                stu.departure.uncertainty = unc
             stop_count += 1
         if stop_count == 0:
             del feed.entity[-1]
     return feed.SerializeToString()
+
+
+# Vehicle is treated as dwelling AT its next stop (rather than IN_TRANSIT_TO it)
+# once it is within this many metres of it along the shape.
+_STOPPED_AT_RADIUS_M = 25.0
+
+
+def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
+    """Encode cleaned vehicle positions as a GTFS-RT VehiclePositions feed.
+
+    Re-publishes the upstream positions enriched with this project's corrected
+    trip match, the next stop and stop status, and a congestion estimate — the
+    by-products of the same inference pass that builds TripUpdates, which the
+    operator's own VehiclePositions feed lacks (it reports the raw, sometimes
+    wrong, trip_id and no stop progress).
+    """
+    now_ts = int(time.time())
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    feed.header.incrementality = gtfs_realtime_pb2.FeedHeader.FULL_DATASET
+    feed.header.timestamp = now_ts
+    for r in records:
+        entity = feed.entity.add()
+        entity.id = r["vehicle_id"]
+        vp = entity.vehicle
+        vp.trip.trip_id = r["trip_id"]
+        if r.get("route_id"):
+            vp.trip.route_id = r["route_id"]
+        vp.vehicle.id = r["vehicle_id"]
+        vp.position.latitude = r["lat"]
+        vp.position.longitude = r["lon"]
+        if r.get("bearing") is not None:
+            vp.position.bearing = r["bearing"]
+        if r.get("stop_id") is not None:
+            vp.stop_id = r["stop_id"]
+            vp.current_stop_sequence = r["stop_sequence"]
+            vp.current_status = r["status"]
+        if r.get("congestion") is not None:
+            vp.congestion_level = r["congestion"]
+        # The position's own capture time, not the (later) feed publish time.
+        vp.timestamp = feed_ts
+    return feed.SerializeToString()
+
+
+def _congestion_level(speed: float, hist_speed: float):
+    """Map observed-vs-historical speed to a GTFS-RT CongestionLevel.
+
+    Returns None when speed is unknown (-1) or the vehicle is stationary, so we
+    never assert "smooth" from a single missing measurement.
+    """
+    if speed <= 0.0 or hist_speed <= 0.0:
+        return None
+    ratio = speed / hist_speed
+    VP = gtfs_realtime_pb2.VehiclePosition
+    if ratio >= 0.7:
+        return VP.RUNNING_SMOOTHLY
+    if ratio >= 0.4:
+        return VP.STOP_AND_GO
+    if ratio >= 0.2:
+        return VP.CONGESTION
+    return VP.SEVERE_CONGESTION
 
 
 # ---------------------------------------------------------------------------
@@ -472,14 +563,22 @@ def encode_trip_updates(updates: list[dict], feed_ts: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
-                  vp_bytes: bytes) -> bytes:
-    """Vehicle-positions protobuf bytes → TripUpdates protobuf bytes."""
+                  vp_bytes: bytes, *, with_vehicle_positions: bool = False):
+    """Vehicle-positions protobuf bytes → TripUpdates protobuf bytes.
+
+    With ``with_vehicle_positions=True`` returns a ``(trip_updates_bytes,
+    vehicle_positions_bytes)`` tuple — the second feed re-publishes the cleaned
+    positions (corrected trip, next stop, congestion) computed in this same
+    pass. The default single-bytes return keeps existing callers unchanged.
+    """
     vp_feed = gtfs_realtime_pb2.FeedMessage()
     vp_feed.ParseFromString(vp_bytes)
     feed_ts = int(vp_feed.header.timestamp) or int(time.time())
     snap_ts = datetime.fromtimestamp(feed_ts, tz=timezone.utc)
+    priors = gtfs_data.get("route_hour_priors", {})
 
     updates = []
+    vp_records: list[dict] = []
     for entity in vp_feed.entity:
         if not entity.HasField("vehicle"):
             continue
@@ -530,12 +629,39 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         v_dist = vehicle_dist_along(trip_id, vx, vy, gtfs_data)
         speed  = progress_speed(trackers, vid, trip_id, v_dist, float(feed_ts))
 
+        feature_rows = build_features(trip_id, v_dist, speed, snap_ts, gtfs_data)
+
+        # Cleaned vehicle position: emitted for every on-route matched vehicle,
+        # including ones whose ETAs we withhold below — the position itself is
+        # still good and is what the VehiclePositions feed exists to serve.
+        if with_vehicle_positions and feature_rows:
+            next_feat, next_stop_id, next_stop_seq = feature_rows[0]
+            next_rem = next_feat[8]  # remaining_dist_m to the next stop
+            hist_speed = priors.get(
+                f"{route_id}:{snap_ts.hour}", priors.get("_global", (5.0, 40.0))
+            )[0]
+            VP = gtfs_realtime_pb2.VehiclePosition
+            vp_records.append({
+                "vehicle_id": vid,
+                "trip_id":    trip_id,
+                "route_id":   route_id,
+                "lat":        float(lat),
+                "lon":        float(lon),
+                "bearing":    bearing,
+                "stop_id":    next_stop_id,
+                "stop_sequence": int(next_stop_seq),
+                "status": (
+                    VP.STOPPED_AT if next_rem <= _STOPPED_AT_RADIUS_M
+                    else VP.IN_TRANSIT_TO
+                ),
+                "congestion": _congestion_level(speed, hist_speed),
+            })
+
         # Idling at the origin pre-departure: withhold predictions until the
         # vehicle actually moves, rather than emit optimistically early ETAs.
         if speed <= 0.0 and v_dist < _NOT_DEPARTED_DIST_M:
             continue
 
-        feature_rows = build_features(trip_id, v_dist, speed, snap_ts, gtfs_data)
         if not feature_rows:
             continue
 
@@ -547,9 +673,14 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             "snap_ts":    snap_ts,
             "predictions": [
                 {"stop_id": r[1], "stop_sequence": int(r[2]),
-                 "seconds": float(sec)}
+                 "stops_ahead": int(r[0][2]), "seconds": float(sec)}
                 for r, sec in zip(feature_rows, preds_sec)
             ],
         })
 
-    return encode_trip_updates(updates, feed_ts)
+    tu_bytes = encode_trip_updates(
+        updates, feed_ts, model_data.get("uncertainty_by_horizon")
+    )
+    if with_vehicle_positions:
+        return tu_bytes, encode_vehicle_positions(vp_records, feed_ts)
+    return tu_bytes

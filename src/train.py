@@ -33,6 +33,11 @@ from src.features import (
 MODEL_DIR = Path(__file__).parent.parent / "models"
 MODEL_PATH = MODEL_DIR / "eta_pipeline.joblib"
 PRIORS_PATH = MODEL_DIR / "route_hour_priors.joblib"
+UNCERTAINTY_PATH = MODEL_DIR / "uncertainty.joblib"
+
+# A horizon needs at least this many held-out rows before its error estimate is
+# trustworthy enough to publish as an uncertainty band.
+_MIN_HORIZON_SUPPORT = 200
 
 TEST_FRACTION = 0.2
 
@@ -106,6 +111,33 @@ def _compute_route_hour_priors(train_df: pd.DataFrame) -> dict:
     print(f"  Priors: {len(lookup)} route×hour entries  "
           f"(global: speed={g_speed:.1f} m/s, tps={g_tps:.0f}s)")
     return {"lookup": lookup, "global_speed": g_speed, "global_tps": g_tps}
+
+
+def _compute_uncertainty(
+    test_df: pd.DataFrame, y_test: np.ndarray, y_pred: np.ndarray
+) -> dict:
+    """Per-horizon ± band (seconds) for the served predictions.
+
+    Uses held-out absolute error grouped by ``stops_ahead`` — the model is
+    trained with absolute_error loss, so its mean-absolute error is the natural,
+    self-consistent confidence band to publish as GTFS-RT
+    StopTimeEvent.uncertainty. Horizons with too few test rows are dropped;
+    inference reuses the widest measured band beyond the largest key.
+    """
+    resid = np.abs(np.asarray(y_test, dtype=float) - np.asarray(y_pred, dtype=float))
+    work = pd.DataFrame(
+        {"stops_ahead": test_df["stops_ahead"].to_numpy(), "resid": resid}
+    )
+    table: dict[int, int] = {}
+    for horizon, sub in work.groupby("stops_ahead"):
+        if len(sub) >= _MIN_HORIZON_SUPPORT:
+            table[int(horizon)] = int(round(float(sub["resid"].mean())))
+    if table:
+        bands = ", ".join(f"{h}:{s}s" for h, s in sorted(table.items()))
+        print(f"  Uncertainty (per-horizon MAE): {bands}")
+    else:
+        print("  Uncertainty: insufficient test rows per horizon — none saved")
+    return table
 
 
 def _build_pipeline() -> Pipeline:
@@ -240,6 +272,11 @@ def train(
 
     train_mae = mean_absolute_error(y_train, y_pred_train)
     test_mae  = mean_absolute_error(y_test,  y_pred_test)
+
+    # Per-horizon confidence bands, published as GTFS-RT StopTimeEvent.uncertainty.
+    uncertainty = _compute_uncertainty(test_df, y_test.to_numpy(), y_pred_test)
+    joblib.dump(uncertainty, UNCERTAINTY_PATH)
+    print(f"  Uncertainty saved → {UNCERTAINTY_PATH}")
 
     # GPS warm-started baseline: remaining_dist / effective_speed (no NaN/-1 sentinel).
     if "speed_eta_warm" in test_df.columns:

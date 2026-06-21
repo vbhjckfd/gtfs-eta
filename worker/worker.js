@@ -1,8 +1,10 @@
 /**
  * Cloudflare Worker — GTFS-RT TripUpdates passthrough.
  *
- * fetch: serves the pre-computed TripUpdates protobuf from R2.
- *   GET /        — raw protobuf feed (drop-in replacement for upstream)
+ * fetch: serves the pre-computed protobuf feeds from R2.
+ *   GET /                  — TripUpdates feed (drop-in replacement for upstream)
+ *   GET /vehicle_positions — cleaned VehiclePositions feed (corrected trip
+ *                            match, next stop + status, congestion estimate)
  *   GET /health  — returns JSON 200/503.  Always requires a fresh feed header
  *                  timestamp (< MAX_FEED_AGE_SEC); additionally, during working
  *                  hours, requires stop 60 to have predicted arrivals.  Overnight
@@ -33,6 +35,7 @@
  */
 
 const FEED_KEY = "feed/trip_updates.pb";
+const VP_FEED_KEY = "feed/vehicle_positions.pb";
 
 // Prefix under which the served feed is archived for offline quality scoring.
 // On every cron fire we copy the *currently served* blob to
@@ -414,7 +417,13 @@ export default {
       const path = new URL(request.url).pathname.replace(/\/+$/, "");
       if (path.endsWith("/health")) return await handleHealth(env);
 
-      const obj = await env.R2.get(env.FEED_KEY ?? FEED_KEY);
+      // Both feeds are pre-computed blobs in R2; the only thing that varies is
+      // which key we stream. Default is the TripUpdates feed at "/".
+      const key = path.endsWith("/vehicle_positions")
+        ? (env.VP_FEED_KEY ?? VP_FEED_KEY)
+        : (env.FEED_KEY ?? FEED_KEY);
+
+      const obj = await env.R2.get(key);
       if (obj === null) {
         return new Response(
           "Feed unavailable — push daemon (scripts/push_feed.py) not running",

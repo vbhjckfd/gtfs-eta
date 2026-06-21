@@ -129,10 +129,15 @@ Per cycle (every ~15 s):
 2. For each vehicle: project lat/lon to UTM, match to the best trip shape (off-route filter with hysteresis), project the vehicle's exact position along the shape, and measure progress speed vs the previous cycle.
 3. Build feature rows for the next ≤10 stops, anchored at the vehicle's projected position.
 4. Run the serialised GBT model.
-5. Encode a GTFS-RT TripUpdates protobuf and upload it to R2.
+5. Encode a GTFS-RT TripUpdates protobuf and a cleaned VehiclePositions protobuf, and upload both to R2.
 
-The `worker/` directory is a plain JS Cloudflare Worker that serves the pre-computed feed — no inference CPU at request time:
+Each `StopTimeUpdate` carries a `StopTimeEvent.uncertainty` (seconds) — the model's per-horizon held-out MAE, baked into the export at training time — so a consumer can widen the arrival window for far-horizon stops instead of treating a 1-stop and a 10-stop ETA as equally certain.
+
+The **cleaned VehiclePositions feed** (`feed/vehicle_positions.pb`) re-emits the upstream positions enriched with this project's corrected trip match (often better than the operator's reported `trip_id`), the next stop + `current_status` (STOPPED_AT / IN_TRANSIT_TO), and a `congestion_level` derived from observed-vs-historical speed. It is a by-product of the same inference pass, so it costs no extra geometry work.
+
+The `worker/` directory is a plain JS Cloudflare Worker that serves the pre-computed feeds — no inference CPU at request time:
 - `GET /` — streams `feed/trip_updates.pb` from R2.
+- `GET /vehicle_positions` — streams the cleaned `feed/vehicle_positions.pb`.
 - `GET /health` — parses the feed (hand-rolled protobuf wire walk, no deps) and returns 200/503 based on header freshness and, during working hours, predicted arrivals at stop 60.
 - cron (every 5 min) — dispatches `push-feed.yml` (see the cron reliability trick above).
 
@@ -147,7 +152,8 @@ gtfs-lviv/
   static/     <feedVersion>/static.zip         # Versioned GTFS static
   static/     index.json                       # day → feedVersion mapping
   _meta/      collector_health.json            # collection health counters
-  feed/       trip_updates.pb                  # pre-computed feed served by the worker
+  feed/       trip_updates.pb                  # pre-computed TripUpdates feed served at /
+  feed/       vehicle_positions.pb             # cleaned VehiclePositions feed served at /vehicle_positions
   predictions/ YYYY-MM-DD/<feedTsISO>.pb       # sampled archive of the served feed (quality scoring)
   quality/    YYYY-MM-DD.json + latest.json    # scored live-prediction quality
   worker/     gtfs_worker_data.pkl             # compact GTFS for push_feed.py inference

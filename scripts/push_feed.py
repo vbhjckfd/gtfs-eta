@@ -53,6 +53,7 @@ R2_BUCKET           = os.environ.get("R2_BUCKET",   "gtfs-lviv")
 GTFS_KEY            = os.environ.get("GTFS_KEY",    "worker/gtfs_worker_data.pkl")
 MODEL_KEY           = os.environ.get("MODEL_KEY",   "worker/eta_pipeline.pkl")
 FEED_KEY            = os.environ.get("FEED_KEY",    "feed/trip_updates.pb")
+VP_FEED_KEY         = os.environ.get("VP_FEED_KEY", "feed/vehicle_positions.pb")
 VP_URL              = os.environ.get(
     "GTFS_RT_URL", "https://track.ua-gis.com/gtfs/lviv/vehicle_position"
 )
@@ -211,17 +212,32 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
     t0 = time.monotonic()
     vp_bytes = _get_vp_bytes()
 
-    result = run_inference(gtfs_data, model_data, trackers, vp_bytes)
+    tu_result, vp_result = run_inference(
+        gtfs_data, model_data, trackers, vp_bytes, with_vehicle_positions=True
+    )
 
     client.put_object(
         Bucket=R2_BUCKET,
         Key=FEED_KEY,
-        Body=result,
+        Body=tu_result,
+        ContentType="application/x-protobuf",
+        Metadata={"commit": FEED_COMMIT},
+    )
+    # Cleaned VehiclePositions feed (corrected trip match, next stop, congestion)
+    # derived from the same inference pass — served at /vehicle_positions.
+    client.put_object(
+        Bucket=R2_BUCKET,
+        Key=VP_FEED_KEY,
+        Body=vp_result,
         ContentType="application/x-protobuf",
         Metadata={"commit": FEED_COMMIT},
     )
     elapsed = (time.monotonic() - t0) * 1000
-    print(f"Pushed {len(result):,} B → R2:{FEED_KEY}  ({elapsed:.0f} ms)", flush=True)
+    print(
+        f"Pushed {len(tu_result):,} B → R2:{FEED_KEY}, "
+        f"{len(vp_result):,} B → R2:{VP_FEED_KEY}  ({elapsed:.0f} ms)",
+        flush=True,
+    )
 
 
 def main() -> None:

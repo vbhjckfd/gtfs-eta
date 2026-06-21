@@ -30,8 +30,10 @@ from src.gtfs_static import StopTime, TripInfo
 from src.inference import (
     MAX_STOPS_AHEAD,
     _isotonic,
+    _uncertainty_for,
     build_features,
     encode_trip_updates,
+    encode_vehicle_positions,
     infer_trip,
     progress_speed,
     run_inference,
@@ -554,3 +556,124 @@ class TestNotDepartedGate:
         # Mid-route, first sighting (speed still unknown) but v_dist large → served.
         mid = _vp_bytes(LAT, _lon_at(1200.0), ts=now)
         assert self._entities(mid) == 1
+
+
+# ---------------------------------------------------------------------------
+# Feature 1: per-horizon prediction uncertainty (GTFS-RT StopTimeEvent.uncertainty)
+# ---------------------------------------------------------------------------
+
+class TestUncertainty:
+    def test_lookup_clamps_to_widest_band(self):
+        table = {1: 20, 2: 35, 3: 60}
+        assert _uncertainty_for(table, 1) == 20
+        assert _uncertainty_for(table, 3) == 60
+        # Beyond the largest measured horizon → reuse the widest band, not None.
+        assert _uncertainty_for(table, 9) == 60
+        # No table → field omitted entirely.
+        assert _uncertainty_for(None, 2) is None
+        assert _uncertainty_for({}, 2) is None
+
+    def test_encode_emits_uncertainty_by_horizon(self):
+        now = datetime.now(tz=timezone.utc)
+        updates = [{
+            "vehicle_id": "v1", "trip_id": TRIP_ID, "route_id": ROUTE_ID,
+            "snap_ts": now,
+            "predictions": [
+                {"stop_id": "stop1", "stop_sequence": 2, "stops_ahead": 1, "seconds": 100.0},
+                {"stop_id": "stop2", "stop_sequence": 3, "stops_ahead": 2, "seconds": 200.0},
+            ],
+        }]
+        from google.transit import gtfs_realtime_pb2
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(
+            encode_trip_updates(updates, int(now.timestamp()), {1: 15, 2: 40})
+        )
+        stus = feed.entity[0].trip_update.stop_time_update
+        assert stus[0].arrival.uncertainty == 15
+        assert stus[0].departure.uncertainty == 15
+        assert stus[1].arrival.uncertainty == 40
+
+    def test_uncertainty_absent_when_no_table(self):
+        now = datetime.now(tz=timezone.utc)
+        updates = [{
+            "vehicle_id": "v1", "trip_id": TRIP_ID, "route_id": ROUTE_ID,
+            "snap_ts": now,
+            "predictions": [
+                {"stop_id": "stop1", "stop_sequence": 2, "seconds": 100.0},
+            ],
+        }]
+        from google.transit import gtfs_realtime_pb2
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(encode_trip_updates(updates, int(now.timestamp())))
+        arr = feed.entity[0].trip_update.stop_time_update[0].arrival
+        assert not arr.HasField("uncertainty")
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: cleaned VehiclePositions feed
+# ---------------------------------------------------------------------------
+
+class TestVehiclePositions:
+    def _model(self):
+        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+
+    def test_run_inference_returns_both_feeds(self, gtfs):
+        from google.transit import gtfs_realtime_pb2
+        data = _compact_data(gtfs)
+        now = datetime.now(timezone.utc)
+        vp = _vp_bytes(LAT, _lon_at(1200.0), ts=now, bearing=90.0)
+
+        out = run_inference(data, self._model(), {}, vp, with_vehicle_positions=True)
+        assert isinstance(out, tuple) and len(out) == 2
+        tu_bytes, vp_bytes = out
+
+        vpos = gtfs_realtime_pb2.FeedMessage()
+        vpos.ParseFromString(vp_bytes)
+        assert len(vpos.entity) == 1
+        v = vpos.entity[0].vehicle
+        assert v.trip.trip_id == TRIP_ID          # corrected match carried through
+        assert v.vehicle.id == "v1"
+        assert v.position.latitude == pytest.approx(LAT)
+        assert v.HasField("current_stop_sequence")
+        # Next stop after 1200 m is stop3 (at 1500 m) → IN_TRANSIT_TO it.
+        assert v.current_status == gtfs_realtime_pb2.VehiclePosition.IN_TRANSIT_TO
+
+    def test_idle_origin_vehicle_still_gets_position(self, gtfs):
+        """ETAs are withheld for an idling origin vehicle, but its cleaned
+        position is still published — the whole point of the VP feed."""
+        from google.transit import gtfs_realtime_pb2
+        data = _compact_data(gtfs)
+        now = datetime.now(timezone.utc)
+        vp = _vp_bytes(LAT, _lon_at(2.0), ts=now)
+
+        tu_bytes, vp_bytes = run_inference(
+            data, self._model(), {}, vp, with_vehicle_positions=True
+        )
+        tu = gtfs_realtime_pb2.FeedMessage(); tu.ParseFromString(tu_bytes)
+        vpos = gtfs_realtime_pb2.FeedMessage(); vpos.ParseFromString(vp_bytes)
+        assert len(tu.entity) == 0    # ETA withheld (idling at origin)
+        assert len(vpos.entity) == 1  # position still served
+
+    def test_default_call_returns_only_trip_updates(self, gtfs):
+        """Backward-compat: without the flag, the return type is plain bytes."""
+        data = _compact_data(gtfs)
+        now = datetime.now(timezone.utc)
+        vp = _vp_bytes(LAT, _lon_at(1200.0), ts=now)
+        out = run_inference(data, self._model(), {}, vp)
+        assert isinstance(out, (bytes, bytearray))
+
+    def test_encode_vehicle_positions_congestion(self):
+        from google.transit import gtfs_realtime_pb2
+        VP = gtfs_realtime_pb2.VehiclePosition
+        records = [{
+            "vehicle_id": "v1", "trip_id": TRIP_ID, "route_id": ROUTE_ID,
+            "lat": LAT, "lon": LON0, "bearing": 90.0,
+            "stop_id": "stop3", "stop_sequence": 3, "status": VP.STOPPED_AT,
+            "congestion": VP.SEVERE_CONGESTION,
+        }]
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(encode_vehicle_positions(records, int(datetime.now(timezone.utc).timestamp())))
+        v = feed.entity[0].vehicle
+        assert v.current_status == VP.STOPPED_AT
+        assert v.congestion_level == VP.SEVERE_CONGESTION
+        assert v.stop_id == "stop3"

@@ -22,7 +22,7 @@ import joblib
 from dotenv import load_dotenv
 
 from src.gtfs_static import get_gtfs
-from src.train import MODEL_PATH, PRIORS_PATH
+from src.train import MODEL_PATH, PRIORS_PATH, UNCERTAINTY_PATH
 
 load_dotenv()
 
@@ -208,6 +208,16 @@ def main():
     import joblib
     pipeline = joblib.load(model_path)
     tree_data = _extract_trees(pipeline)
+
+    # Per-horizon uncertainty bands (seconds) → served as GTFS-RT
+    # StopTimeEvent.uncertainty. Older models without the sidecar simply omit
+    # the field, so the export stays backward-compatible.
+    if UNCERTAINTY_PATH.exists():
+        tree_data["uncertainty_by_horizon"] = joblib.load(UNCERTAINTY_PATH)
+        print(f"  Uncertainty bands: {tree_data['uncertainty_by_horizon']}")
+    else:
+        print(f"  WARNING: {UNCERTAINTY_PATH} not found — no uncertainty in feed")
+
     model_bytes = pickle.dumps(tree_data, protocol=4)
     size_mb = len(model_bytes) / 1e6
     print(f"Uploading model trees ({size_mb:.1f} MB) → R2:{MODEL_KEY}")
