@@ -29,9 +29,12 @@ from src.features import (
 from src.gtfs_static import StopTime, TripInfo
 from src.inference import (
     MAX_STOPS_AHEAD,
+    _isotonic,
     build_features,
     encode_trip_updates,
+    infer_trip,
     progress_speed,
+    run_inference,
     vehicle_dist_along,
 )
 from src.labeling import build_training_rows
@@ -400,3 +403,154 @@ def test_sched_sec_at_dist_clamps_and_interpolates():
     assert sched_sec_at_dist(profile, 50.0) == pytest.approx(30.0)
     assert sched_sec_at_dist(profile, 200.0) == pytest.approx(90.0)
     assert sched_sec_at_dist(profile, 999.0) == 120.0
+
+
+# ---------------------------------------------------------------------------
+# Code-review fixes (#1–#8)
+# ---------------------------------------------------------------------------
+
+import struct
+
+
+def _pack_shape(pts):
+    return struct.pack(f"{2 * len(pts)}d", *(v for xy in pts for v in xy))
+
+
+class TestFeatureParity:
+    """The training feature builder and the compact serving builder must emit
+    byte-for-byte identical feature vectors — the positional tree export depends
+    on it, and the order is otherwise only kept in sync by hand (#2)."""
+
+    def test_inference_paths_agree(self, gtfs):
+        v_dist, speed = 700.0, 6.0
+        snap = datetime(2026, 6, 3, 7, 0, tzinfo=timezone.utc)
+
+        # Same route+hour prior expressed in each path's own format.
+        priors_features = {
+            "lookup": {(ROUTE_ID, 7): (8.0, 45.0)},
+            "global_speed": 5.0,
+            "global_tps": 40.0,
+        }
+        feats_df = compute_features_for_inference(
+            trip_id=TRIP_ID, vehicle_dist_m=v_dist, snapshot_time=snap,
+            progress_speed_mps=speed, gtfs=gtfs, priors=priors_features,
+        )
+        compact_rows = build_features(TRIP_ID, v_dist, speed, snap, _compact_data(gtfs))
+
+        assert len(feats_df) == len(compact_rows)
+        for (_, frow), (cvec, _, _) in zip(feats_df.iterrows(), compact_rows):
+            fvec = frow[FEATURE_COLS].tolist()
+            assert str(fvec[0]) == str(cvec[0])          # route_id (string)
+            np.testing.assert_allclose(
+                np.array(fvec[1:], dtype=float),
+                np.array(cvec[1:], dtype=float),
+                rtol=1e-6, atol=1e-6,
+            )
+
+
+class TestBearingMatcher:
+    """Overlapping opposite-direction shapes are told apart by heading (#1)."""
+
+    def _data(self):
+        fwd = _pack_shape([(0.0, 0.0), (1000.0, 0.0)])   # tangent → East (90°)
+        rev = _pack_shape([(1000.0, 0.0), (0.0, 0.0)])   # tangent → West (270°)
+        return {
+            "shapes": {"f": fwd, "r": rev},
+            "trip_index": {
+                "tf": {"route_id": "R", "shape_id": "f", "stop_times": []},
+                "tr": {"route_id": "R", "shape_id": "r", "stop_times": []},
+            },
+            "route_trips": {"R": ["tf", "tr"]},
+        }
+
+    def test_heading_picks_direction(self):
+        data = self._data()
+        tid_e, _, _ = infer_trip("R", None, 500.0, 0.0, 90.0, data)
+        tid_w, _, _ = infer_trip("R", None, 500.0, 0.0, 270.0, data)
+        assert tid_e == "tf"
+        assert tid_w == "tr"
+
+    def test_wrong_direction_reported_trip_rejected(self):
+        data = self._data()
+        # Reported trip says reverse, but the vehicle heads East → must override.
+        tid, _, _ = infer_trip("R", "tr", 500.0, 0.0, 90.0, data)
+        assert tid == "tf"
+
+    def test_no_bearing_falls_back_to_distance(self):
+        data = self._data()
+        tid, dist, _ = infer_trip("R", None, 500.0, 0.0, None, data)
+        assert tid in {"tf", "tr"}
+        assert dist == pytest.approx(0.0, abs=1e-6)
+
+
+class TestIsotonicMonotonicity:
+    """PAVA distributes the correction instead of only pushing stops late (#4)."""
+
+    def test_violator_pulled_down_not_up(self):
+        # [120, 100] violate; a running max would report 120/120 (late bias),
+        # the isotonic fit averages them to 110/110.
+        assert _isotonic([120.0, 100.0, 300.0]) == [110.0, 110.0, 300.0]
+
+    def test_already_monotone_unchanged(self):
+        assert _isotonic([10.0, 20.0, 30.0]) == [10.0, 20.0, 30.0]
+
+    def test_encode_uses_isotonic_value(self):
+        now = datetime.now(tz=timezone.utc)
+        updates = [{
+            "vehicle_id": "v1", "trip_id": TRIP_ID, "route_id": ROUTE_ID,
+            "snap_ts": now,
+            "predictions": [
+                {"stop_id": "stop1", "stop_sequence": 2, "seconds": 120.0},
+                {"stop_id": "stop2", "stop_sequence": 3, "seconds": 100.0},
+                {"stop_id": "stop3", "stop_sequence": 4, "seconds": 300.0},
+            ],
+        }]
+        from google.transit import gtfs_realtime_pb2
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(encode_trip_updates(updates, int(now.timestamp())))
+        stus = feed.entity[0].trip_update.stop_time_update
+        # Middle stop reported ~110 s out (averaged), not bumped to 120.
+        assert stus[1].arrival.time - int(now.timestamp()) == pytest.approx(110, abs=2)
+
+
+def _vp_bytes(lat, lon, *, route_id=ROUTE_ID, trip_id=TRIP_ID, ts=None, bearing=None):
+    from google.transit import gtfs_realtime_pb2
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    feed.header.timestamp = int(ts.timestamp()) if ts else int(datetime.now(timezone.utc).timestamp())
+    ent = feed.entity.add()
+    ent.id = "v1"
+    ent.vehicle.vehicle.id = "v1"
+    ent.vehicle.trip.trip_id = trip_id
+    ent.vehicle.trip.route_id = route_id
+    ent.vehicle.position.latitude = lat
+    ent.vehicle.position.longitude = lon
+    if bearing is not None:
+        ent.vehicle.position.bearing = bearing
+    return feed.SerializeToString()
+
+
+class TestNotDepartedGate:
+    """An idling vehicle at the origin gets no predictions; a moving one does (#6)."""
+
+    def _model(self):
+        # Constant +300 s predictor (no trees), so any emitted prediction lands
+        # in the future and survives encoding — lets us count gated vehicles.
+        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+
+    def _entities(self, vp):
+        from google.transit import gtfs_realtime_pb2
+        out = run_inference(self._gtfs_data, self._model(), {}, vp)
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(out)
+        return len(feed.entity)
+
+    def test_origin_idle_withheld_midroute_served(self, gtfs):
+        self._gtfs_data = _compact_data(gtfs)
+        now = datetime.now(timezone.utc)
+        # At the shape start, first sighting → speed unknown, v_dist ≈ 0 → gated.
+        at_origin = _vp_bytes(LAT, _lon_at(2.0), ts=now)
+        assert self._entities(at_origin) == 0
+        # Mid-route, first sighting (speed still unknown) but v_dist large → served.
+        mid = _vp_bytes(LAT, _lon_at(1200.0), ts=now)
+        assert self._entities(mid) == 1

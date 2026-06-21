@@ -41,6 +41,22 @@ _OFF_ROUTE_DIST = 150.0
 _ON_ROUTE_DIST  = 100.0
 _OFF_CONSEC     = 3
 _ON_CONSEC      = 3
+_BEARING_WRONG_DEG = 90.0   # heading vs shape-tangent diff that looks off-route
+
+# Trip-matching thresholds (bring the compact serving path in line with
+# src/trip_inference.py, which both training and scoring use).  Bearing
+# disambiguates overlapping opposite-direction shape variants that pure
+# nearest-distance matching cannot tell apart.
+_MATCH_DIST_CAP   = 100.0   # spatial-score normaliser
+_REPORTED_DIST_OK = 75.0    # trust a reported trip_id within this distance
+_SPATIAL_W = 0.6
+_BEARING_W = 0.4
+
+# Idling-at-origin guard: a vehicle parked at (≈) the shape start with no
+# measurable forward motion is almost always waiting for its scheduled
+# departure.  Predicting then yields optimistically early ETAs (the warm-start
+# falls back to historical speed), so we withhold predictions until it moves.
+_NOT_DEPARTED_DIST_M = 20.0
 
 # Routes with confirmed trip-matching failures — excluded from training in
 # src/train.py and suppressed here so their bad predictions don't reach riders
@@ -89,23 +105,92 @@ def poly_project(shape_bytes: bytes, px: float, py: float) -> float:
     return best
 
 
+def _seg_bearing(ax, ay, bx, by) -> float:
+    """Compass bearing (deg from North, projected coords) of segment a→b."""
+    return math.degrees(math.atan2(bx - ax, by - ay)) % 360.0
+
+
+def _bearing_diff(b1: float, b2: float) -> float:
+    """Absolute angular difference in [0, 180]."""
+    diff = abs(b1 - b2) % 360.0
+    return diff if diff <= 180.0 else 360.0 - diff
+
+
+def poly_match(shape_bytes: bytes, px: float, py: float) -> tuple[float, float]:
+    """Nearest distance to the polyline and the shape's tangent bearing there.
+
+    The tangent points in the trip's direction of travel (shapes are ordered
+    start→end), so comparing it to the vehicle's heading tells the two
+    directions of an overlapping route apart.
+    """
+    n = len(shape_bytes) // 16
+    min_d = math.inf
+    tangent = 0.0
+    for i in range(n - 1):
+        ax, ay = struct.unpack_from("dd", shape_bytes, i * 16)
+        bx, by = struct.unpack_from("dd", shape_bytes, (i + 1) * 16)
+        d, _ = _seg_nearest(px, py, ax, ay, bx, by)
+        if d < min_d:
+            min_d = d
+            tangent = _seg_bearing(ax, ay, bx, by)
+    return min_d, tangent
+
+
 # ---------------------------------------------------------------------------
 # Off-route tracker
 # ---------------------------------------------------------------------------
 
-def update_tracker(trackers: dict, vid: str, min_dist: float) -> bool:
-    """Update hysteresis state for vehicle *vid*. Returns True if off-route."""
+def update_tracker(
+    trackers: dict, vid: str, min_dist: float, bearing_diff: float | None = None
+) -> bool:
+    """Update hysteresis state for vehicle *vid*. Returns True if off-route.
+
+    Mirrors src/trip_inference.py's VehicleRouteTracker: a snapshot looks off
+    if it is spatially distant, *or* heading the wrong way down the shape, *or*
+    steadily moving away — any of which, sustained for _OFF_CONSEC snapshots,
+    flips the vehicle to off-route.
+    """
     state = trackers.setdefault(vid, {"status": "on_route", "off": 0, "on": 0})
-    if min_dist > _OFF_ROUTE_DIST:
-        state["off"] += 1
-        state["on"] = 0
+    dists = state.setdefault("dists", [])
+    dists.append(min_dist)
+    if len(dists) > 5:
+        del dists[0]
+
+    spatially_off = min_dist > _OFF_ROUTE_DIST
+    bearing_wrong = (
+        bearing_diff is not None
+        and bearing_diff > _BEARING_WRONG_DEG
+        and min_dist > 50.0          # ignore stationary / slow vehicles
+    )
+    moving_away = (
+        len(dists) >= 3
+        and dists[-1] > dists[-2] > dists[-3]
+        and min_dist > _ON_ROUTE_DIST
+    )
+    looks_off = spatially_off or bearing_wrong or moving_away
+
+    if state["status"] == "on_route":
+        if looks_off:
+            state["off"] += 1
+            state["on"] = 0
+        else:
+            state["off"] = 0
+            state["on"] += 1
         if state["off"] >= _OFF_CONSEC:
             state["status"] = "off_route"
+            state["off"] = 0
+            state["on"] = 0
     else:
-        state["on"] += 1
-        state["off"] = 0
-        if state["on"] >= _ON_CONSEC and min_dist < _ON_ROUTE_DIST:
+        if min_dist <= _ON_ROUTE_DIST:
+            state["on"] += 1
+            state["off"] = 0
+        else:
+            state["on"] = 0
+            state["off"] += 1
+        if state["on"] >= _ON_CONSEC:
             state["status"] = "on_route"
+            state["off"] = 0
+            state["on"] = 0
     return state["status"] == "off_route"
 
 
@@ -113,18 +198,38 @@ def update_tracker(trackers: dict, vid: str, min_dist: float) -> bool:
 # Trip inference
 # ---------------------------------------------------------------------------
 
-def infer_trip(route_id, reported_trip_id, vx, vy, data):
+def _bearing_score(bearing: float | None, tangent: float) -> float:
+    """Bearing penalty in [0, 1]; neutral (0.5) when no heading is reported."""
+    if bearing is None:
+        return 0.5
+    return _bearing_diff(bearing, tangent) / 180.0
+
+
+def infer_trip(route_id, reported_trip_id, vx, vy, bearing, data):
+    """Best (trip_id, spatial_dist, tangent_bearing) for a vehicle snapshot.
+
+    Combines spatial distance with heading alignment so opposite-direction
+    shape variants — which sit on top of each other and defeat pure
+    nearest-distance matching — are told apart.
+    """
     candidates = data["route_trips"].get(str(route_id), [])
     if not candidates:
-        return None, 9999.0
+        return None, 9999.0, 0.0
+
+    # Fast path: trust the reported trip only if it is both near AND not headed
+    # the wrong way down its shape.
     if reported_trip_id and reported_trip_id in data["trip_index"]:
         shape_id = data["trip_index"][reported_trip_id]["shape_id"]
         coords = data["shapes"].get(shape_id)
         if coords is not None:
-            d = poly_distance(coords, vx, vy)
-            if d < 75.0:
-                return reported_trip_id, d
-    best_id, best_dist = None, math.inf
+            d, tangent = poly_match(coords, vx, vy)
+            if d < _REPORTED_DIST_OK and (
+                bearing is None
+                or _bearing_diff(bearing, tangent) <= _BEARING_WRONG_DEG
+            ):
+                return reported_trip_id, d, tangent
+
+    best_id, best_dist, best_tangent, best_score = None, math.inf, 0.0, math.inf
     for tid in candidates:
         trip = data["trip_index"].get(tid)
         if trip is None:
@@ -132,11 +237,14 @@ def infer_trip(route_id, reported_trip_id, vx, vy, data):
         coords = data["shapes"].get(trip["shape_id"])
         if coords is None:
             continue
-        d = poly_distance(coords, vx, vy)
-        if d < best_dist:
-            best_dist = d
-            best_id = tid
-    return best_id, best_dist
+        d, tangent = poly_match(coords, vx, vy)
+        score = (
+            _SPATIAL_W * min(d / _MATCH_DIST_CAP, 5.0)
+            + _BEARING_W * _bearing_score(bearing, tangent)
+        )
+        if score < best_score:
+            best_score, best_dist, best_id, best_tangent = score, d, tid, tangent
+    return best_id, best_dist, best_tangent
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +403,28 @@ def build_features(trip_id: str, v_dist: float, speed: float,
 # Protobuf encoder
 # ---------------------------------------------------------------------------
 
+def _isotonic(values: list[float]) -> list[float]:
+    """Least-squares non-decreasing fit (pool-adjacent-violators).
+
+    The per-stop predictions are independent multi-horizon outputs and can come
+    back slightly out of order.  A plain running max only ever pushes the
+    offending stop *later*, biasing far horizons late; PAVA instead distributes
+    the correction across the violating run, so the monotone sequence stays
+    centred on the model's mean — no systematic late bias.
+    """
+    blocks: list[list[float]] = []  # each: [sum, count]
+    for v in values:
+        blocks.append([v, 1.0])
+        while len(blocks) >= 2 and blocks[-2][0] / blocks[-2][1] > blocks[-1][0] / blocks[-1][1]:
+            s2, c2 = blocks.pop()
+            s1, c1 = blocks.pop()
+            blocks.append([s1 + s2, c1 + c2])
+    out: list[float] = []
+    for s, c in blocks:
+        out.extend([s / c] * int(c))
+    return out
+
+
 def encode_trip_updates(updates: list[dict], feed_ts: int) -> bytes:
     # Use wall-clock time for the header and staleness filter.
     # feed_ts is the VP feed's capture timestamp and can be 30–90 s behind
@@ -316,10 +446,13 @@ def encode_trip_updates(updates: list[dict], feed_ts: int) -> bytes:
         t0 = u["snap_ts"]
         stop_count = 0
         last_arr_ts = 0
-        for pred in u["predictions"]:
-            # Direct multi-horizon seconds from the snapshot; clamp to keep
-            # arrival times non-decreasing along the trip.
-            arr_ts = max(int(t0.timestamp() + pred["seconds"]), last_arr_ts)
+        # Enforce non-decreasing arrival times with an isotonic fit rather than a
+        # one-sided running max (which biases far stops late).
+        iso_secs = _isotonic([p["seconds"] for p in u["predictions"]])
+        for pred, sec in zip(u["predictions"], iso_secs):
+            # Direct multi-horizon seconds from the snapshot; the final max only
+            # repairs integer-rounding ties (the isotonic fit is already monotone).
+            arr_ts = max(int(t0.timestamp() + sec), last_arr_ts)
             last_arr_ts = arr_ts
             if arr_ts <= now_ts:
                 continue
@@ -357,6 +490,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             continue
 
         lat, lon      = pos.latitude, pos.longitude
+        bearing       = float(pos.bearing) if pos.HasField("bearing") else None
         route_id      = str(trp.route_id) if trp else None
         reported_tid  = str(trp.trip_id)  if trp else None
         vid           = v.vehicle.id if v.HasField("vehicle") else entity.id
@@ -367,9 +501,14 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             continue
 
         vx, vy = project_xy(lon, lat)
-        trip_id, min_dist = infer_trip(route_id, reported_tid, vx, vy, gtfs_data)
+        trip_id, min_dist, tangent = infer_trip(
+            route_id, reported_tid, vx, vy, bearing, gtfs_data
+        )
         if trip_id is None:
             continue
+        bearing_diff = (
+            _bearing_diff(bearing, tangent) if bearing is not None else None
+        )
 
         # When a vehicle starts a new trip its previous off-route history is stale.
         # Reset the state machine so the new trip gets predictions immediately
@@ -383,12 +522,19 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 state["status"] = "on_route"
                 state["off"] = 0
                 state["on"] = 0
+                state["dists"] = []   # old trip's distances don't carry over
 
-        if update_tracker(trackers, vid, min_dist):
+        if update_tracker(trackers, vid, min_dist, bearing_diff):
             continue
 
         v_dist = vehicle_dist_along(trip_id, vx, vy, gtfs_data)
         speed  = progress_speed(trackers, vid, trip_id, v_dist, float(feed_ts))
+
+        # Idling at the origin pre-departure: withhold predictions until the
+        # vehicle actually moves, rather than emit optimistically early ETAs.
+        if speed <= 0.0 and v_dist < _NOT_DEPARTED_DIST_M:
+            continue
+
         feature_rows = build_features(trip_id, v_dist, speed, snap_ts, gtfs_data)
         if not feature_rows:
             continue

@@ -200,7 +200,15 @@ def join_predictions_actuals(
     # Keep only forward-looking predictions (the rider saw a future ETA) and
     # drop implausible residuals that signal a bad join, not a bad model.
     joined = joined[joined["lead_sec"] > 0]
-    joined = joined[joined["abs_error_sec"] <= MAX_PLAUSIBLE_ERROR_SEC]
+    n_forward = len(joined)
+    implausible = joined["abs_error_sec"] > MAX_PLAUSIBLE_ERROR_SEC
+    n_dropped = int(implausible.sum())
+    joined = joined[~implausible]
+    # Stash how aggressive the plausibility filter was so the report can flag a
+    # join that's silently discarding a large share of residuals (which would
+    # make the published MAE look better than it is).
+    joined.attrs["n_implausible_dropped"] = n_dropped
+    joined.attrs["n_forward"] = n_forward
 
     joined["lead_bucket"] = pd.cut(
         joined["lead_sec"], bins=LEAD_BUCKETS_SEC, labels=LEAD_LABELS, right=False
@@ -265,6 +273,15 @@ def score_report(
         "n_predictions_scored": int(len(joined)),
         "n_actual_arrivals": int(len(actual_keys)),
         "coverage_frac": round(coverage, 3),
+        "implausible_dropped": {
+            "n": int(joined.attrs.get("n_implausible_dropped", 0)),
+            "frac": round(
+                joined.attrs.get("n_implausible_dropped", 0)
+                / max(joined.attrs.get("n_forward", 0), 1),
+                4,
+            ),
+            "threshold_sec": MAX_PLAUSIBLE_ERROR_SEC,
+        },
         "overall": _metrics(joined),
         "by_lead_bucket": _grouped(joined, "lead_bucket"),
         "by_hour": _grouped(joined, "hour"),

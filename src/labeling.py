@@ -29,15 +29,26 @@ def _project_vehicle_positions(
     traj: pd.DataFrame,
     shape,
 ) -> pd.Series:
-    """Return a Series of distances along *shape* for each row in *traj*."""
-    dists = []
-    for _, row in traj.iterrows():
-        if pd.isna(row["lat"]) or pd.isna(row["lon"]):
-            dists.append(float("nan"))
-            continue
-        vx, vy = _project_xy(float(row["lon"]), float(row["lat"]))
-        dists.append(shape.project(Point(vx, vy)))
-    return pd.Series(dists, index=traj.index)
+    """Return a Series of distances along *shape* for each row in *traj*.
+
+    The projections are batched through shapely's vectorised
+    ``line_locate_point`` (C-level over the whole trajectory at once) instead of
+    a per-row ``shape.project`` call, which dominated pipeline runtime.
+    """
+    import shapely
+
+    lon = traj["lon"].to_numpy(dtype=float)
+    lat = traj["lat"].to_numpy(dtype=float)
+    valid = ~(np.isnan(lon) | np.isnan(lat))
+
+    out = np.full(len(traj), np.nan)
+    if valid.any():
+        xs = np.empty(valid.sum())
+        ys = np.empty(valid.sum())
+        for i, (lo, la) in enumerate(zip(lon[valid], lat[valid])):
+            xs[i], ys[i] = _project_xy(lo, la)
+        out[valid] = shapely.line_locate_point(shape, shapely.points(xs, ys))
+    return pd.Series(out, index=traj.index)
 
 
 def _detect_stop_crossings(
