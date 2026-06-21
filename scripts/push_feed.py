@@ -54,6 +54,20 @@ GTFS_KEY            = os.environ.get("GTFS_KEY",    "worker/gtfs_worker_data.pkl
 MODEL_KEY           = os.environ.get("MODEL_KEY",   "worker/eta_pipeline.pkl")
 FEED_KEY            = os.environ.get("FEED_KEY",    "feed/trip_updates.pb")
 VP_FEED_KEY         = os.environ.get("VP_FEED_KEY", "feed/vehicle_positions.pb")
+# Cache-Control stamped on every feed object so Cloudflare's edge caches it when
+# served via the R2 public custom domain (eta.lad.lviv.ua) — R2 honors the
+# object's own header natively, no Cache Rule needed.
+#   max-age=15               — fresh window, matches the ~15 s republish cadence.
+#   stale-while-revalidate=15 — serve the cached copy instantly for up to 15 s
+#                               past expiry while Cloudflare refreshes from R2 in
+#                               the background, so a slow/missed push cycle never
+#                               costs a request a refetch latency blip.
+#   stale-if-error=60        — if R2 ever 5xxs, keep serving the last good feed
+#                               for up to 60 s instead of failing the request.
+# (Async stale-while-revalidate is honored on Free/Pro/Business zones.)
+FEED_CACHE_CONTROL  = os.environ.get(
+    "FEED_CACHE_CONTROL", "public, max-age=15, stale-while-revalidate=15, stale-if-error=60"
+)
 VP_URL              = os.environ.get(
     "GTFS_RT_URL", "https://track.ua-gis.com/gtfs/lviv/vehicle_position"
 )
@@ -221,6 +235,7 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
         Key=FEED_KEY,
         Body=tu_result,
         ContentType="application/x-protobuf",
+        CacheControl=FEED_CACHE_CONTROL,
         Metadata={"commit": FEED_COMMIT},
     )
     # Cleaned VehiclePositions feed (corrected trip match, next stop, congestion)
@@ -230,6 +245,7 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
         Key=VP_FEED_KEY,
         Body=vp_result,
         ContentType="application/x-protobuf",
+        CacheControl=FEED_CACHE_CONTROL,
         Metadata={"commit": FEED_COMMIT},
     )
     elapsed = (time.monotonic() - t0) * 1000
