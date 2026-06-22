@@ -210,13 +210,29 @@ def main():
     tree_data = _extract_trees(pipeline)
 
     # Per-horizon uncertainty bands (seconds) → served as GTFS-RT
-    # StopTimeEvent.uncertainty. Older models without the sidecar simply omit
-    # the field, so the export stays backward-compatible.
-    if UNCERTAINTY_PATH.exists():
-        tree_data["uncertainty_by_horizon"] = joblib.load(UNCERTAINTY_PATH)
-        print(f"  Uncertainty bands: {tree_data['uncertainty_by_horizon']}")
+    # StopTimeEvent.uncertainty. Prefer LIVE calibration — pooled per-stops-ahead
+    # MAE from the quality archive, which reflects real serving error (~2x the
+    # training-test split). The train-split sidecar (models/uncertainty.joblib) is
+    # only a cold-start fallback for before any day has been scored. The feed omits
+    # the field entirely when neither source is available (backward-compatible).
+    unc_table: dict | None = None
+    try:
+        from src.scoring import live_uncertainty_by_horizon
+        unc_table, dates_used = live_uncertainty_by_horizon(days=7)
+        if unc_table:
+            span = f"{dates_used[0]}..{dates_used[-1]}" if dates_used else "?"
+            print(f"  Uncertainty bands (live, {len(dates_used)} days {span}): {unc_table}")
+    except Exception as exc:  # noqa: BLE001 — calibration must never block an export
+        print(f"  WARNING: live uncertainty calibration failed: {exc!r}")
+
+    if not unc_table and UNCERTAINTY_PATH.exists():
+        unc_table = joblib.load(UNCERTAINTY_PATH)
+        print(f"  Uncertainty bands (train-split fallback): {unc_table}")
+
+    if unc_table:
+        tree_data["uncertainty_by_horizon"] = unc_table
     else:
-        print(f"  WARNING: {UNCERTAINTY_PATH} not found — no uncertainty in feed")
+        print("  WARNING: no uncertainty bands available — feed will omit the field")
 
     model_bytes = pickle.dumps(tree_data, protocol=4)
     size_mb = len(model_bytes) / 1e6

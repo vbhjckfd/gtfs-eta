@@ -131,7 +131,7 @@ Per cycle (every ~10 s):
 4. Run the serialised GBT model.
 5. Encode a GTFS-RT TripUpdates protobuf and a cleaned VehiclePositions protobuf, and upload both to R2.
 
-Each `StopTimeUpdate` carries a `StopTimeEvent.uncertainty` (seconds) — the model's per-horizon held-out MAE, baked into the export at training time — so a consumer can widen the arrival window for far-horizon stops instead of treating a 1-stop and a 10-stop ETA as equally certain.
+Each `StopTimeUpdate` carries a `StopTimeEvent.uncertainty` (seconds) so a consumer can widen the arrival window for far-horizon stops instead of treating a 1-stop and a 10-stop ETA as equally certain. The bands are **calibrated from live serving error**: `make export` pools the per-stops-ahead MAE from the last 7 days of the quality archive (`quality/*.json`) — which runs ~2× the training-test split — and bakes the result into the model blob. The training-test MAE (`models/uncertainty.joblib`) is only a cold-start fallback for before any day has been scored.
 
 The **cleaned VehiclePositions feed** (`feed/vehicle_positions.pb`) re-emits the upstream positions enriched with this project's corrected trip match (often better than the operator's reported `trip_id`), the next stop + `current_status` (STOPPED_AT / IN_TRANSIT_TO), and a `congestion_level` derived from observed-vs-historical speed. It is a by-product of the same inference pass, so it costs no extra geometry work.
 

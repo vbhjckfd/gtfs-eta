@@ -37,6 +37,7 @@ from src.snapshots import R2_BUCKET, _fetch_and_parse, _make_client, list_snapsh
 from src.trip_inference import infer_trips
 
 PREDICTIONS_PREFIX = "predictions/"
+QUALITY_PREFIX = "quality/"
 
 # Lead-time (horizon) buckets in seconds — how far ahead the prediction was
 # when the rider saw it.  Error almost always grows with the horizon, so this
@@ -340,6 +341,80 @@ def _worst_routes(joined: pd.DataFrame, top: int = 8, min_n: int = 50) -> list[d
         rows.append(m)
     rows.sort(key=lambda m: m["mae_sec"], reverse=True)
     return rows[:top]
+
+
+# ---------------------------------------------------------------------------
+# Live-calibrated prediction uncertainty
+# ---------------------------------------------------------------------------
+
+def _aggregate_stops_ahead_mae(reports: list[dict], min_n: int = 200) -> dict:
+    """Pool per-horizon MAE across daily quality reports → {horizon:int -> sec:int}.
+
+    Each report's ``by_stops_ahead[h] = {"n", "mae_sec", ...}``. Since mae_sec is
+    itself a mean of |error|, the n-weighted mean of the daily per-horizon values
+    is exactly the pooled multi-day MAE for that horizon. Horizons below *min_n*
+    total support are dropped (too noisy to publish). The result is made
+    non-decreasing in horizon: a longer-horizon confidence band must never be
+    tighter than a shorter one, even if a sparse far horizon scores lower by luck.
+    """
+    acc: dict[int, list[float]] = {}  # horizon -> [sum_abs_err, n]
+    for rep in reports:
+        bsa = (rep or {}).get("by_stops_ahead") or {}
+        for h_str, m in bsa.items():
+            try:
+                h, n, mae = int(h_str), int(m["n"]), float(m["mae_sec"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if n <= 0:
+                continue
+            slot = acc.setdefault(h, [0.0, 0.0])
+            slot[0] += mae * n
+            slot[1] += n
+    pooled = {h: s / n for h, (s, n) in acc.items() if n >= min_n}
+    if not pooled:
+        return {}
+    out: dict[int, int] = {}
+    running = 0.0
+    for h in sorted(pooled):
+        running = max(running, pooled[h])
+        out[h] = int(round(running))
+    return out
+
+
+def live_uncertainty_by_horizon(
+    days: int = 7, client=None, min_n: int = 200
+) -> tuple[dict, list[str]]:
+    """Per-horizon uncertainty (seconds) calibrated from the live quality archive.
+
+    Reads the most recent *days* ``quality/<date>.json`` reports from R2 and pools
+    their per-stops-ahead MAE (see ``_aggregate_stops_ahead_mae``). This reflects
+    real serving error, which runs ~2x the training-test split the bands were
+    originally derived from. Returns ``({horizon:int -> sec:int}, dates_used)``;
+    an empty dict when no usable scored history exists (caller should fall back).
+    """
+    client = client or _make_client()
+    paginator = client.get_paginator("list_objects_v2")
+    keys: list[str] = []
+    for page in paginator.paginate(Bucket=R2_BUCKET, Prefix=QUALITY_PREFIX):
+        for o in page.get("Contents", []):
+            base = o["Key"][len(QUALITY_PREFIX):]
+            # Only immutable per-day files: quality/YYYY-MM-DD.json (15 chars).
+            # Excludes latest.json / latest.md.
+            if len(base) == 15 and base.endswith(".json") and base[:10].count("-") == 2:
+                keys.append(o["Key"])
+    keys.sort(reverse=True)
+
+    reports: list[dict] = []
+    dates_used: list[str] = []
+    for key in keys[:days]:
+        try:
+            rep = json.loads(client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read())
+        except Exception:  # noqa: BLE001 — a single unreadable report must not abort
+            continue
+        if rep.get("status") == "ok" and rep.get("by_stops_ahead"):
+            reports.append(rep)
+            dates_used.append(rep.get("date") or key)
+    return _aggregate_stops_ahead_mae(reports, min_n=min_n), sorted(dates_used)
 
 
 def score_date(date_str: str, gtfs=None, client=None) -> dict:

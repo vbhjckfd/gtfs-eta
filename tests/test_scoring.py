@@ -148,6 +148,37 @@ def test_score_report_empty_join():
     assert report["status"] == "no_matches"
 
 
+def test_aggregate_stops_ahead_mae_n_weighted_pool():
+    # mae_sec is a per-day mean of |error|, so pooling across days must weight by
+    # n: day1 (100s, n=100) + day2 (200s, n=300) → (100*100 + 200*300)/400 = 175.
+    reports = [
+        {"by_stops_ahead": {"1": {"n": 100, "mae_sec": 100.0}}},
+        {"by_stops_ahead": {"1": {"n": 300, "mae_sec": 200.0}}},
+    ]
+    table = scoring._aggregate_stops_ahead_mae(reports, min_n=200)
+    assert table == {1: 175}
+
+
+def test_aggregate_stops_ahead_mae_drops_low_support_and_enforces_monotone():
+    reports = [{
+        "by_stops_ahead": {
+            "1": {"n": 500, "mae_sec": 180.0},
+            "2": {"n": 500, "mae_sec": 160.0},   # dips below h1 → lifted to 180
+            "3": {"n": 50,  "mae_sec": 999.0},   # under min_n → dropped
+            "4": {"n": 500, "mae_sec": 300.0},
+        }
+    }]
+    table = scoring._aggregate_stops_ahead_mae(reports, min_n=200)
+    assert table == {1: 180, 2: 180, 4: 300}   # non-decreasing, low-n horizon gone
+
+
+def test_aggregate_stops_ahead_mae_empty_when_no_support():
+    assert scoring._aggregate_stops_ahead_mae([], min_n=200) == {}
+    assert scoring._aggregate_stops_ahead_mae(
+        [{"by_stops_ahead": {"1": {"n": 10, "mae_sec": 50.0}}}], min_n=200
+    ) == {}
+
+
 def test_to_epoch_seconds_is_resolution_independent():
     # 2026-06-15T12:25:46Z = 1781526346 epoch seconds. pandas 3.0 builds
     # datetime64 at microsecond resolution; the conversion must still land in
