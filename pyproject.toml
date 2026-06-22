@@ -29,7 +29,7 @@ dev = [
     "seaborn>=0.13",
 ]
 # AI quality-diagnosis layer (the on-demand `scripts/diagnose.py` tool). Kept out
-# of the base deps so neither the per-15s push-feed job nor the daily metrics-only
+# of the base deps so neither the per-10s push-feed job nor the daily metrics-only
 # score-quality job pulls the Anthropic SDK they never use.
 ai = [
     "anthropic>=0.69",
