@@ -33,7 +33,7 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
 ```
 src/                 Python library (features, labeling, training, inference)
 scripts/             Pipeline and operational scripts
-worker/              Cloudflare Worker — JS feed passthrough + /health (wrangler)
+worker/              Cloudflare Worker — /health + cron + legacy feed redirects (wrangler)
 tests/               Smoke tests against the live worker
 data/
   gtfs_static/       Local copy of GTFS static (stops, trips, shapes)
@@ -135,9 +135,12 @@ Each `StopTimeUpdate` carries a `StopTimeEvent.uncertainty` (seconds) — the mo
 
 The **cleaned VehiclePositions feed** (`feed/vehicle_positions.pb`) re-emits the upstream positions enriched with this project's corrected trip match (often better than the operator's reported `trip_id`), the next stop + `current_status` (STOPPED_AT / IN_TRANSIT_TO), and a `congestion_level` derived from observed-vs-historical speed. It is a by-product of the same inference pass, so it costs no extra geometry work.
 
-The `worker/` directory is a plain JS Cloudflare Worker that serves the pre-computed feeds — no inference CPU at request time:
-- `GET /` — streams `feed/trip_updates.pb` from R2.
-- `GET /vehicle_positions` — streams the cleaned `feed/vehicle_positions.pb`.
+The feeds are served from the **R2 public custom domain** `eta.lad.lviv.ua`, which Cloudflare edge-caches natively (`Cache-Control: max-age=10` stamped on the objects), so they cost no worker invocation or R2 read per poll:
+- `https://eta.lad.lviv.ua/feed/trip_updates.pb`
+- `https://eta.lad.lviv.ua/feed/vehicle_positions.pb`
+
+The `worker/` directory is a plain JS Cloudflare Worker that no longer proxies the feeds — it only:
+- `GET /` and `GET /vehicle_positions` — **301-redirect** to the R2 domain above (backward compatibility for unmigrated consumers; no R2 read).
 - `GET /health` — parses the feed (hand-rolled protobuf wire walk, no deps) and returns 200/503 based on header freshness and, during working hours, predicted arrivals at stop 60.
 - cron (every 5 min) — dispatches `push-feed.yml` (see the cron reliability trick above).
 
@@ -152,8 +155,8 @@ gtfs-lviv/
   static/     <feedVersion>/static.zip         # Versioned GTFS static
   static/     index.json                       # day → feedVersion mapping
   _meta/      collector_health.json            # collection health counters
-  feed/       trip_updates.pb                  # pre-computed TripUpdates feed served at /
-  feed/       vehicle_positions.pb             # cleaned VehiclePositions feed served at /vehicle_positions
+  feed/       trip_updates.pb                  # pre-computed TripUpdates feed (served via eta.lad.lviv.ua)
+  feed/       vehicle_positions.pb             # cleaned VehiclePositions feed (served via eta.lad.lviv.ua)
   predictions/ YYYY-MM-DD/<feedTsISO>.pb       # sampled archive of the served feed (quality scoring)
   quality/    YYYY-MM-DD.json + latest.json    # scored live-prediction quality
   worker/     gtfs_worker_data.pkl             # compact GTFS for push_feed.py inference

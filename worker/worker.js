@@ -1,10 +1,12 @@
 /**
  * Cloudflare Worker — GTFS-RT TripUpdates passthrough.
  *
- * fetch: serves the pre-computed protobuf feeds from R2.
- *   GET /                  — TripUpdates feed (drop-in replacement for upstream)
- *   GET /vehicle_positions — cleaned VehiclePositions feed (corrected trip
- *                            match, next stop + status, congestion estimate)
+ * fetch: the feeds now live on the R2 public custom domain (eta.lad.lviv.ua),
+ *   which Cloudflare edge-caches natively — so this worker no longer proxies
+ *   them (that was one R2 read + worker invocation per poll).  The legacy paths
+ *   stay as cheap 301 redirects for any consumer not yet migrated:
+ *   GET /                  — 301 → <R2_PUBLIC_BASE>/trip_updates.pb
+ *   GET /vehicle_positions — 301 → <R2_PUBLIC_BASE>/vehicle_positions.pb
  *   GET /health  — returns JSON 200/503.  Always requires a fresh feed header
  *                  timestamp (< MAX_FEED_AGE_SEC); additionally, during working
  *                  hours, requires stop 60 to have predicted arrivals.  Overnight
@@ -35,7 +37,11 @@
  */
 
 const FEED_KEY = "feed/trip_updates.pb";
-const VP_FEED_KEY = "feed/vehicle_positions.pb";
+
+// Public R2 custom domain the feeds are served from (edge-cached). The fetch
+// handler 301-redirects the worker's legacy feed paths here; archival and
+// /health still read the blob directly via the R2 binding, not this URL.
+const R2_PUBLIC_BASE = "https://eta.lad.lviv.ua/feed";
 
 // Prefix under which the served feed is archived for offline quality scoring.
 // On every cron fire we copy the *currently served* blob to
@@ -417,25 +423,15 @@ export default {
       const path = new URL(request.url).pathname.replace(/\/+$/, "");
       if (path.endsWith("/health")) return await handleHealth(env);
 
-      // Both feeds are pre-computed blobs in R2; the only thing that varies is
-      // which key we stream. Default is the TripUpdates feed at "/".
-      const key = path.endsWith("/vehicle_positions")
-        ? (env.VP_FEED_KEY ?? VP_FEED_KEY)
-        : (env.FEED_KEY ?? FEED_KEY);
-
-      const obj = await env.R2.get(key);
-      if (obj === null) {
-        return new Response(
-          "Feed unavailable — push daemon (scripts/push_feed.py) not running",
-          { status: 503 },
-        );
-      }
-      return new Response(obj.body, {
-        headers: {
-          "content-type": "application/x-protobuf",
-          "cache-control": "public, max-age=10",
-        },
-      });
+      // The feeds are served (and edge-cached) from the R2 public custom domain;
+      // this worker no longer proxies them. Redirect the legacy paths there so
+      // any unmigrated consumer keeps working — a 301 is cacheable and reads no
+      // R2, unlike the old per-request stream. "/" maps to TripUpdates.
+      const base = env.R2_PUBLIC_BASE ?? R2_PUBLIC_BASE;
+      const target = path.endsWith("/vehicle_positions")
+        ? `${base}/vehicle_positions.pb`
+        : `${base}/trip_updates.pb`;
+      return Response.redirect(target, 301);
     } catch (exc) {
       console.error(`[fetch] unhandled error: ${exc}\n${exc?.stack ?? ""}`);
       ctx.waitUntil(reportException(env, exc, "fetch"));
