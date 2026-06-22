@@ -29,6 +29,9 @@ REF_URL = os.environ.get(
 VP_URL = os.environ.get(
     "SMOKE_VP_URL", "https://track.ua-gis.com/gtfs/lviv/vehicle_position"
 )
+OUR_VP_URL = os.environ.get(
+    "SMOKE_OUR_VP_URL", "https://eta.lad.lviv.ua/feed/vehicle_positions.pb"
+)
 TIMEOUT = float(os.environ.get("SMOKE_TIMEOUT", "30"))
 
 
@@ -97,6 +100,15 @@ def vehicle_positions_feed() -> gtfs_realtime_pb2.FeedMessage:
         return _fetch_proto(VP_URL)
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"vehicle positions feed unavailable: {exc}")
+
+
+@pytest.fixture(scope="session")
+def our_vp_feed() -> gtfs_realtime_pb2.FeedMessage:
+    """Parsed VehiclePositions feed from our own R2 publication (skips if unavailable)."""
+    try:
+        return _fetch_proto(OUR_VP_URL)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"our vehicle positions feed unavailable: {exc}")
 
 
 @pytest.fixture(scope="session")

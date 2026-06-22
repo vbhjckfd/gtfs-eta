@@ -264,6 +264,176 @@ def test_stop_60_has_arrivals(worker_feed):
     )
 
 
+# ── Our VehiclePositions feed ───────────────────────────────────────────────
+
+# Lviv city bounding box (with ~5 km margin for outskirt depots/terminals).
+# Tighter than an oblast box — catches swapped lat/lon and zero-initialised coords.
+_VP_LAT_MIN, _VP_LAT_MAX = 49.72, 49.97
+_VP_LON_MIN, _VP_LON_MAX = 23.82, 24.22
+
+# Urban transit hard cap: ~130 km/h covers articulated trams on downhill tracks;
+# anything above is a GPS artefact or a unit error (m/s vs km/h).
+_SPEED_MAX_MPS = 36.0
+
+# GTFS-RT VehiclePosition.VehicleStopStatus values we actively assign.
+_VALID_STATUSES = frozenset({
+    gtfs_realtime_pb2.VehiclePosition.STOPPED_AT,
+    gtfs_realtime_pb2.VehiclePosition.IN_TRANSIT_TO,
+})
+
+
+def _vp_vehicles(our_vp_feed):
+    """Yield VehiclePosition messages from the feed."""
+    for e in our_vp_feed.entity:
+        if e.HasField("vehicle"):
+            yield e.id, e.vehicle
+
+
+def test_our_vp_feed_has_entities(our_vp_feed):
+    if not _within_working_hours():
+        pytest.skip(
+            f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
+            f"{WORKING_HOURS_UTC}) — an empty VP feed is expected, not a failure"
+        )
+    assert len(our_vp_feed.entity) > 0, (
+        "our vehicle_positions feed has zero entities — inference may have stopped"
+    )
+
+
+def test_our_vp_feed_vehicle_ids_are_unique(our_vp_feed):
+    """Each vehicle must appear exactly once; duplicates mean a tracker bug."""
+    ids = [eid for eid, _ in _vp_vehicles(our_vp_feed)]
+    dupes = {v for v in ids if ids.count(v) > 1}
+    assert not dupes, f"duplicate vehicle entity IDs: {sorted(dupes)[:10]}"
+
+
+def test_our_vp_feed_coords_within_lviv(our_vp_feed):
+    """All positions must fall inside the Lviv city bounding box.
+
+    Catches swapped lat/lon, zero-initialised fields, and vehicles projected
+    into a neighbouring city due to a shape-matching bug.
+    """
+    bad = []
+    for eid, v in _vp_vehicles(our_vp_feed):
+        pos = v.position
+        if not (_VP_LAT_MIN <= pos.latitude  <= _VP_LAT_MAX and
+                _VP_LON_MIN <= pos.longitude <= _VP_LON_MAX):
+            bad.append((eid, f"lat={pos.latitude:.5f} lon={pos.longitude:.5f}"))
+    assert not bad, f"out-of-bounds positions: {bad[:5]}"
+
+
+def test_our_vp_feed_has_trip_and_route(our_vp_feed):
+    """Every vehicle must carry a matched trip_id and route_id."""
+    bad = []
+    for eid, v in _vp_vehicles(our_vp_feed):
+        if not v.trip.trip_id or not v.trip.route_id:
+            bad.append((eid, f"trip_id={v.trip.trip_id!r} route_id={v.trip.route_id!r}"))
+    assert not bad, f"entities missing trip/route: {bad[:5]}"
+
+
+def test_our_vp_feed_bearing_present_on_all(our_vp_feed):
+    """Every on-route vehicle must report a bearing (1–359°).
+
+    Inference derives bearing from the shape tangent at the matched point, so
+    bearing=0 would mean the tangent calculation returned north or was skipped.
+    The upstream feed also supplies bearing, so a complete zero run signals
+    a field-copy regression.
+    """
+    bad = []
+    for eid, v in _vp_vehicles(our_vp_feed):
+        b = v.position.bearing
+        if not (1.0 <= b <= 359.0):
+            bad.append((eid, f"bearing={b}"))
+    assert not bad, f"vehicles with missing/invalid bearing: {bad[:10]}"
+
+
+def test_our_vp_feed_speed_in_realistic_range(our_vp_feed):
+    """Non-zero speeds must be physically plausible for Lviv urban transit.
+
+    Lower bound: 0.5 m/s filters GPS noise from truly stationary vehicles.
+    Upper bound: _SPEED_MAX_MPS catches unit errors (e.g. km/h reported as m/s
+    would turn a 60 km/h tram into a 60 m/s ≈ 216 km/h rocket).
+    """
+    bad = []
+    for eid, v in _vp_vehicles(our_vp_feed):
+        s = v.position.speed
+        if 0 < s < 0.5 or s > _SPEED_MAX_MPS:
+            bad.append((eid, f"speed={s:.2f} m/s ({s * 3.6:.1f} km/h)"))
+    assert not bad, f"implausible speed values: {bad[:10]}"
+
+
+def test_our_vp_feed_some_vehicles_have_speed(our_vp_feed):
+    """During service hours, ≥30% of vehicles must report a non-zero GPS speed.
+
+    The upstream tracker supplies speed for ~50–70% of active vehicles. Dropping
+    below 30% indicates the speed field is being silently zeroed somewhere in
+    the inference pipeline.
+    """
+    if not _within_working_hours():
+        pytest.skip(
+            f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
+            f"{WORKING_HOURS_UTC}) — stationary/absent vehicles expected"
+        )
+    vehicles = list(_vp_vehicles(our_vp_feed))
+    if not vehicles:
+        pytest.skip("no vehicles in feed")
+    nonzero = sum(1 for _, v in vehicles if v.position.speed > 0)
+    frac = nonzero / len(vehicles)
+    assert frac >= 0.30, (
+        f"only {frac:.0%} of vehicles report speed > 0 ({nonzero}/{len(vehicles)}) — "
+        "GPS speed may be dropped in encode_vehicle_positions"
+    )
+
+
+def test_our_vp_feed_status_is_valid(our_vp_feed):
+    """current_status must be STOPPED_AT or IN_TRANSIT_TO — we never emit INCOMING_AT."""
+    bad = []
+    for eid, v in _vp_vehicles(our_vp_feed):
+        if v.current_status not in _VALID_STATUSES:
+            bad.append((eid, f"current_status={v.current_status}"))
+    assert not bad, f"unexpected current_status values: {bad[:10]}"
+
+
+def test_our_vp_feed_next_stop_present_on_all(our_vp_feed):
+    """Every vehicle must have a next stop_id (numeric GTFS stop code).
+
+    Inference populates stop_id from the first remaining stop on the matched
+    trip shape. A blank or non-numeric stop_id means the trip had no upcoming
+    stops — likely an end-of-line vehicle that slipped through the pre-departure
+    filter.
+    """
+    bad = []
+    for eid, v in _vp_vehicles(our_vp_feed):
+        if not v.stop_id or not v.stop_id.isdigit():
+            bad.append((eid, f"stop_id={v.stop_id!r}"))
+    assert not bad, f"vehicles with missing/non-numeric stop_id: {bad[:10]}"
+
+
+def test_our_vp_feed_congestion_set_for_some_vehicles(our_vp_feed):
+    """At least some vehicles must carry a non-UNKNOWN congestion level.
+
+    Congestion is computed from progress_speed (position deltas between pushes),
+    not from the raw GPS speed field, so newly-seen vehicles legitimately stay
+    UNKNOWN until two consecutive snapshots are available. But during service
+    hours the vast majority of vehicles have history, so a complete absence of
+    congestion data is a clear pipeline regression.
+    """
+    if not _within_working_hours():
+        pytest.skip(
+            f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
+            f"{WORKING_HOURS_UTC}) — no active vehicles expected"
+        )
+    UNKNOWN = gtfs_realtime_pb2.VehiclePosition.UNKNOWN_CONGESTION_LEVEL
+    vehicles = list(_vp_vehicles(our_vp_feed))
+    if not vehicles:
+        pytest.skip("no vehicles in feed")
+    with_congestion = sum(1 for _, v in vehicles if v.congestion_level != UNKNOWN)
+    assert with_congestion > 0, (
+        "every vehicle has UNKNOWN congestion level — "
+        "congestion_level is not being written (check _congestion_level / encode_vehicle_positions)"
+    )
+
+
 # ── Parity with the upstream reference ──────────────────────────────────────
 
 def test_parity_with_reference(worker_feed, reference_feed):
