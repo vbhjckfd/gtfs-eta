@@ -54,9 +54,9 @@ release: export deploy
 push-feed:
 	python scripts/push_feed.py
 
-## Push to R2 continuously every 15 s (keeps the live feed fresh)
+## Push to R2 continuously every 10 s (keeps the live feed fresh)
 serve-feed:
-	python scripts/push_feed.py --loop 15
+	python scripts/push_feed.py --loop 10
 
 ## Smoke-test the live worker as a drop-in TripUpdates feed.
 ## Override target with SMOKE_URL=... (e.g. a preview deploy or local dev).
@@ -108,7 +108,7 @@ help:
 	@echo "  release              export + deploy"
 	@echo ""
 	@echo "  push-feed            Push one TripUpdates snapshot to R2"
-	@echo "  serve-feed           Push to R2 every 15 s (live feed daemon)"
+	@echo "  serve-feed           Push to R2 every 10 s (live feed daemon)"
 	@echo "  smoke                Smoke-test the live worker feed"
 	@echo "  score DATE=          Score live ETA quality for a day (default: today)"
 	@echo "  review-quality DATE= Gather a day's report + issue notes for review (default: yesterday)"

@@ -24,7 +24,7 @@ gtfs-lviv/
   static/     <feedVersion>/static.zip           # Versioned static GTFS
   static/     index.json                         # day -> feedVersion mapping
   _meta/      collector_health.json              # last run, counts, last feed_ts
-  feed/       trip_updates.pb                     # pre-computed served feed (overwritten ~15 s)
+  feed/       trip_updates.pb                     # pre-computed served feed (overwritten ~10 s)
   predictions/ YYYY-MM-DD/<feedTsISO8601Z>.pb     # sampled archive of the served feed (quality scoring)
   quality/    YYYY-MM-DD.json + latest.json       # scored prediction quality (score-quality.yml)
 ```

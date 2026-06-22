@@ -13,7 +13,7 @@ free-plan 10 ms CPU budget.
 
 Usage:
     python scripts/push_feed.py              # push once and exit
-    python scripts/push_feed.py --loop 15   # push every 15 seconds
+    python scripts/push_feed.py --loop 10   # push every 10 seconds
 
 Environment (read from .env):
     R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
@@ -57,8 +57,8 @@ VP_FEED_KEY         = os.environ.get("VP_FEED_KEY", "feed/vehicle_positions.pb")
 # Cache-Control stamped on every feed object so Cloudflare's edge caches it when
 # served via the R2 public custom domain (eta.lad.lviv.ua) — R2 honors the
 # object's own header natively, no Cache Rule needed.
-#   max-age=15               — fresh window, matches the ~15 s republish cadence.
-#   stale-while-revalidate=15 — serve the cached copy instantly for up to 15 s
+#   max-age=10               — fresh window, matches the ~10 s republish cadence.
+#   stale-while-revalidate=10 — serve the cached copy instantly for up to 10 s
 #                               past expiry while Cloudflare refreshes from R2 in
 #                               the background, so a slow/missed push cycle never
 #                               costs a request a refetch latency blip.
@@ -66,7 +66,7 @@ VP_FEED_KEY         = os.environ.get("VP_FEED_KEY", "feed/vehicle_positions.pb")
 #                               for up to 60 s instead of failing the request.
 # (Async stale-while-revalidate is honored on Free/Pro/Business zones.)
 FEED_CACHE_CONTROL  = os.environ.get(
-    "FEED_CACHE_CONTROL", "public, max-age=15, stale-while-revalidate=15, stale-if-error=60"
+    "FEED_CACHE_CONTROL", "public, max-age=10, stale-while-revalidate=10, stale-if-error=60"
 )
 VP_URL              = os.environ.get(
     "GTFS_RT_URL", "https://track.ua-gis.com/gtfs/lviv/vehicle_position"
@@ -80,7 +80,7 @@ REQUEST_TIMEOUT = 20
 # never publish ETAs computed off badly stale positions.
 #
 # This daemon is a single long-lived process (`python scripts/push_feed.py
-# --loop 15`), so a module-level cache lives for the whole run and is shared
+# --loop 10`), so a module-level cache lives for the whole run and is shared
 # across iterations — exactly what we want. (The Cloudflare Worker in
 # worker/worker.py can't rely on module state this way, since its isolates are
 # ephemeral — but it only reads a pre-computed blob from R2; the upstream fetch

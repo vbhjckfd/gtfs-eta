@@ -26,7 +26,7 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
   Cloudflare Worker  →  consumers (apps, journey planners, …)
 ```
 
-**Cron reliability trick**: GitHub Actions scheduled triggers are unreliable on low-activity repos. Instead, a Cloudflare Worker cron fires every 5 minutes and dispatches the `push-feed.yml` GitHub Actions workflow, which pushes a fresh feed snapshot every 15 seconds for ~4 minutes.
+**Cron reliability trick**: GitHub Actions scheduled triggers are unreliable on low-activity repos. Instead, a Cloudflare Worker cron fires every 5 minutes and dispatches the `push-feed.yml` GitHub Actions workflow, which pushes a fresh feed snapshot every 10 seconds for ~4 minutes.
 
 ## Repository layout
 
@@ -69,7 +69,7 @@ make deploy              # deploy Cloudflare Worker
 make release             # export + deploy in one step
 
 make push-feed           # push one TripUpdates snapshot to R2 now
-make serve-feed          # push every 15 s (local daemon)
+make serve-feed          # push every 10 s (local daemon)
 make smoke               # smoke-test the live worker against the network
 make sanity              # check R2 collection health (snapshot counts, staleness)
 make check-gtfs          # verify GTFS static loading
@@ -124,7 +124,7 @@ Training examples are **snapshot-anchored**: every vehicle position snapshot yie
 
 Inference runs in `scripts/push_feed.py` (the GitHub Actions push pipeline), using a compact, pure-Python re-implementation of GBT tree traversal (`src/inference.py`) — no sklearn or pandas at runtime.
 
-Per cycle (every ~15 s):
+Per cycle (every ~10 s):
 1. Fetch the current vehicle positions GTFS-RT feed from upstream.
 2. For each vehicle: project lat/lon to UTM, match to the best trip shape (off-route filter with hysteresis), project the vehicle's exact position along the shape, and measure progress speed vs the previous cycle.
 3. Build feature rows for the next ≤10 stops, anchored at the vehicle's projected position.
