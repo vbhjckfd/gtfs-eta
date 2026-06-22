@@ -528,6 +528,8 @@ def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
         vp.position.longitude = r["lon"]
         if r.get("bearing") is not None:
             vp.position.bearing = r["bearing"]
+        if r.get("speed") is not None:
+            vp.position.speed = r["speed"]
         if r.get("stop_id") is not None:
             vp.stop_id = r["stop_id"]
             vp.current_stop_sequence = r["stop_sequence"]
@@ -590,6 +592,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
 
         lat, lon      = pos.latitude, pos.longitude
         bearing       = float(pos.bearing) if pos.HasField("bearing") else None
+        gps_speed     = float(pos.speed)   if pos.HasField("speed")   else None
         route_id      = str(trp.route_id) if trp else None
         reported_tid  = str(trp.trip_id)  if trp else None
         vid           = v.vehicle.id if v.HasField("vehicle") else entity.id
@@ -648,6 +651,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 "lat":        float(lat),
                 "lon":        float(lon),
                 "bearing":    bearing,
+                "speed":      gps_speed,
                 "stop_id":    next_stop_id,
                 "stop_sequence": int(next_stop_seq),
                 "status": (
