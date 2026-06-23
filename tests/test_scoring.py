@@ -200,11 +200,10 @@ def test_coverage_gap_no_causes_without_predictions():
                for g in report["coverage_gap"]["by_route"].values())
 
 
-def test_relaxed_join_recovers_trip_instance_mismatch():
-    # Live served the physical stop under trip "t1-run2" at its sequence 5; batch
-    # labeled the same arrival as trip "t1" sequence 12 (trip-relative numbering
-    # differs). Strict join misses it (trip_id AND stop_sequence differ); the
-    # rider-centric (vehicle, stop_id) + nearest-time join recovers it.
+def test_physical_stop_coverage_credits_trip_label_mismatch():
+    # Live served the physical stop under trip "t1-run2" sequence 5; batch labeled
+    # the same arrival as trip "t1" sequence 12. Strict coverage misses it (trip_id
+    # AND stop_sequence differ); existence-based physical-stop coverage credits it.
     preds = _predictions_df([
         {"feed_ts": 1000, "vehicle_id": "v1", "trip_id": "t1-run2", "route_id": "32",
          "stop_id": "100", "stop_sequence": 5, "stops_ahead": 1, "predicted_arrival": 1130},
@@ -215,38 +214,32 @@ def test_relaxed_join_recovers_trip_instance_mismatch():
     ])
     assert scoring.join_predictions_actuals(preds, actuals).empty  # strict misses
 
-    rj = scoring.join_predictions_actuals_relaxed(preds, actuals)
-    assert len(rj) == 1
-    assert rj.iloc[0]["error_sec"] == 30  # predicted 1130 vs actual 1100
-    assert rj.iloc[0]["actual_trip_id"] == "t1"
-    assert rj.iloc[0]["actual_stop_sequence"] == 12
+    rc = scoring.physical_stop_coverage(preds, actuals)
+    assert rc == {"coverage_frac": 1.0, "n_covered": 1, "n_actual": 1}
 
     report = scoring.score_report(
         scoring.join_predictions_actuals(preds, actuals), actuals,
         "2026-06-15", predictions=preds,
     )
-    assert report["status"] == "no_matches"        # strict found nothing
-    assert report["relaxed_join"]["coverage_frac"] == 1.0  # recovered
-    assert report["relaxed_join"]["overall"]["mae_sec"] == 30.0
+    assert report["status"] == "no_matches"               # strict found nothing
+    assert report["relaxed_coverage"]["coverage_frac"] == 1.0  # but the stop got an ETA
 
 
-def test_relaxed_join_separates_repeat_stop_visits_by_time():
-    # Same vehicle/stop/sequence visited twice (two runs hours apart). Each
-    # prediction must bind to its own visit, not collapse to one.
+def test_physical_stop_coverage_excludes_out_of_window_predictions():
+    # A prediction for the same vehicle+stop but a different crossing (>1h away)
+    # must NOT credit-cover this arrival.
     preds = _predictions_df([
         {"feed_ts": 1000, "vehicle_id": "v1", "trip_id": "A", "route_id": "9",
          "stop_id": "1", "stop_sequence": 3, "stops_ahead": 1, "predicted_arrival": 1100},
-        {"feed_ts": 9000, "vehicle_id": "v1", "trip_id": "B", "route_id": "9",
-         "stop_id": "1", "stop_sequence": 3, "stops_ahead": 1, "predicted_arrival": 9100},
     ])
     actuals = pd.DataFrame([
         {"vehicle_id": "v1", "trip_id": "A", "route_id": "9", "stop_id": "1",
-         "stop_sequence": 3, "actual_arrival_ts": 1090},
+         "stop_sequence": 3, "actual_arrival_ts": 1090},  # covered (Δ10s)
         {"vehicle_id": "v1", "trip_id": "B", "route_id": "9", "stop_id": "1",
-         "stop_sequence": 3, "actual_arrival_ts": 9080},
+         "stop_sequence": 3, "actual_arrival_ts": 1100 + scoring.MAX_PLAUSIBLE_ERROR_SEC + 50},
     ])
-    rj = scoring.join_predictions_actuals_relaxed(preds, actuals).sort_values("feed_ts")
-    assert list(rj["error_sec"]) == [10, 20]  # 1100-1090, 9100-9080 — bound separately
+    rc = scoring.physical_stop_coverage(preds, actuals)
+    assert rc == {"coverage_frac": 0.5, "n_covered": 1, "n_actual": 2}
 
 
 def test_aggregate_stops_ahead_mae_n_weighted_pool():

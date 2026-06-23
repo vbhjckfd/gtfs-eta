@@ -249,18 +249,18 @@ def _render_comment(report: dict, diagnosis: dict | None = None) -> str:
     )
     if diagnosis and diagnosis.get("recommend_retrain"):
         L.append(f"- ⚠️ **Retrain recommended:** {(diagnosis.get('retrain_reason') or '').strip()}")
-    rj = report.get("relaxed_join") or {}
-    rjo = rj.get("overall") or {}
-    if rjo:
-        # Rider-centric upper bound: match on physical (vehicle, stop_id) + nearest
-        # time, ignoring trip-relative trip_id/stop_sequence. The gap between this
-        # and the strict coverage is the join-artifact share; the rest is a real
-        # gap (issue #3: only ~3.4pp is artifact).
+    rc = report.get("relaxed_coverage") or {}
+    if rc.get("coverage_frac") is not None:
+        # Existence-based upper bound: did the physical stop get any ETA from this
+        # vehicle near the crossing, regardless of trip label? The gap vs strict
+        # coverage is benign live/batch trip-label disagreement (issue #3: 100%
+        # same shape+direction), not a serving gap. No MAE — strict trip_id stays
+        # authoritative for error (a loose join mis-binds repeated crossings).
         L.append(
-            f"- _Rider-centric join (physical stop, nearest time) · MAE "
-            f"**{rjo.get('mae_sec')}s** · coverage **{rj.get('coverage_frac', 0):.0%}** · "
-            f"{rj.get('n_predictions_scored', 0):,} preds — upper bound; the strict↔this "
-            f"coverage gap is join artifact, the remainder a real gap._"
+            f"- _Physical-stop coverage (existence, trip-label-agnostic): "
+            f"**{rc.get('coverage_frac', 0):.0%}** vs strict "
+            f"**{report.get('coverage_frac', 0):.0%}** — the gap is benign live/batch "
+            f"trip-label disagreement, not a serving gap._"
         )
     L.append("")
 

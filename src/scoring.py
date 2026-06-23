@@ -221,67 +221,50 @@ def join_predictions_actuals(
     return joined
 
 
-def join_predictions_actuals_relaxed(
-    predictions: pd.DataFrame, actuals: pd.DataFrame, feed_tz=None
-) -> pd.DataFrame:
-    """Rider-centric join: match each prediction to the nearest-in-time actual
-    arrival at the same physical ``(vehicle_id, stop_id)``, within
-    MAX_PLAUSIBLE_ERROR_SEC.
+def physical_stop_coverage(predictions: pd.DataFrame, actuals: pd.DataFrame) -> dict:
+    """Existence-based coverage upper bound, robust to trip-label disagreement.
 
-    The strict join (``join_predictions_actuals``) keys on ``trip_id`` *and*
-    ``stop_sequence``. The issue #3 probe showed both are trip-relative: when the
-    live per-snapshot trip inference labels a vehicle with a different trip than
-    the batch ``infer_trips`` labeling (38% of uncovered arrivals, 100% on the
-    correct route), the stop_sequence numbering differs too — measured at **85%
-    of (vehicle, stop_id) pairs** — so even dropping trip_id alone recovers almost
-    nothing. Matching on the physical stop the rider actually waits at, with time
-    proximity separating a vehicle's repeat visits, is the rider's own question:
-    "did this stop get a usable ETA near this time?". Empirically this lifts
-    measured coverage only ~3.4pp (73.2% → 76.6% on 2026-06-22) — i.e. coverage is
-    *mostly a real gap*, not a join artifact; the rest of trip_mismatch reflects
-    physical stops the live feed never predicted at a plausible time.
+    The strict coverage above keys on ``trip_id`` + ``stop_sequence``, both of
+    which are trip-relative. The live per-snapshot trip inference and the batch
+    ``infer_trips`` labeling are different algorithms that routinely disagree on
+    which ``trip_id`` instance a run is — but the issue #3 probe showed that
+    disagreement is **100% the same shape and direction** (23,199/23,234 on
+    2026-06-22): the same physical run under a different label, so the rider's ETA
+    was correct. Strict coverage therefore *understates* what riders actually saw.
 
-    Caveat: a vehicle that visits the same stop_id twice within
-    MAX_PLAUSIBLE_ERROR_SEC (loop / out-and-back) can mis-bind; that makes this an
-    upper-bound diagnostic, not the authoritative metric. The matched actual's
-    trip_id / stop_sequence are preserved (``actual_trip_id`` /
-    ``actual_stop_sequence``) so coverage uses the same strict denominator.
+    This counts an arrival covered if the same vehicle had **any** prediction for
+    that physical ``stop_id`` within ``MAX_PLAUSIBLE_ERROR_SEC`` of the crossing —
+    existence only, never error pairing. Existence is robust to the relabeling;
+    error pairing is *not* (a loose nearest-time join mis-binds a vehicle's
+    repeated daily crossings of the same stop and inflates MAE — which is why no
+    MAE is computed here, and the strict trip_id join stays authoritative for it).
+    Same denominator as strict coverage, so the two are directly comparable.
     """
     if predictions.empty or actuals.empty:
-        return pd.DataFrame()
+        return {"coverage_frac": None}
 
-    by = ["vehicle_id", "stop_id"]
-    left = predictions.sort_values("predicted_arrival")
-    right = (
-        actuals[by + ["trip_id", "stop_sequence", "actual_arrival_ts"]]
-        .rename(columns={"trip_id": "actual_trip_id",
-                         "stop_sequence": "actual_stop_sequence"})
-        .sort_values("actual_arrival_ts")
-    )
-    joined = pd.merge_asof(
-        left, right,
-        left_on="predicted_arrival", right_on="actual_arrival_ts",
-        by=by, direction="nearest", tolerance=MAX_PLAUSIBLE_ERROR_SEC,
-    )
-    joined = joined[joined["actual_arrival_ts"].notna()].copy()
-    if joined.empty:
-        return joined
+    key = ["vehicle_id", "trip_id", "stop_id", "stop_sequence"]
+    A = actuals.drop_duplicates(key).copy()
+    A["vehicle_id"] = A["vehicle_id"].astype(str)
+    A["stop_id"] = A["stop_id"].astype(str)
+    P = predictions[["vehicle_id", "stop_id", "predicted_arrival"]].copy()
+    P["vehicle_id"] = P["vehicle_id"].astype(str)
+    P["stop_id"] = P["stop_id"].astype(str)
 
-    joined["error_sec"] = joined["predicted_arrival"] - joined["actual_arrival_ts"]
-    joined["abs_error_sec"] = joined["error_sec"].abs()
-    joined["lead_sec"] = joined["predicted_arrival"] - joined["feed_ts"]
-    joined = joined[joined["lead_sec"] > 0]
-    if joined.empty:
-        return joined
-
-    joined["lead_bucket"] = pd.cut(
-        joined["lead_sec"], bins=LEAD_BUCKETS_SEC, labels=LEAD_LABELS, right=False
+    A = A.sort_values("actual_arrival_ts")
+    P = P.sort_values("predicted_arrival")
+    m = pd.merge_asof(
+        A, P, left_on="actual_arrival_ts", right_on="predicted_arrival",
+        by=["vehicle_id", "stop_id"], direction="nearest",
+        tolerance=MAX_PLAUSIBLE_ERROR_SEC,
     )
-    tz = feed_tz or timezone.utc
-    joined["hour"] = pd.to_datetime(joined["feed_ts"], unit="s", utc=True).dt.tz_convert(
-        tz
-    ).dt.hour
-    return joined
+    n_total = len(A)
+    n_cov = int(m["predicted_arrival"].notna().sum())
+    return {
+        "coverage_frac": round(n_cov / n_total, 3) if n_total else 0.0,
+        "n_covered": n_cov,
+        "n_actual": n_total,
+    }
 
 
 def _metrics(g: pd.DataFrame) -> dict:
@@ -312,16 +295,13 @@ def score_report(
     """Aggregate residuals into the structured quality report."""
     if joined.empty:
         out = {"date": date_str, "status": "no_matches", "overall": None}
-        # The strict trip_id join can find nothing while the relaxed join still
-        # matches everything (a day where the live trip labels diverge wholesale
-        # from batch). Surface that rather than reporting a bare no_matches.
+        # The strict trip_id join can find nothing while the physical stop did get
+        # an ETA (a day where the live trip labels diverge wholesale from batch).
+        # Surface that rather than reporting a bare no_matches.
         if predictions is not None and not predictions.empty and not actuals.empty:
-            actual_keys = set(
-                map(tuple, actuals[["vehicle_id", "trip_id", "stop_id", "stop_sequence"]].values)
-            )
-            rb = _relaxed_block(predictions, actuals, actual_keys, feed_tz=feed_tz)
-            if rb.get("status") != "no_matches":
-                out["relaxed_join"] = rb
+            rc = physical_stop_coverage(predictions, actuals)
+            if rc.get("coverage_frac") is not None:
+                out["relaxed_coverage"] = rc
         return out
 
     # Coverage: of the actual arrivals observed, how many got *any* prediction.
@@ -369,37 +349,13 @@ def score_report(
             actuals, pred_keys, predictions=predictions, feed_tz=feed_tz
         ),
     }
-    # Diagnostic-only: what coverage and error look like under a trip-id-agnostic
-    # join (see join_predictions_actuals_relaxed). Kept separate so the strict
-    # metrics above stay the authoritative, historically-continuous series the
-    # uncertainty calibration pools — this block just makes the trip_mismatch
-    # measurement loss visible.
+    # Diagnostic-only: existence-based coverage upper bound (physical_stop_coverage),
+    # robust to the benign live/batch trip-label disagreement that strict coverage
+    # counts as uncovered. Coverage only — strict trip_id stays authoritative for
+    # error metrics (a loose join mis-binds and inflates MAE).
     if predictions is not None and not predictions.empty:
-        rep["relaxed_join"] = _relaxed_block(
-            predictions, actuals, actual_keys, feed_tz=feed_tz
-        )
+        rep["relaxed_coverage"] = physical_stop_coverage(predictions, actuals)
     return rep
-
-
-def _relaxed_block(
-    predictions: pd.DataFrame, actuals: pd.DataFrame, actual_keys: set, feed_tz=None
-) -> dict:
-    """Coverage + error under the trip-id-agnostic join, vs the same denominator."""
-    rj = join_predictions_actuals_relaxed(predictions, actuals, feed_tz=feed_tz)
-    if rj.empty:
-        return {"status": "no_matches"}
-    matched_keys = set(
-        map(tuple, rj[["vehicle_id", "actual_trip_id", "stop_id", "actual_stop_sequence"]].to_numpy())
-    )
-    coverage = len(matched_keys & actual_keys) / len(actual_keys) if actual_keys else 0.0
-    return {
-        "coverage_frac": round(coverage, 3),
-        "n_predictions_scored": int(len(rj)),
-        "overall": _metrics(rj),
-        "by_lead_bucket": _grouped(rj, "lead_bucket"),
-        "by_stops_ahead": _grouped(rj, "stops_ahead"),
-        "worst_routes": _worst_routes(rj, top=8),
-    }
 
 
 def _coverage_gap_breakdown(
