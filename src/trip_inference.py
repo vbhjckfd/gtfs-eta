@@ -1,10 +1,25 @@
 """
 Correct erroneous trip_id values reported in GTFS-RT, and detect off-route vehicles.
 
-Trip matching uses three signals per candidate:
+Trip matching uses two signals per candidate:
   1. Spatial distance from vehicle to shape (metres, EPSG:32635).
   2. Bearing alignment: vehicle heading vs. shape tangent at nearest point.
-  3. Schedule progress: expected distance along shape vs. observed.
+
+A schedule-progress signal was dropped (issue #3): a ground-truth adjudication
+showed it (with prev-trip stickiness) holds the *reverse* direction at termini —
+this batch matcher picked the wrong direction ~1.6x as often as the live
+serving matcher, which uses spatial+bearing only. Since this module also labels
+training data and scoring actuals, that mislabeling fed the model. Weights now
+mirror src/inference.py (the live path), and stickiness is bearing-gated.
+
+This weight/stickiness change is only a marginal direction fix (~+0.4pp absolute
+accuracy on a measured window): the residual wrong-direction picks happen on
+*stationary* vehicles at termini, where bearing≈0 and the two opposite shapes are
+equidistant, so no per-snapshot scoring can disambiguate.
+TODO(direction, issue #3): defer committing a direction while a vehicle is
+stationary (extend the src/inference.py `_NOT_DEPARTED` idling guard to direction)
+and lock it from the post-departure heading. That is the genuine lever — a
+temporal/motion-history change, not a scoring-weight one.
 
 Off-route detection uses a per-vehicle state machine:
   ON_ROUTE  →  OFF_ROUTE  when dist > OFF_ROUTE_DIST_M for OFF_ROUTE_CONSEC snapshots,
@@ -25,13 +40,12 @@ from typing import NamedTuple
 import pandas as pd
 from shapely.geometry import LineString, Point
 
-from src.gtfs_static import GTFSStatic, TripInfo, _parse_gtfs_time, _project_xy
+from src.gtfs_static import GTFSStatic, TripInfo, _project_xy
 
-# --- Trip matching constants ---
+# --- Trip matching constants (mirror src/inference.py: _SPATIAL_W / _BEARING_W) ---
 MAX_DIST_M = 100.0          # hard cut-off for trip scoring
-BEARING_WEIGHT = 0.3
-PROGRESS_WEIGHT = 0.3
-SPATIAL_WEIGHT = 0.4
+SPATIAL_WEIGHT = 0.6
+BEARING_WEIGHT = 0.4
 HYSTERESIS_DIST_M = 150.0
 
 # --- Off-route detection constants ---
@@ -153,44 +167,16 @@ def _shape_tangent_bearing(shape: LineString, dist: float) -> float:
     return math.degrees(math.atan2(dx, dy)) % 360
 
 
-def _expected_dist_along(
-    trip: TripInfo, now: datetime, gtfs: GTFSStatic, shape: LineString
-) -> float | None:
-    """Expected distance (m) along shape at *now* using scheduled times."""
-    dists, times = [], []
-    for st in trip.stop_times:
-        d = gtfs.get_stop_distance_along_shape(trip.shape_id, st.stop_id)
-        t = _parse_gtfs_time(st.arrival_time or st.departure_time, now.date())
-        if d is not None and t is not None:
-            dists.append(d)
-            times.append(t)
-
-    if len(dists) < 2:
-        return None
-
-    now_ts = now.timestamp()
-    time_ts = [t.timestamp() for t in times]
-    if now_ts <= time_ts[0]:
-        return dists[0]
-    if now_ts >= time_ts[-1]:
-        return dists[-1]
-    for i in range(len(time_ts) - 1):
-        if time_ts[i] <= now_ts <= time_ts[i + 1]:
-            frac = (now_ts - time_ts[i]) / (time_ts[i + 1] - time_ts[i])
-            return dists[i] + frac * (dists[i + 1] - dists[i])
-    return None
-
-
 def score_trip(
     trip: TripInfo,
     vx: float,
     vy: float,
     bearing: float | None,
-    now: datetime,
     gtfs: GTFSStatic,
 ) -> tuple[float, float]:
     """
-    Return (combined_score, spatial_dist_m).
+    Return (combined_score, spatial_dist_m) from spatial distance + bearing
+    alignment (no schedule term — see module docstring).
     combined_score = inf when spatial_dist > MAX_DIST_M.
     spatial_dist is always the real distance (never inf unless shape is missing).
     """
@@ -213,17 +199,7 @@ def score_trip(
     else:
         bearing_score = 0.5
 
-    expected = _expected_dist_along(trip, now, gtfs, shape)
-    if expected is not None:
-        progress_score = min(abs(dist_along - expected) / max(shape.length, 1.0), 1.0)
-    else:
-        progress_score = 0.5
-
-    combined = (
-        SPATIAL_WEIGHT * spatial_score
-        + BEARING_WEIGHT * bearing_score
-        + PROGRESS_WEIGHT * progress_score
-    )
+    combined = SPATIAL_WEIGHT * spatial_score + BEARING_WEIGHT * bearing_score
     return combined, spatial_dist
 
 
@@ -238,6 +214,29 @@ def _bearing_diff_for_shape(
     dist_along = shape.project(pt)
     tangent = _shape_tangent_bearing(shape, dist_along)
     return _bearing_diff(bearing, tangent)
+
+
+def _stickiness_dist(
+    prev_shape: LineString,
+    vx: float,
+    vy: float,
+    bearing: float | None,
+    best_dist: float,
+) -> float | None:
+    """Distance to the previous trip's shape if hysteresis should hold it, else None.
+
+    Holds the previous trip when it is within HYSTERESIS_DIST_M and no farther
+    than the fresh winner — but NOT when its tangent opposes the vehicle's bearing
+    (> BEARING_WRONG_DEG). The bearing gate stops stickiness from pinning a vehicle
+    to the outbound trip after it has reversed at a terminus for the return trip,
+    which the issue #3 adjudication identified as the dominant batch direction error.
+    """
+    prev_dist = prev_shape.distance(Point(vx, vy))
+    if prev_dist > HYSTERESIS_DIST_M or prev_dist > best_dist:
+        return None
+    if bearing is not None and _bearing_diff_for_shape(prev_shape, vx, vy, bearing) > BEARING_WRONG_DEG:
+        return None
+    return prev_dist
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +270,7 @@ def infer_trip_for_vehicle(
         trip = gtfs.get_trip(tid)
         if trip is None:
             continue
-        s, d = score_trip(trip, vx, vy, bearing, now, gtfs)
+        s, d = score_trip(trip, vx, vy, bearing, gtfs)
         if s < best_score:
             best_score, best_dist, best_tid = s, d, tid
 
@@ -279,11 +278,11 @@ def infer_trip_for_vehicle(
         prev_trip = gtfs.get_trip(previous_trip_id)
         if prev_trip is not None:
             prev_shape = gtfs.get_shape_linestring(prev_trip.shape_id)
-            if prev_shape is not None:
-                prev_dist = prev_shape.distance(Point(vx, vy))
-                if prev_dist <= HYSTERESIS_DIST_M and prev_dist <= best_dist:
-                    best_tid = previous_trip_id
-                    best_score, best_dist = score_trip(prev_trip, vx, vy, bearing, now, gtfs)
+            if prev_shape is not None and _stickiness_dist(
+                prev_shape, vx, vy, bearing, best_dist
+            ) is not None:
+                best_tid = previous_trip_id
+                best_score, best_dist = score_trip(prev_trip, vx, vy, bearing, gtfs)
 
     inferred_route = None
     if best_tid:
@@ -389,23 +388,23 @@ def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
             trip = gtfs.get_trip(tid)
             if trip is None:
                 continue
-            s, d = score_trip(trip, vx, vy, bearing, now, gtfs)
+            s, d = score_trip(trip, vx, vy, bearing, gtfs)
             if d != math.inf:
                 min_route_dist = min(min_route_dist, d)
             if s < best_score:
                 best_score, best_dist, best_tid = s, d, tid
 
-        # Hysteresis
+        # Hysteresis (bearing-gated: never hold a reverse-direction trip)
         if prev_tid is not None and best_tid != prev_tid:
             prev_trip_obj = gtfs.get_trip(prev_tid)
             if prev_trip_obj is not None:
                 prev_shape = gtfs.get_shape_linestring(prev_trip_obj.shape_id)
                 if prev_shape is not None:
-                    prev_dist = prev_shape.distance(Point(vx, vy))
-                    if prev_dist <= HYSTERESIS_DIST_M and prev_dist <= best_dist:
+                    held = _stickiness_dist(prev_shape, vx, vy, bearing, best_dist)
+                    if held is not None:
                         best_tid = prev_tid
-                        best_score, best_dist = score_trip(prev_trip_obj, vx, vy, bearing, now, gtfs)
-                        min_route_dist = min(min_route_dist, prev_dist)
+                        best_score, best_dist = score_trip(prev_trip_obj, vx, vy, bearing, gtfs)
+                        min_route_dist = min(min_route_dist, held)
 
         # Bearing diff against winning shape (for off-route tracker)
         b_diff_for_tracker: float | None = None
