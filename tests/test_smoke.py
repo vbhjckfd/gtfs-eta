@@ -278,6 +278,7 @@ _SPEED_MAX_MPS = 36.0
 # GTFS-RT VehiclePosition.VehicleStopStatus values we actively assign.
 _VALID_STATUSES = frozenset({
     gtfs_realtime_pb2.VehiclePosition.STOPPED_AT,
+    gtfs_realtime_pb2.VehiclePosition.INCOMING_AT,
     gtfs_realtime_pb2.VehiclePosition.IN_TRANSIT_TO,
 })
 
@@ -386,7 +387,7 @@ def test_our_vp_feed_some_vehicles_have_speed(our_vp_feed):
 
 
 def test_our_vp_feed_status_is_valid(our_vp_feed):
-    """current_status must be STOPPED_AT or IN_TRANSIT_TO — we never emit INCOMING_AT."""
+    """current_status must be STOPPED_AT, INCOMING_AT, or IN_TRANSIT_TO."""
     bad = []
     for eid, v in _vp_vehicles(our_vp_feed):
         if v.current_status not in _VALID_STATUSES:

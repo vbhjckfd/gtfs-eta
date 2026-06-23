@@ -461,6 +461,7 @@ def encode_trip_updates(
         entity.id = u["vehicle_id"]
         tu = entity.trip_update
         tu.trip.trip_id = u["trip_id"]
+        tu.trip.schedule_relationship = gtfs_realtime_pb2.TripDescriptor.SCHEDULED
         if u.get("route_id"):
             tu.trip.route_id = u["route_id"]
         tu.vehicle.id = u["vehicle_id"]
@@ -480,8 +481,9 @@ def encode_trip_updates(
             stu = tu.stop_time_update.add()
             stu.stop_id = pred["stop_id"]
             stu.stop_sequence = pred["stop_sequence"]
+            stu.schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SCHEDULED
             stu.arrival.time = arr_ts
-            stu.departure.time = arr_ts
+            stu.departure.time = arr_ts + _DWELL_SECS
             # Publish the model's confidence so consumers can widen the window
             # for far-horizon stops. Keyed by the true horizon when carried,
             # else by emitted position (matches the scorer's stops_ahead proxy).
@@ -500,6 +502,12 @@ def encode_trip_updates(
 # Vehicle is treated as dwelling AT its next stop (rather than IN_TRANSIT_TO it)
 # once it is within this many metres of it along the shape.
 _STOPPED_AT_RADIUS_M = 25.0
+# Vehicle is flagged INCOMING_AT (imminent arrival) within this radius; beyond
+# it the status is IN_TRANSIT_TO.
+_INCOMING_AT_RADIUS_M = 150.0
+
+# Typical stop dwell so departure ≠ arrival.  Fixed per-stop; no dwell model yet.
+_DWELL_SECS = 15
 
 
 def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
@@ -521,6 +529,7 @@ def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
         entity.id = r["vehicle_id"]
         vp = entity.vehicle
         vp.trip.trip_id = r["trip_id"]
+        vp.trip.schedule_relationship = gtfs_realtime_pb2.TripDescriptor.SCHEDULED
         if r.get("route_id"):
             vp.trip.route_id = r["route_id"]
         vp.vehicle.id = r["vehicle_id"]
@@ -655,7 +664,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 "stop_id":    next_stop_id,
                 "stop_sequence": int(next_stop_seq),
                 "status": (
-                    VP.STOPPED_AT if next_rem <= _STOPPED_AT_RADIUS_M
+                    VP.STOPPED_AT   if next_rem <= _STOPPED_AT_RADIUS_M
+                    else VP.INCOMING_AT if next_rem <= _INCOMING_AT_RADIUS_M
                     else VP.IN_TRANSIT_TO
                 ),
                 "congestion": _congestion_level(speed, hist_speed),
