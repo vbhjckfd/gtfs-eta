@@ -148,6 +148,107 @@ def test_score_report_empty_join():
     assert report["status"] == "no_matches"
 
 
+def test_coverage_gap_cause_tagging():
+    # Served feed: v1 predicts its trip t1; v2 is served but only under t2-alt
+    # (a trip-inference disagreement); v3 never appears in the feed at all.
+    preds = _predictions_df([
+        {"feed_ts": 1000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+         "stop_id": "100", "stop_sequence": 5, "stops_ahead": 1, "predicted_arrival": 1130},
+        {"feed_ts": 1000, "vehicle_id": "v2", "trip_id": "t2-alt", "route_id": "32",
+         "stop_id": "200", "stop_sequence": 5, "stops_ahead": 1, "predicted_arrival": 1130},
+    ])
+    actuals = pd.DataFrame([
+        # covered
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "32", "stop_id": "100",
+         "stop_sequence": 5, "actual_arrival_ts": 1100},
+        # served vehicle+trip but this stop was never in the served window → stop_missing
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "32", "stop_id": "101",
+         "stop_sequence": 6, "actual_arrival_ts": 1300},
+        # vehicle served, but actuals matched it to t2 (live said t2-alt) → trip_mismatch
+        {"vehicle_id": "v2", "trip_id": "t2", "route_id": "32", "stop_id": "200",
+         "stop_sequence": 5, "actual_arrival_ts": 1300},
+        # vehicle never appeared in the served feed → vehicle_absent
+        {"vehicle_id": "v3", "trip_id": "t3", "route_id": "88", "stop_id": "300",
+         "stop_sequence": 5, "actual_arrival_ts": 1300},
+    ])
+    joined = scoring.join_predictions_actuals(preds, actuals)
+    report = scoring.score_report(joined, actuals, "2026-06-15", predictions=preds)
+    assert report["coverage_gap"]["by_cause"] == {
+        "stop_missing": 1, "trip_mismatch": 1, "vehicle_absent": 1
+    }
+    by_route = report["coverage_gap"]["by_route"]
+    assert by_route["88"]["uncovered_by_cause"] == {"vehicle_absent": 1}
+    assert by_route["32"]["uncovered_by_cause"] == {
+        "stop_missing": 1, "trip_mismatch": 1
+    }
+
+
+def test_coverage_gap_no_causes_without_predictions():
+    # Backward-compatible: omit the served feed → no cause keys, as before.
+    preds = _predictions_df([
+        {"feed_ts": 1000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "32",
+         "stop_id": "100", "stop_sequence": 5, "stops_ahead": 1, "predicted_arrival": 1130},
+    ])
+    actuals = pd.DataFrame([
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "32", "stop_id": "100",
+         "stop_sequence": 5, "actual_arrival_ts": 1100},
+    ])
+    joined = scoring.join_predictions_actuals(preds, actuals)
+    report = scoring.score_report(joined, actuals, "2026-06-15")
+    assert "by_cause" not in report["coverage_gap"]
+    assert all("uncovered_by_cause" not in g
+               for g in report["coverage_gap"]["by_route"].values())
+
+
+def test_relaxed_join_recovers_trip_instance_mismatch():
+    # Live served the physical stop under trip "t1-run2" at its sequence 5; batch
+    # labeled the same arrival as trip "t1" sequence 12 (trip-relative numbering
+    # differs). Strict join misses it (trip_id AND stop_sequence differ); the
+    # rider-centric (vehicle, stop_id) + nearest-time join recovers it.
+    preds = _predictions_df([
+        {"feed_ts": 1000, "vehicle_id": "v1", "trip_id": "t1-run2", "route_id": "32",
+         "stop_id": "100", "stop_sequence": 5, "stops_ahead": 1, "predicted_arrival": 1130},
+    ])
+    actuals = pd.DataFrame([
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "32", "stop_id": "100",
+         "stop_sequence": 12, "actual_arrival_ts": 1100},
+    ])
+    assert scoring.join_predictions_actuals(preds, actuals).empty  # strict misses
+
+    rj = scoring.join_predictions_actuals_relaxed(preds, actuals)
+    assert len(rj) == 1
+    assert rj.iloc[0]["error_sec"] == 30  # predicted 1130 vs actual 1100
+    assert rj.iloc[0]["actual_trip_id"] == "t1"
+    assert rj.iloc[0]["actual_stop_sequence"] == 12
+
+    report = scoring.score_report(
+        scoring.join_predictions_actuals(preds, actuals), actuals,
+        "2026-06-15", predictions=preds,
+    )
+    assert report["status"] == "no_matches"        # strict found nothing
+    assert report["relaxed_join"]["coverage_frac"] == 1.0  # recovered
+    assert report["relaxed_join"]["overall"]["mae_sec"] == 30.0
+
+
+def test_relaxed_join_separates_repeat_stop_visits_by_time():
+    # Same vehicle/stop/sequence visited twice (two runs hours apart). Each
+    # prediction must bind to its own visit, not collapse to one.
+    preds = _predictions_df([
+        {"feed_ts": 1000, "vehicle_id": "v1", "trip_id": "A", "route_id": "9",
+         "stop_id": "1", "stop_sequence": 3, "stops_ahead": 1, "predicted_arrival": 1100},
+        {"feed_ts": 9000, "vehicle_id": "v1", "trip_id": "B", "route_id": "9",
+         "stop_id": "1", "stop_sequence": 3, "stops_ahead": 1, "predicted_arrival": 9100},
+    ])
+    actuals = pd.DataFrame([
+        {"vehicle_id": "v1", "trip_id": "A", "route_id": "9", "stop_id": "1",
+         "stop_sequence": 3, "actual_arrival_ts": 1090},
+        {"vehicle_id": "v1", "trip_id": "B", "route_id": "9", "stop_id": "1",
+         "stop_sequence": 3, "actual_arrival_ts": 9080},
+    ])
+    rj = scoring.join_predictions_actuals_relaxed(preds, actuals).sort_values("feed_ts")
+    assert list(rj["error_sec"]) == [10, 20]  # 1100-1090, 9100-9080 — bound separately
+
+
 def test_aggregate_stops_ahead_mae_n_weighted_pool():
     # mae_sec is a per-day mean of |error|, so pooling across days must weight by
     # n: day1 (100s, n=100) + day2 (200s, n=300) → (100*100 + 200*300)/400 = 175.

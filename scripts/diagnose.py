@@ -249,6 +249,19 @@ def _render_comment(report: dict, diagnosis: dict | None = None) -> str:
     )
     if diagnosis and diagnosis.get("recommend_retrain"):
         L.append(f"- ⚠️ **Retrain recommended:** {(diagnosis.get('retrain_reason') or '').strip()}")
+    rj = report.get("relaxed_join") or {}
+    rjo = rj.get("overall") or {}
+    if rjo:
+        # Rider-centric upper bound: match on physical (vehicle, stop_id) + nearest
+        # time, ignoring trip-relative trip_id/stop_sequence. The gap between this
+        # and the strict coverage is the join-artifact share; the rest is a real
+        # gap (issue #3: only ~3.4pp is artifact).
+        L.append(
+            f"- _Rider-centric join (physical stop, nearest time) · MAE "
+            f"**{rjo.get('mae_sec')}s** · coverage **{rj.get('coverage_frac', 0):.0%}** · "
+            f"{rj.get('n_predictions_scored', 0):,} preds — upper bound; the strict↔this "
+            f"coverage gap is join artifact, the remainder a real gap._"
+        )
     L.append("")
 
     # Error by lead time — the horizon the rider actually saw (most informative).
@@ -296,13 +309,35 @@ def _render_comment(report: dict, diagnosis: dict | None = None) -> str:
         L.append("")
 
     # Coverage gaps — which arrivals got no prediction at all (feed/pipeline holes).
-    cov_routes = ((report.get("coverage_gap") or {}).get("by_route")) or {}
+    cov_gap = report.get("coverage_gap") or {}
+    cov_routes = cov_gap.get("by_route") or {}
+    by_cause = cov_gap.get("by_cause")
     gappy = [(r, g) for r, g in cov_routes.items() if g["n_uncovered"] > 0][:8]
     if gappy:
-        L += ["### Coverage gaps (most uncovered arrivals)", "",
-              "| route | actual | uncovered | coverage |", "|---|---:|---:|---:|"]
-        for r, g in gappy:
-            L.append(f"| {r} | {g['n_actual']:,} | {g['n_uncovered']:,} | {g['coverage_frac']:.0%} |")
+        # Cause columns appear once the scorer is fed the served feed (the cause
+        # tagging distinguishes a vehicle never served / matched to the wrong trip
+        # / stop beyond the served horizon).
+        has_cause = any("uncovered_by_cause" in g for _, g in gappy)
+        if by_cause:
+            tot = sum(by_cause.values()) or 1
+            order = ["vehicle_absent", "trip_mismatch", "stop_missing"]
+            parts = [f"{c.replace('_', ' ')} {by_cause.get(c, 0):,} ({by_cause.get(c, 0) / tot:.0%})"
+                     for c in order if by_cause.get(c)]
+            L += [f"_Uncovered arrivals by cause: {' · '.join(parts)}._", ""]
+        if has_cause:
+            L += ["### Coverage gaps (most uncovered arrivals)", "",
+                  "| route | actual | uncovered | coverage | absent | mismatch | missing |",
+                  "|---|---:|---:|---:|---:|---:|---:|"]
+            for r, g in gappy:
+                c = g.get("uncovered_by_cause") or {}
+                L.append(f"| {r} | {g['n_actual']:,} | {g['n_uncovered']:,} | {g['coverage_frac']:.0%} "
+                         f"| {c.get('vehicle_absent', 0):,} | {c.get('trip_mismatch', 0):,} "
+                         f"| {c.get('stop_missing', 0):,} |")
+        else:
+            L += ["### Coverage gaps (most uncovered arrivals)", "",
+                  "| route | actual | uncovered | coverage |", "|---|---:|---:|---:|"]
+            for r, g in gappy:
+                L.append(f"| {r} | {g['n_actual']:,} | {g['n_uncovered']:,} | {g['coverage_frac']:.0%} |")
         L.append("")
 
     if diagnosis:

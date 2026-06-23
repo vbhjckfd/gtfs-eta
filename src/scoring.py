@@ -221,6 +221,69 @@ def join_predictions_actuals(
     return joined
 
 
+def join_predictions_actuals_relaxed(
+    predictions: pd.DataFrame, actuals: pd.DataFrame, feed_tz=None
+) -> pd.DataFrame:
+    """Rider-centric join: match each prediction to the nearest-in-time actual
+    arrival at the same physical ``(vehicle_id, stop_id)``, within
+    MAX_PLAUSIBLE_ERROR_SEC.
+
+    The strict join (``join_predictions_actuals``) keys on ``trip_id`` *and*
+    ``stop_sequence``. The issue #3 probe showed both are trip-relative: when the
+    live per-snapshot trip inference labels a vehicle with a different trip than
+    the batch ``infer_trips`` labeling (38% of uncovered arrivals, 100% on the
+    correct route), the stop_sequence numbering differs too — measured at **85%
+    of (vehicle, stop_id) pairs** — so even dropping trip_id alone recovers almost
+    nothing. Matching on the physical stop the rider actually waits at, with time
+    proximity separating a vehicle's repeat visits, is the rider's own question:
+    "did this stop get a usable ETA near this time?". Empirically this lifts
+    measured coverage only ~3.4pp (73.2% → 76.6% on 2026-06-22) — i.e. coverage is
+    *mostly a real gap*, not a join artifact; the rest of trip_mismatch reflects
+    physical stops the live feed never predicted at a plausible time.
+
+    Caveat: a vehicle that visits the same stop_id twice within
+    MAX_PLAUSIBLE_ERROR_SEC (loop / out-and-back) can mis-bind; that makes this an
+    upper-bound diagnostic, not the authoritative metric. The matched actual's
+    trip_id / stop_sequence are preserved (``actual_trip_id`` /
+    ``actual_stop_sequence``) so coverage uses the same strict denominator.
+    """
+    if predictions.empty or actuals.empty:
+        return pd.DataFrame()
+
+    by = ["vehicle_id", "stop_id"]
+    left = predictions.sort_values("predicted_arrival")
+    right = (
+        actuals[by + ["trip_id", "stop_sequence", "actual_arrival_ts"]]
+        .rename(columns={"trip_id": "actual_trip_id",
+                         "stop_sequence": "actual_stop_sequence"})
+        .sort_values("actual_arrival_ts")
+    )
+    joined = pd.merge_asof(
+        left, right,
+        left_on="predicted_arrival", right_on="actual_arrival_ts",
+        by=by, direction="nearest", tolerance=MAX_PLAUSIBLE_ERROR_SEC,
+    )
+    joined = joined[joined["actual_arrival_ts"].notna()].copy()
+    if joined.empty:
+        return joined
+
+    joined["error_sec"] = joined["predicted_arrival"] - joined["actual_arrival_ts"]
+    joined["abs_error_sec"] = joined["error_sec"].abs()
+    joined["lead_sec"] = joined["predicted_arrival"] - joined["feed_ts"]
+    joined = joined[joined["lead_sec"] > 0]
+    if joined.empty:
+        return joined
+
+    joined["lead_bucket"] = pd.cut(
+        joined["lead_sec"], bins=LEAD_BUCKETS_SEC, labels=LEAD_LABELS, right=False
+    )
+    tz = feed_tz or timezone.utc
+    joined["hour"] = pd.to_datetime(joined["feed_ts"], unit="s", utc=True).dt.tz_convert(
+        tz
+    ).dt.hour
+    return joined
+
+
 def _metrics(g: pd.DataFrame) -> dict:
     err = g["error_sec"].to_numpy()
     abs_err = g["abs_error_sec"].to_numpy()
@@ -243,11 +306,23 @@ def _grouped(joined: pd.DataFrame, col: str, top: int | None = None) -> dict:
 
 
 def score_report(
-    joined: pd.DataFrame, actuals: pd.DataFrame, date_str: str, feed_tz=None
+    joined: pd.DataFrame, actuals: pd.DataFrame, date_str: str, feed_tz=None,
+    predictions: pd.DataFrame | None = None,
 ) -> dict:
     """Aggregate residuals into the structured quality report."""
     if joined.empty:
-        return {"date": date_str, "status": "no_matches", "overall": None}
+        out = {"date": date_str, "status": "no_matches", "overall": None}
+        # The strict trip_id join can find nothing while the relaxed join still
+        # matches everything (a day where the live trip labels diverge wholesale
+        # from batch). Surface that rather than reporting a bare no_matches.
+        if predictions is not None and not predictions.empty and not actuals.empty:
+            actual_keys = set(
+                map(tuple, actuals[["vehicle_id", "trip_id", "stop_id", "stop_sequence"]].values)
+            )
+            rb = _relaxed_block(predictions, actuals, actual_keys, feed_tz=feed_tz)
+            if rb.get("status") != "no_matches":
+                out["relaxed_join"] = rb
+        return out
 
     # Coverage: of the actual arrivals observed, how many got *any* prediction.
     pred_keys = set(
@@ -267,7 +342,7 @@ def score_report(
     else:
         arriving_now = {"n": 0, "within_window_frac": None}
 
-    return {
+    rep = {
         "date": date_str,
         "status": "ok",
         "commit_feed_age_days": None,
@@ -290,17 +365,65 @@ def score_report(
         "by_stops_ahead": _grouped(joined, "stops_ahead"),
         "arriving_now": arriving_now,
         "worst_routes": _worst_routes(joined, top=8),
-        "coverage_gap": _coverage_gap_breakdown(actuals, pred_keys, feed_tz=feed_tz),
+        "coverage_gap": _coverage_gap_breakdown(
+            actuals, pred_keys, predictions=predictions, feed_tz=feed_tz
+        ),
+    }
+    # Diagnostic-only: what coverage and error look like under a trip-id-agnostic
+    # join (see join_predictions_actuals_relaxed). Kept separate so the strict
+    # metrics above stay the authoritative, historically-continuous series the
+    # uncertainty calibration pools — this block just makes the trip_mismatch
+    # measurement loss visible.
+    if predictions is not None and not predictions.empty:
+        rep["relaxed_join"] = _relaxed_block(
+            predictions, actuals, actual_keys, feed_tz=feed_tz
+        )
+    return rep
+
+
+def _relaxed_block(
+    predictions: pd.DataFrame, actuals: pd.DataFrame, actual_keys: set, feed_tz=None
+) -> dict:
+    """Coverage + error under the trip-id-agnostic join, vs the same denominator."""
+    rj = join_predictions_actuals_relaxed(predictions, actuals, feed_tz=feed_tz)
+    if rj.empty:
+        return {"status": "no_matches"}
+    matched_keys = set(
+        map(tuple, rj[["vehicle_id", "actual_trip_id", "stop_id", "actual_stop_sequence"]].to_numpy())
+    )
+    coverage = len(matched_keys & actual_keys) / len(actual_keys) if actual_keys else 0.0
+    return {
+        "coverage_frac": round(coverage, 3),
+        "n_predictions_scored": int(len(rj)),
+        "overall": _metrics(rj),
+        "by_lead_bucket": _grouped(rj, "lead_bucket"),
+        "by_stops_ahead": _grouped(rj, "stops_ahead"),
+        "worst_routes": _worst_routes(rj, top=8),
     }
 
 
 def _coverage_gap_breakdown(
-    actuals: pd.DataFrame, pred_keys: set, feed_tz=None
+    actuals: pd.DataFrame, pred_keys: set, predictions: pd.DataFrame | None = None,
+    feed_tz=None,
 ) -> dict:
     """Per-route and per-hour breakdown of actual arrivals that got no prediction.
 
     Helps distinguish a concentrated gap (bad feed for a few routes / off-peak
     hours) from a uniform one (systematic pipeline dropout).
+
+    When the served ``predictions`` feed is supplied, each uncovered arrival is
+    tagged with *why* it was missed — the actionable distinction the headline
+    coverage number hides:
+
+      vehicle_absent — the vehicle never appeared in the served feed that day
+                       (off-route suppressed throughout, or absent upstream).
+      trip_mismatch  — the vehicle was served, but never under this trip_id: the
+                       live trip-inference matched it to a different trip than the
+                       actuals labeling did (the matching disagreement behind the
+                       worst-route MAE and the loop-route coverage holes).
+      stop_missing   — the (vehicle, trip) was served, but not this stop: the stop
+                       sat beyond the served horizon (max_stops_ahead) or had
+                       already been passed when the vehicle entered the feed.
     """
     tz = feed_tz or timezone.utc
     key_cols = ["vehicle_id", "trip_id", "stop_id", "stop_sequence"]
@@ -312,14 +435,36 @@ def _coverage_gap_breakdown(
         .dt.hour
     )
 
+    have_causes = predictions is not None and not predictions.empty
+    if have_causes:
+        served_vehicles = set(predictions["vehicle_id"].astype(str))
+        served_vtrips = set(
+            map(tuple, predictions[["vehicle_id", "trip_id"]].astype(str).to_numpy())
+        )
+        vid = df["vehicle_id"].astype(str)
+        in_vehicle = vid.isin(served_vehicles).to_numpy()
+        vtrips = zip(vid, df["trip_id"].astype(str))
+        in_vtrip = np.fromiter(
+            (vt in served_vtrips for vt in vtrips), dtype=bool, count=len(df)
+        )
+        df["cause"] = np.where(
+            df["covered"].to_numpy(), "covered",
+            np.where(~in_vehicle, "vehicle_absent",
+                     np.where(~in_vtrip, "trip_mismatch", "stop_missing")),
+        )
+
     def _gap(g: pd.DataFrame) -> dict:
         n = len(g)
         nc = int(g["covered"].sum())
-        return {
+        out = {
             "n_actual": int(n),
             "n_uncovered": int(n - nc),
             "coverage_frac": round(nc / n, 3) if n else 0.0,
         }
+        if have_causes:
+            unc = g.loc[~g["covered"], "cause"].value_counts()
+            out["uncovered_by_cause"] = {k: int(v) for k, v in unc.items()}
+        return out
 
     by_route = {str(k): _gap(g) for k, g in df.groupby("route_id")}
     # Surface the routes with the most uncovered arrivals first; cap at 20.
@@ -327,7 +472,11 @@ def _coverage_gap_breakdown(
         sorted(by_route.items(), key=lambda kv: kv[1]["n_uncovered"], reverse=True)[:20]
     )
     by_hour = {str(int(k)): _gap(g) for k, g in df.groupby("hour")}
-    return {"by_route": by_route, "by_hour": by_hour}
+    result = {"by_route": by_route, "by_hour": by_hour}
+    if have_causes:
+        unc_all = df.loc[~df["covered"], "cause"].value_counts()
+        result["by_cause"] = {k: int(v) for k, v in unc_all.items()}
+    return result
 
 
 def _worst_routes(joined: pd.DataFrame, top: int = 8, min_n: int = 50) -> list[dict]:
@@ -435,7 +584,9 @@ def score_date(date_str: str, gtfs=None, client=None) -> dict:
 
     feed_tz = getattr(gtfs, "feed_tz", None)
     joined = join_predictions_actuals(predictions, actuals, feed_tz=feed_tz)
-    return score_report(joined, actuals, date_str, feed_tz=feed_tz)
+    return score_report(
+        joined, actuals, date_str, feed_tz=feed_tz, predictions=predictions
+    )
 
 
 def main() -> int:
