@@ -1,7 +1,6 @@
 """Trip-matching scoring + bearing-gated stickiness (issue #3 direction fix)."""
 import types
 
-import numpy as np
 from shapely.geometry import LineString
 
 from src import trip_inference as ti
@@ -54,29 +53,3 @@ def test_stickiness_released_when_farther_than_fresh_winner():
 def test_stickiness_no_bearing_falls_back_to_distance_only():
     # bearing unavailable → gate on distance alone (still holds when close).
     assert ti._stickiness_dist(_EAST_SHAPE, 50.0, 5.0, None, best_dist=50.0) is not None
-
-
-def test_motion_heading_stationary_uses_eventual_direction():
-    # Vehicle sits still, then moves east. The stationary rows should adopt the
-    # direction it eventually travels (≈90°), not a noisy zero bearing.
-    xy = np.array([[0.0, 0.0], [0.0, 0.0], [50.0, 0.0]])
-    ts = np.array([0, 60, 120])
-    vids = np.array(["v", "v", "v"])
-    h = ti._motion_headings(xy, ts, vids)
-    assert np.allclose(h, [90.0, 90.0, 90.0])
-
-
-def test_motion_heading_parked_is_nan():
-    xy = np.array([[0.0, 0.0], [0.0, 0.0]])
-    h = ti._motion_headings(xy, np.array([0, 60]), np.array(["v", "v"]))
-    assert np.isnan(h).all()
-
-
-def test_motion_heading_does_not_cross_vehicles():
-    # v1 parked must stay NaN — it must not borrow v2's motion.
-    xy = np.array([[0.0, 0.0], [0.0, 0.0], [1000.0, 1000.0], [1050.0, 1000.0]])
-    ts = np.array([0, 60, 0, 60])
-    vids = np.array(["v1", "v1", "v2", "v2"])
-    h = ti._motion_headings(xy, ts, vids)
-    assert np.isnan(h[0]) and np.isnan(h[1])
-    assert np.allclose(h[2:], [90.0, 90.0])
