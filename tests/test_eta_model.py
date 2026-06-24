@@ -677,3 +677,31 @@ class TestVehiclePositions:
         assert v.current_status == VP.STOPPED_AT
         assert v.congestion_level == VP.SEVERE_CONGESTION
         assert v.stop_id == "stop3"
+
+
+class TestMotionHeading:
+    """Live-side direction fix (#3): recent-motion heading + hold while stationary."""
+
+    def _model(self):
+        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+
+    def test_motion_tracked_across_snapshots(self, gtfs):
+        # Two consecutive snapshots of one moving vehicle through a shared
+        # trackers dict: both served, and the per-vehicle position is stored so
+        # the next snapshot can derive a motion heading.
+        from google.transit import gtfs_realtime_pb2
+        data = _compact_data(gtfs)
+        trackers: dict = {}
+        t0 = datetime.now(timezone.utc)
+
+        for offset, m in ((0, 1200.0), (30, 1260.0)):  # moved 60 m forward
+            vp = _vp_bytes(LAT, _lon_at(m), ts=t0 + timedelta(seconds=offset))
+            out = run_inference(data, self._model(), trackers, vp)
+            feed = gtfs_realtime_pb2.FeedMessage()
+            feed.ParseFromString(out)
+            assert len(feed.entity) == 1                  # served both times
+            assert feed.entity[0].trip_update.trip.trip_id == TRIP_ID
+
+        # Position cached for the next motion-heading computation.
+        assert "xy" in trackers["v1"]
+        assert trackers["v1"]["xy"] == pytest.approx(project_xy(_lon_at(1260.0), LAT))
