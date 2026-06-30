@@ -52,15 +52,6 @@ _REPORTED_DIST_OK = 75.0    # trust a reported trip_id within this distance
 _SPATIAL_W = 0.6
 _BEARING_W = 0.4
 
-# Recent-motion heading (issue #3 live-side direction fix). When a vehicle has
-# moved at least this far since the previous snapshot, its travel direction —
-# not the noisy reported bearing — drives trip matching; below it the vehicle is
-# treated as stationary and its prior trip's direction is held (see
-# run_inference). This is the live, look-back-only analogue of
-# src/trip_inference._motion_headings (which can also look ahead).
-_MOTION_MIN_MOVE_M = 25.0
-_HOLD_DIST_M       = 150.0  # max shape distance to hold a stationary vehicle's prior trip
-
 # Idling-at-origin guard: a vehicle parked at (≈) the shape start with no
 # measurable forward motion is almost always waiting for its scheduled
 # departure.  Predicting then yields optimistically early ETAs (the warm-start
@@ -621,39 +612,13 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             continue
 
         vx, vy = project_xy(lon, lat)
-
-        # Recent-motion heading: derive direction from displacement since the last
-        # snapshot (reliable even when a stopped vehicle reports bearing 0/noise),
-        # falling back to the reported bearing only when it hasn't moved.
-        state = trackers.setdefault(vid, {"status": "on_route", "off": 0, "on": 0})
-        prev_xy  = state.get("xy")
-        prev_tid = state["pos"][2] if state.get("pos") else None
-        moving = (
-            prev_xy is not None
-            and math.hypot(vx - prev_xy[0], vy - prev_xy[1]) >= _MOTION_MIN_MOVE_M
-        )
-        heading = _seg_bearing(prev_xy[0], prev_xy[1], vx, vy) if moving else bearing
-        state["xy"] = (vx, vy)
-
         trip_id, min_dist, tangent = infer_trip(
-            route_id, reported_tid, vx, vy, heading, gtfs_data
+            route_id, reported_tid, vx, vy, bearing, gtfs_data
         )
         if trip_id is None:
             continue
-
-        # Defer direction while stationary: a stopped vehicle's bearing can't tell
-        # two opposite-direction shapes apart, so don't let it flip to a reversed
-        # trip — hold the previously matched trip while it stays on that shape. It
-        # picks the real direction once it moves (`moving` true → motion heading).
-        if not moving and prev_tid and prev_tid != trip_id:
-            prev_info = gtfs_data["trip_index"].get(prev_tid)
-            prev_shape = gtfs_data["shapes"].get(prev_info["shape_id"]) if prev_info else None
-            if prev_shape is not None and poly_distance(prev_shape, vx, vy) <= _HOLD_DIST_M:
-                trip_id = prev_tid
-                min_dist, tangent = poly_match(prev_shape, vx, vy)
-
         bearing_diff = (
-            _bearing_diff(heading, tangent) if heading is not None else None
+            _bearing_diff(bearing, tangent) if bearing is not None else None
         )
 
         # When a vehicle starts a new trip its previous off-route history is stale.

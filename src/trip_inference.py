@@ -1,26 +1,10 @@
 """
 Correct erroneous trip_id values reported in GTFS-RT, and detect off-route vehicles.
 
-Trip matching uses two signals per candidate:
+Trip matching uses three signals per candidate:
   1. Spatial distance from vehicle to shape (metres, EPSG:32635).
   2. Bearing alignment: vehicle heading vs. shape tangent at nearest point.
-
-A schedule-progress signal was dropped (issue #3): a ground-truth adjudication
-showed it (with prev-trip stickiness) holds the *reverse* direction at termini —
-this batch matcher picked the wrong direction ~1.6x as often as the live
-serving matcher, which uses spatial+bearing only. Since this module also labels
-training data and scoring actuals, that mislabeling fed the model. Weights now
-mirror src/inference.py (the live path), and stickiness is bearing-gated.
-
-Scoring weights alone were only a marginal direction fix (~+0.4pp): the residual
-wrong-direction picks happen on *stationary* vehicles at termini, where bearing≈0
-and the two opposite shapes are equidistant, so no per-snapshot scoring can
-disambiguate. Direction is therefore matched on a MOTION-DERIVED heading
-(_motion_headings): the direction the vehicle actually travels around that time,
-falling back to the reported bearing only when it never moves. The live serving
-matcher (src/inference.py) cannot do this — it has no look-ahead — so a train/serve
-direction gap remains at termini; closing it there needs deferring predictions
-while stationary (extend the `_NOT_DEPARTED` idling guard to direction).
+  3. Schedule progress: expected distance along shape vs. observed.
 
 Off-route detection uses a per-vehicle state machine:
   ON_ROUTE  →  OFF_ROUTE  when dist > OFF_ROUTE_DIST_M for OFF_ROUTE_CONSEC snapshots,
@@ -38,25 +22,17 @@ from datetime import datetime
 from enum import Enum
 from typing import NamedTuple
 
-import numpy as np
 import pandas as pd
 from shapely.geometry import LineString, Point
 
-from src.gtfs_static import GTFSStatic, TripInfo, _project_xy
+from src.gtfs_static import GTFSStatic, TripInfo, _parse_gtfs_time, _project_xy
 
-# --- Trip matching constants (mirror src/inference.py: _SPATIAL_W / _BEARING_W) ---
+# --- Trip matching constants ---
 MAX_DIST_M = 100.0          # hard cut-off for trip scoring
-SPATIAL_WEIGHT = 0.6
-BEARING_WEIGHT = 0.4
+BEARING_WEIGHT = 0.3
+PROGRESS_WEIGHT = 0.3
+SPATIAL_WEIGHT = 0.4
 HYSTERESIS_DIST_M = 150.0
-
-# --- Motion-derived heading (issue #3 direction fix) ---
-# A stationary vehicle reports bearing 0/noise — exactly when two opposite-
-# direction shapes are equidistant and the reported bearing mis-picks direction.
-# The direction the vehicle actually travels (displacement over a window)
-# disambiguates it. Batch has the full trajectory, so it can look both ways.
-MOTION_MIN_MOVE_M = 25.0    # displacement that counts as real motion (not GPS jitter)
-MOTION_WINDOW_SEC = 300.0   # how far to look for that motion, each direction
 
 # --- Off-route detection constants ---
 OFF_ROUTE_DIST_M = 150.0    # distance threshold to flag off-route
@@ -177,16 +153,44 @@ def _shape_tangent_bearing(shape: LineString, dist: float) -> float:
     return math.degrees(math.atan2(dx, dy)) % 360
 
 
+def _expected_dist_along(
+    trip: TripInfo, now: datetime, gtfs: GTFSStatic, shape: LineString
+) -> float | None:
+    """Expected distance (m) along shape at *now* using scheduled times."""
+    dists, times = [], []
+    for st in trip.stop_times:
+        d = gtfs.get_stop_distance_along_shape(trip.shape_id, st.stop_id)
+        t = _parse_gtfs_time(st.arrival_time or st.departure_time, now.date())
+        if d is not None and t is not None:
+            dists.append(d)
+            times.append(t)
+
+    if len(dists) < 2:
+        return None
+
+    now_ts = now.timestamp()
+    time_ts = [t.timestamp() for t in times]
+    if now_ts <= time_ts[0]:
+        return dists[0]
+    if now_ts >= time_ts[-1]:
+        return dists[-1]
+    for i in range(len(time_ts) - 1):
+        if time_ts[i] <= now_ts <= time_ts[i + 1]:
+            frac = (now_ts - time_ts[i]) / (time_ts[i + 1] - time_ts[i])
+            return dists[i] + frac * (dists[i + 1] - dists[i])
+    return None
+
+
 def score_trip(
     trip: TripInfo,
     vx: float,
     vy: float,
     bearing: float | None,
+    now: datetime,
     gtfs: GTFSStatic,
 ) -> tuple[float, float]:
     """
-    Return (combined_score, spatial_dist_m) from spatial distance + bearing
-    alignment (no schedule term — see module docstring).
+    Return (combined_score, spatial_dist_m).
     combined_score = inf when spatial_dist > MAX_DIST_M.
     spatial_dist is always the real distance (never inf unless shape is missing).
     """
@@ -209,7 +213,17 @@ def score_trip(
     else:
         bearing_score = 0.5
 
-    combined = SPATIAL_WEIGHT * spatial_score + BEARING_WEIGHT * bearing_score
+    expected = _expected_dist_along(trip, now, gtfs, shape)
+    if expected is not None:
+        progress_score = min(abs(dist_along - expected) / max(shape.length, 1.0), 1.0)
+    else:
+        progress_score = 0.5
+
+    combined = (
+        SPATIAL_WEIGHT * spatial_score
+        + BEARING_WEIGHT * bearing_score
+        + PROGRESS_WEIGHT * progress_score
+    )
     return combined, spatial_dist
 
 
@@ -224,29 +238,6 @@ def _bearing_diff_for_shape(
     dist_along = shape.project(pt)
     tangent = _shape_tangent_bearing(shape, dist_along)
     return _bearing_diff(bearing, tangent)
-
-
-def _stickiness_dist(
-    prev_shape: LineString,
-    vx: float,
-    vy: float,
-    bearing: float | None,
-    best_dist: float,
-) -> float | None:
-    """Distance to the previous trip's shape if hysteresis should hold it, else None.
-
-    Holds the previous trip when it is within HYSTERESIS_DIST_M and no farther
-    than the fresh winner — but NOT when its tangent opposes the vehicle's bearing
-    (> BEARING_WRONG_DEG). The bearing gate stops stickiness from pinning a vehicle
-    to the outbound trip after it has reversed at a terminus for the return trip,
-    which the issue #3 adjudication identified as the dominant batch direction error.
-    """
-    prev_dist = prev_shape.distance(Point(vx, vy))
-    if prev_dist > HYSTERESIS_DIST_M or prev_dist > best_dist:
-        return None
-    if bearing is not None and _bearing_diff_for_shape(prev_shape, vx, vy, bearing) > BEARING_WRONG_DEG:
-        return None
-    return prev_dist
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +271,7 @@ def infer_trip_for_vehicle(
         trip = gtfs.get_trip(tid)
         if trip is None:
             continue
-        s, d = score_trip(trip, vx, vy, bearing, gtfs)
+        s, d = score_trip(trip, vx, vy, bearing, now, gtfs)
         if s < best_score:
             best_score, best_dist, best_tid = s, d, tid
 
@@ -288,11 +279,11 @@ def infer_trip_for_vehicle(
         prev_trip = gtfs.get_trip(previous_trip_id)
         if prev_trip is not None:
             prev_shape = gtfs.get_shape_linestring(prev_trip.shape_id)
-            if prev_shape is not None and _stickiness_dist(
-                prev_shape, vx, vy, bearing, best_dist
-            ) is not None:
-                best_tid = previous_trip_id
-                best_score, best_dist = score_trip(prev_trip, vx, vy, bearing, gtfs)
+            if prev_shape is not None:
+                prev_dist = prev_shape.distance(Point(vx, vy))
+                if prev_dist <= HYSTERESIS_DIST_M and prev_dist <= best_dist:
+                    best_tid = previous_trip_id
+                    best_score, best_dist = score_trip(prev_trip, vx, vy, bearing, now, gtfs)
 
     inferred_route = None
     if best_tid:
@@ -312,50 +303,6 @@ def infer_trip_for_vehicle(
 # Batch inference with off-route state machine
 # ---------------------------------------------------------------------------
 
-def _motion_headings(
-    xy: np.ndarray, ts: np.ndarray, vids: np.ndarray
-) -> np.ndarray:
-    """Per-row travel heading (deg) derived from actual displacement.
-
-    For each row, look ahead to the first later position ≥ MOTION_MIN_MOVE_M away
-    within MOTION_WINDOW_SEC; failing that, look back. NaN when the vehicle never
-    moves that far in the window (genuinely parked). Rows must be grouped by
-    vehicle and chronological within each vehicle (infer_trips sorts this way).
-
-    Heading uses atan2(dx, dy) to match _shape_tangent_bearing's convention, so it
-    is directly comparable to a shape's tangent for direction matching.
-    """
-    n = len(xy)
-    headings = np.full(n, np.nan)
-    valid = ~np.isnan(xy[:, 0])
-    start = 0
-    while start < n:
-        end = start
-        while end < n and vids[end] == vids[start]:
-            end += 1
-        for i in range(start, end):
-            if not valid[i]:
-                continue
-            xi, yi, ti = xy[i, 0], xy[i, 1], ts[i]
-            h = math.nan
-            for j in range(i + 1, end):              # look ahead
-                if ts[j] - ti > MOTION_WINDOW_SEC:
-                    break
-                if valid[j] and math.hypot(xy[j, 0] - xi, xy[j, 1] - yi) >= MOTION_MIN_MOVE_M:
-                    h = math.degrees(math.atan2(xy[j, 0] - xi, xy[j, 1] - yi)) % 360
-                    break
-            if math.isnan(h):
-                for j in range(i - 1, start - 1, -1):  # else look back
-                    if ti - ts[j] > MOTION_WINDOW_SEC:
-                        break
-                    if valid[j] and math.hypot(xi - xy[j, 0], yi - xy[j, 1]) >= MOTION_MIN_MOVE_M:
-                        h = math.degrees(math.atan2(xi - xy[j, 0], yi - xy[j, 1])) % 360
-                        break
-            headings[i] = h
-        start = end
-    return headings
-
-
 def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
     """
     Apply trip inference + off-route detection to a snapshot DataFrame.
@@ -365,28 +312,12 @@ def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
     Output adds: reported_trip_id, inferred_trip_id (None when off_route),
                  inferred_route_id, inference_score, high_confidence,
                  off_route, route_status.
-
-    Direction is matched on a motion-derived heading (see _motion_headings),
-    falling back to the feed's reported bearing only when the vehicle is parked —
-    this fixes the terminus wrong-direction labels diagnosed in issue #3.
     """
     df = df.copy()
     df["reported_trip_id"] = df["trip_id"]
     df.sort_values(["vehicle_id", "timestamp"], inplace=True, ignore_index=True)
 
     known_trips = set(gtfs._trip_index.keys())
-
-    # Motion-derived heading per row (issue #3): reliable direction even for
-    # stationary vehicles, used in place of the feed's reported bearing below.
-    lon = pd.to_numeric(df["lon"], errors="coerce").to_numpy(dtype=float)
-    lat = pd.to_numeric(df["lat"], errors="coerce").to_numpy(dtype=float)
-    _xy = np.full((len(df), 2), np.nan)
-    for _i in range(len(df)):
-        if not (math.isnan(lon[_i]) or math.isnan(lat[_i])):
-            _xy[_i] = _project_xy(lon[_i], lat[_i])
-    _ts = (pd.to_datetime(df["timestamp"]).astype("int64") // 10**9).to_numpy()
-    _vids = df["vehicle_id"].astype(str).to_numpy()
-    motion_heading = _motion_headings(_xy, _ts, _vids)
 
     inferred_tids: list[str | None] = []
     inferred_routes: list[str | None] = []
@@ -399,7 +330,7 @@ def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
     trackers: dict[str, VehicleRouteTracker] = {}
     candidates_cache: dict[tuple, list[str]] = {}
 
-    for _idx, row in df.iterrows():
+    for _, row in df.iterrows():
         vid = str(row["vehicle_id"])
         route_id = str(row["route_id"]) if pd.notna(row.get("route_id")) else ""
 
@@ -414,12 +345,8 @@ def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
 
         ts = row["timestamp"]
         now = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
-        vx, vy = _xy[_idx]
-        # Direction signal: prefer the motion-derived heading; fall back to the
-        # feed's reported bearing only when the vehicle never moved (parked).
-        _mh = motion_heading[_idx]
-        reported_bearing = float(row["bearing"]) if pd.notna(row.get("bearing")) else None
-        heading = reported_bearing if math.isnan(_mh) else _mh
+        vx, vy = _project_xy(float(row["lon"]), float(row["lat"]))
+        bearing = float(row["bearing"]) if pd.notna(row.get("bearing")) else None
         reported_tid = row.get("trip_id")
         prev_tid = prev_trip.get(vid)
         tracker = trackers.setdefault(vid, VehicleRouteTracker())
@@ -433,7 +360,7 @@ def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
             if shape is not None:
                 dist = shape.distance(Point(vx, vy))
                 if dist < MAX_DIST_M / 2:
-                    b_diff = _bearing_diff_for_shape(shape, vx, vy, heading) if heading is not None else None
+                    b_diff = _bearing_diff_for_shape(shape, vx, vy, bearing) if bearing else None
                     status = tracker.update(dist, b_diff)
                     prev_trip[vid] = reported_tid if status == RouteStatus.ON_ROUTE else None
                     is_off = status == RouteStatus.OFF_ROUTE
@@ -462,32 +389,32 @@ def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
             trip = gtfs.get_trip(tid)
             if trip is None:
                 continue
-            s, d = score_trip(trip, vx, vy, heading, gtfs)
+            s, d = score_trip(trip, vx, vy, bearing, now, gtfs)
             if d != math.inf:
                 min_route_dist = min(min_route_dist, d)
             if s < best_score:
                 best_score, best_dist, best_tid = s, d, tid
 
-        # Hysteresis (bearing-gated: never hold a reverse-direction trip)
+        # Hysteresis
         if prev_tid is not None and best_tid != prev_tid:
             prev_trip_obj = gtfs.get_trip(prev_tid)
             if prev_trip_obj is not None:
                 prev_shape = gtfs.get_shape_linestring(prev_trip_obj.shape_id)
                 if prev_shape is not None:
-                    held = _stickiness_dist(prev_shape, vx, vy, heading, best_dist)
-                    if held is not None:
+                    prev_dist = prev_shape.distance(Point(vx, vy))
+                    if prev_dist <= HYSTERESIS_DIST_M and prev_dist <= best_dist:
                         best_tid = prev_tid
-                        best_score, best_dist = score_trip(prev_trip_obj, vx, vy, heading, gtfs)
-                        min_route_dist = min(min_route_dist, held)
+                        best_score, best_dist = score_trip(prev_trip_obj, vx, vy, bearing, now, gtfs)
+                        min_route_dist = min(min_route_dist, prev_dist)
 
-        # Heading diff against winning shape (for off-route tracker)
+        # Bearing diff against winning shape (for off-route tracker)
         b_diff_for_tracker: float | None = None
-        if best_tid and heading is not None:
+        if best_tid and bearing is not None:
             win_trip = gtfs.get_trip(best_tid)
             if win_trip:
                 win_shape = gtfs.get_shape_linestring(win_trip.shape_id)
                 if win_shape:
-                    b_diff_for_tracker = _bearing_diff_for_shape(win_shape, vx, vy, heading)
+                    b_diff_for_tracker = _bearing_diff_for_shape(win_shape, vx, vy, bearing)
 
         # Update off-route state machine
         status = tracker.update(min_route_dist, b_diff_for_tracker)
