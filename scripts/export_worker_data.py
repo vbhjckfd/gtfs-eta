@@ -45,7 +45,7 @@ def _make_client():
     )
 
 
-def build_gtfs_worker_data(gtfs) -> dict:
+def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
     """
     Serialise GTFSStatic to a plain-dict format loadable without pyproj/pyproject.
 
@@ -53,6 +53,12 @@ def build_gtfs_worker_data(gtfs) -> dict:
     the trip's first stop (sched_cum_sec), so inference can interpolate the
     schedule at the vehicle's projected position — matching how
     sched_remaining_sec is computed at training time (src/features.py).
+
+    ``existing_priors`` is the ``route_hour_priors`` dict already live on R2,
+    used when this run has no local models/route_hour_priors.joblib (e.g.
+    refresh-gtfs.yml, which only refreshes GTFS static and never checks out
+    model artifacts) — without it, every such run silently wiped priors back
+    to fallback constants until the next manual `make export`.
     """
     print("Building worker GTFS data…")
 
@@ -100,8 +106,11 @@ def build_gtfs_worker_data(gtfs) -> dict:
         priors_raw = {f"{rh[0]}:{rh[1]}": v for rh, v in raw["lookup"].items()}
         priors_raw["_global"] = (raw["global_speed"], raw["global_tps"])
         print(f"  Loaded {len(priors_raw) - 1} route×hour priors")
+    elif existing_priors:
+        priors_raw = existing_priors
+        print(f"  {PRIORS_PATH} not found — preserving {len(priors_raw) - 1} priors already live on R2")
     else:
-        print(f"  WARNING: {PRIORS_PATH} not found — priors will use fallback constants")
+        print(f"  WARNING: {PRIORS_PATH} not found and no existing R2 priors — using fallback constants")
 
     data = {
         "shapes": shapes_coords,                          # shape_id → bytes (packed float64 pairs)
@@ -183,10 +192,20 @@ def _extract_trees(pipeline) -> dict:
 def main():
     client = _make_client()
 
+    # Preserve whatever priors are already live on R2 when this run has no
+    # local models/route_hour_priors.joblib — see build_gtfs_worker_data.
+    existing_priors: dict | None = None
+    if not PRIORS_PATH.exists():
+        try:
+            obj = client.get_object(Bucket=R2_BUCKET, Key=GTFS_KEY)
+            existing_priors = pickle.loads(obj["Body"].read()).get("route_hour_priors") or None
+        except Exception as exc:  # noqa: BLE001 — no existing object is fine, fall back
+            print(f"  Could not fetch existing priors from R2: {exc!r}")
+
     # ── GTFS ──
     print("Loading GTFS static…")
     gtfs = get_gtfs(force_download=True, force_rebuild=True)
-    worker_data = build_gtfs_worker_data(gtfs)
+    worker_data = build_gtfs_worker_data(gtfs, existing_priors=existing_priors)
 
     print(f"Serialising GTFS data…")
     buf = io.BytesIO()
