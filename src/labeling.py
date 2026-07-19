@@ -24,16 +24,45 @@ from shapely.geometry import Point
 
 from src.gtfs_static import GTFSStatic, _parse_gtfs_time_utc, _project_xy
 
+# Vehicles essentially never sustain speeds above this (GPS jitter aside).
+# Used to reject spurious jumps in raw per-point shape projection: on a
+# shape that loops or comes close to itself (e.g. route 122's out-and-back
+# to a village), a snapshot can snap onto a distant, wrong occurrence of the
+# shape just because it's geographically nearby, which _detect_stop_crossings
+# then reads as an impossibly fast arrival.
+_MAX_VEHICLE_SPEED_MPS = 40.0
+
 
 def _project_vehicle_positions(
     traj: pd.DataFrame,
     shape,
+    constrain: bool = False,
 ) -> pd.Series:
     """Return a Series of distances along *shape* for each row in *traj*.
 
     The projections are batched through shapely's vectorised
     ``line_locate_point`` (C-level over the whole trajectory at once) instead of
     a per-row ``shape.project`` call, which dominated pipeline runtime.
+
+    Raw per-point projection is unconstrained and ambiguous on
+    self-intersecting shapes: a snapshot can snap onto a distant, wrong
+    occurrence just because it's geographically nearby, which
+    _detect_stop_crossings then reads as an impossibly fast arrival.
+    ``constrain=True`` (pass only for shapes flagged by
+    GTFSStatic.is_ambiguous_shape) corrects for this: assuming rows are
+    chronologically ordered (callers sort by timestamp), the result is
+    monotonic and speed-capped — clamped to
+    [previous, previous + _MAX_VEHICLE_SPEED_MPS * elapsed_seconds] — UNLESS
+    the next snapshot confirms the jump (stays past the midpoint between the
+    old and new distance), in which case it's accepted outright. A single
+    misprojection is almost always followed by the next snapshot reverting
+    back near the true trajectory; genuine fast progress (e.g. catching up
+    after a snapshot gap) keeps going.
+
+    This correction is scoped to ambiguous shapes only: on ordinary shapes it
+    costs accuracy rather than adding it — false-positive clamps on
+    legitimate fast segments or gappy snapshot coverage create a small
+    systematic lag with nothing to do with self-intersecting geometry.
     """
     import shapely
 
@@ -41,13 +70,52 @@ def _project_vehicle_positions(
     lat = traj["lat"].to_numpy(dtype=float)
     valid = ~(np.isnan(lon) | np.isnan(lat))
 
-    out = np.full(len(traj), np.nan)
+    raw = np.full(len(traj), np.nan)
     if valid.any():
         xs = np.empty(valid.sum())
         ys = np.empty(valid.sum())
         for i, (lo, la) in enumerate(zip(lon[valid], lat[valid])):
             xs[i], ys[i] = _project_xy(lo, la)
-        out[valid] = shapely.line_locate_point(shape, shapely.points(xs, ys))
+        raw[valid] = shapely.line_locate_point(shape, shapely.points(xs, ys))
+
+    if not constrain:
+        return pd.Series(raw, index=traj.index)
+
+    out = np.full(len(traj), np.nan)
+    times = traj["timestamp"].to_numpy()
+    idx = np.flatnonzero(valid & ~np.isnan(raw))
+
+    prev_dist = None
+    prev_time = None
+    k = 0
+    while k < len(idx):
+        i = idx[k]
+        if prev_dist is None:
+            out[i] = raw[i]
+            prev_dist, prev_time = raw[i], times[i]
+            k += 1
+            continue
+
+        elapsed = max(
+            (pd.Timestamp(times[i]) - pd.Timestamp(prev_time)).total_seconds(), 0.0
+        )
+        max_forward = prev_dist + _MAX_VEHICLE_SPEED_MPS * elapsed
+
+        if raw[i] <= max_forward:
+            d = max(raw[i], prev_dist)
+        else:
+            confirmed = False
+            if k + 1 < len(idx):
+                j = idx[k + 1]
+                midpoint = (prev_dist + raw[i]) / 2
+                if raw[j] >= midpoint:
+                    confirmed = True
+            d = raw[i] if confirmed else max(min(raw[i], max_forward), prev_dist)
+
+        out[i] = d
+        prev_dist, prev_time = d, times[i]
+        k += 1
+
     return pd.Series(out, index=traj.index)
 
 
@@ -138,7 +206,9 @@ def label_trajectory(
         if traj.empty:
             return None
 
-    traj["dist_along"] = _project_vehicle_positions(traj, shape)
+    traj["dist_along"] = _project_vehicle_positions(
+        traj, shape, constrain=gtfs.is_ambiguous_shape(trip.shape_id)
+    )
 
     # Collect stop distances
     stop_dists: list[tuple[str, int, float]] = []
@@ -249,7 +319,9 @@ def training_rows_for_trajectory(
         if traj.empty:
             return None
 
-    traj["dist_along"] = _project_vehicle_positions(traj, shape)
+    traj["dist_along"] = _project_vehicle_positions(
+        traj, shape, constrain=gtfs.is_ambiguous_shape(trip.shape_id)
+    )
     traj = traj.dropna(subset=["dist_along"]).sort_values("timestamp")
     if traj.empty:
         return None

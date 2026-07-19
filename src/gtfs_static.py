@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import requests
 from shapely.geometry import LineString, Point
+from shapely.ops import substring
 from dotenv import load_dotenv
 
 from src.utm import project_xy as _project_xy
@@ -63,6 +64,7 @@ class GTFSStatic:
         self._shapes: dict[str, LineString] = {}        # shape_id → projected LineString
         self._shape_lengths: dict[str, float] = {}
         self._stop_distances: dict[tuple[str, str], float] = {}  # (shape_id, stop_id) → dist along
+        self._ambiguous_shapes: set[str] = set()  # shapes where naive nearest-point projection is unreliable
         self._calendar: pd.DataFrame | None = None
         self._calendar_dates: pd.DataFrame | None = None
         self._calendar_parsed: pd.DataFrame | None = None   # pre-parsed dates
@@ -252,22 +254,55 @@ class GTFSStatic:
                 stop_times=stop_times_list,
             )
 
+    # A naive vs. sequence-constrained projection disagreeing by more than
+    # this is treated as a real ambiguity (shape self-proximity), not GPS/
+    # projection jitter.
+    _AMBIGUITY_THRESHOLD_M = 50.0
+
     def _build_stop_distances(self) -> None:
-        """For every (shape_id, stop_id) pair referenced by a trip, compute distance along shape."""
+        """For every (shape_id, stop_id) pair referenced by a trip, compute distance along shape.
+
+        Stops are projected in stop_sequence order behind a monotonic cursor:
+        each stop is only searched for on the remainder of the shape past the
+        previous stop's resolved distance. An unconstrained nearest-point
+        search (plain shape.project) is ambiguous whenever a shape loops or
+        doubles back near itself — common on out-and-back suburban routes and
+        tram turnarounds — and can silently snap a stop to a distant, wrong
+        occurrence, corrupting stops_ahead and the training label.
+
+        Shapes where the naive and constrained projections disagree get
+        flagged in _ambiguous_shapes: callers use that to scope the (costlier,
+        and occasionally lossy on ordinary shapes) continuity-aware vehicle
+        projection to only the shapes that actually need it.
+        """
         for trip_id, info in self._trip_index.items():
             shape = self._shapes.get(info.shape_id)
             if shape is None:
                 continue
+            cursor = 0.0
             for st in info.stop_times:
                 key = (info.shape_id, st.stop_id)
                 if key in self._stop_distances:
+                    cursor = max(cursor, self._stop_distances[key])
                     continue
                 stop = self._stops.get(st.stop_id)
                 if stop is None:
                     continue
                 pt = Point(stop.x, stop.y)
-                dist = shape.project(pt)
+                cursor = min(cursor, shape.length)
+                remainder = substring(shape, cursor, shape.length)
+                local = remainder.project(pt) if remainder.length > 0 else 0.0
+                dist = cursor + local
                 self._stop_distances[key] = dist
+                cursor = dist
+
+                naive = shape.project(pt)
+                if abs(naive - dist) > self._AMBIGUITY_THRESHOLD_M:
+                    self._ambiguous_shapes.add(info.shape_id)
+
+    def is_ambiguous_shape(self, shape_id: str) -> bool:
+        """Whether this shape's geometry makes nearest-point projection unreliable."""
+        return shape_id in self._ambiguous_shapes
 
     def _build_route_trips(self) -> None:
         for trip_id, info in self._trip_index.items():
@@ -325,6 +360,7 @@ class GTFSStatic:
                     "shapes": self._shapes,
                     "shape_lengths": self._shape_lengths,
                     "stop_distances": self._stop_distances,
+                    "ambiguous_shapes": self._ambiguous_shapes,
                     "calendar": self._calendar,
                     "calendar_parsed": self._calendar_parsed,
                     "calendar_dates": self._calendar_dates,
@@ -345,6 +381,7 @@ class GTFSStatic:
         self._shapes = d["shapes"]
         self._shape_lengths = d["shape_lengths"]
         self._stop_distances = d["stop_distances"]
+        self._ambiguous_shapes = d.get("ambiguous_shapes", set())
         self._calendar = d["calendar"]
         self._calendar_parsed = d.get("calendar_parsed", pd.DataFrame())
         self._calendar_dates = d["calendar_dates"]
