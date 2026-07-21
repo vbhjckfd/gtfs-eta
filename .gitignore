@@ -15,6 +15,7 @@ data/
 models/
 
 # Cloudflare / wrangler
+.wrangler/
 worker/.wrangler/
 worker/python_modules/
 
