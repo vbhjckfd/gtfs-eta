@@ -1,0 +1,65 @@
+name: Route MAE digest
+
+# Scores the UTC day that just closed and opens a fresh issue holding the full
+# per-route MAE table (with a day-over-day delta) — ready to read the next
+# morning.
+#
+# Runs at 22:00 UTC = 01:00 Kyiv. Lviv's service day stops ~21:00 UTC, so the
+# day is complete by then; the Kyiv day that just ended and the UTC day being
+# scored line up to within that closing hour.
+#
+# This job publishes quality/<date>.json, so score-quality.yml's 02:15 UTC run
+# then finds the day already scored and no-ops via its idempotency guard — this
+# is effectively primary scoring moved four hours earlier.
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'UTC day to score (YYYY-MM-DD); blank = the day that just closed'
+        required: false
+        default: ''
+      force:
+        description: 'Re-score and re-post even if the day is already published'
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: '0 22 * * *'  # 22:00 UTC = 01:00 Kyiv (EEST)
+
+concurrency:
+  group: route-mae
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write  # opens the day's route-MAE issue
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # a full day = trip inference over ~1440 snapshots
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e .  # metrics-only job — no AI extra needed
+
+      - name: Score day + post per-route MAE issue
+        run: |
+          python scripts/route_mae.py ${DATE:+--date "$DATE"} ${FORCE:+--force}
+        env:
+          DATE:                 ${{ github.event.inputs.date }}
+          FORCE:                ${{ github.event.inputs.force == 'true' && '1' || '' }}
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET:            gtfs-lviv
+          GITHUB_TOKEN:         ${{ github.token }}
+          SENTRY_DSN:           ${{ secrets.SENTRY_DSN }}
+          SENTRY_RELEASE:       ${{ github.sha }}

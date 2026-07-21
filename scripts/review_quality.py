@@ -9,7 +9,7 @@ is done on demand (interactively, or via `scripts/diagnose.py` for the AI read).
 This helper gathers the two inputs that review needs and prints them:
 
     1. the full quality report  (quality/<date>.json on R2 — richer than the
-       issue comment: by_route top-25, full by_hour, coverage_gap by_hour, …)
+       issue comment: full by_route, full by_hour, coverage_gap by_hour, …)
     2. the human engineering notes already on the rolling issue (prior
        round-summaries + architectural decisions) — the context for "what was
        already tried / must not be reverted"

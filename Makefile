@@ -1,6 +1,6 @@
 .PHONY: install pipeline pipeline-date train learn export deploy \
         sanity validate-off-route validate-horizon check-gtfs check-snapshots \
-        push-feed serve-feed smoke score review-quality diagnose help
+        push-feed serve-feed smoke score route-mae review-quality diagnose help
 
 # Days processed concurrently by `make pipeline` / `make learn`.
 # Each worker peaks at ~2 GB — keep ≤ 4-5 on a 16 GB machine.
@@ -67,6 +67,10 @@ smoke:
 score:
 	python -m src.scoring --date $(or $(DATE),$(shell date -u +%F)) $(if $(OUT),--out $(OUT),)
 
+## Score a day and print its per-route MAE digest (default: the day that just closed)
+route-mae:
+	python scripts/route_mae.py $(if $(DATE),--date $(DATE),) --no-publish --no-issue
+
 ## Gather a day's quality report + issue notes for review (default: yesterday)
 review-quality:
 	python scripts/review_quality.py $(if $(DATE),--date $(DATE),)
@@ -111,6 +115,7 @@ help:
 	@echo "  serve-feed           Push to R2 every 10 s (live feed daemon)"
 	@echo "  smoke                Smoke-test the live worker feed"
 	@echo "  score DATE=          Score live ETA quality for a day (default: today)"
+	@echo "  route-mae DATE=      Print a day's per-route MAE digest (default: the day that just closed)"
 	@echo "  review-quality DATE= Gather a day's report + issue notes for review (default: yesterday)"
 	@echo "  diagnose DATE=       On-demand AI diagnosis posted to the issue (default: yesterday)"
 	@echo "  sanity               Check R2 collection health"

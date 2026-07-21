@@ -341,7 +341,9 @@ def score_report(
         "overall": _metrics(joined),
         "by_lead_bucket": _grouped(joined, "lead_bucket"),
         "by_hour": _grouped(joined, "hour"),
-        "by_route": _grouped(joined, "route_id", top=25),
+        # Every route, not a top-N slice: scripts/route_mae.py renders the full
+        # per-route table (and its day-over-day delta) straight from this field.
+        "by_route": _grouped(joined, "route_id"),
         "by_stops_ahead": _grouped(joined, "stops_ahead"),
         "arriving_now": arriving_now,
         "worst_routes": _worst_routes(joined, top=8),
