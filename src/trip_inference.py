@@ -330,11 +330,29 @@ def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
     trackers: dict[str, VehicleRouteTracker] = {}
     candidates_cache: dict[tuple, list[str]] = {}
 
-    for _, row in df.iterrows():
-        vid = str(row["vehicle_id"])
-        route_id = str(row["route_id"]) if pd.notna(row.get("route_id")) else ""
+    # Iterate raw column values rather than df.iterrows(). iterrows rebuilds a
+    # pd.Series per row, which over a full day of positions (~3.3M) costs more
+    # than the geometry it wraps — it measured as ~84% of a scoring run's wall
+    # clock. The null checks are hoisted out of the loop for the same reason.
+    def _col(name: str) -> list:
+        return df[name].to_list() if name in df.columns else [None] * len(df)
 
-        if not route_id or pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
+    def _present(name: str) -> list:
+        return pd.notna(df[name]).to_list() if name in df.columns else [False] * len(df)
+
+    for (
+        vid_v, route_v, has_route, lat_v, has_lat, lon_v, has_lon,
+        ts, bearing_v, has_bearing, reported_tid,
+    ) in zip(
+        _col("vehicle_id"), _col("route_id"), _present("route_id"),
+        _col("lat"), _present("lat"), _col("lon"), _present("lon"),
+        _col("timestamp"), _col("bearing"), _present("bearing"),
+        _col("trip_id"),
+    ):
+        vid = str(vid_v)
+        route_id = str(route_v) if has_route else ""
+
+        if not route_id or not has_lat or not has_lon:
             inferred_tids.append(None)
             inferred_routes.append(None)
             scores.append(math.inf)
@@ -343,11 +361,9 @@ def infer_trips(df: pd.DataFrame, gtfs: GTFSStatic) -> pd.DataFrame:
             route_statuses.append(RouteStatus.ON_ROUTE)
             continue
 
-        ts = row["timestamp"]
         now = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
-        vx, vy = _project_xy(float(row["lon"]), float(row["lat"]))
-        bearing = float(row["bearing"]) if pd.notna(row.get("bearing")) else None
-        reported_tid = row.get("trip_id")
+        vx, vy = _project_xy(float(lon_v), float(lat_v))
+        bearing = float(bearing_v) if has_bearing else None
         prev_tid = prev_trip.get(vid)
         tracker = trackers.setdefault(vid, VehicleRouteTracker())
 

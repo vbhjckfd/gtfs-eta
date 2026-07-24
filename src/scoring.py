@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 from google.transit import gtfs_realtime_pb2
+from tqdm import tqdm
 
 from src.labeling import build_labels
 from src.snapshots import R2_BUCKET, _fetch_and_parse, _make_client, list_snapshot_keys
@@ -53,6 +54,20 @@ ARRIVING_NOW_SEC = 60
 # reused across two trips a day): a |error| beyond this is almost certainly a
 # bad join, not a bad prediction, and would swamp the means.
 MAX_PLAUSIBLE_ERROR_SEC = 3600
+
+
+def _progress(it, total: int, desc: str):
+    """Wrap an iterable in a tqdm bar, but only for a human at a terminal.
+
+    Scoring a day pulls several thousand objects out of R2, which is most of its
+    wall time and looks identical to a hang. CI runs this too (score-quality.yml,
+    route-mae.yml), where a bar would just emit thousands of progress lines into
+    the log — so the bar disables itself unless stderr is a TTY.
+    """
+    return tqdm(
+        it, total=total, desc=desc, unit="obj",
+        disable=not sys.stderr.isatty(), leave=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +130,7 @@ def load_predictions(date_str: str, client=None, max_workers: int = 16) -> pd.Da
         return _parse_prediction_feed(data)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for r in ex.map(_get, keys):
+        for r in _progress(ex.map(_get, keys), len(keys), "predictions"):
             rows.extend(r)
 
     if not rows:
@@ -141,7 +156,8 @@ def load_actuals(date_str: str, gtfs, client=None, max_workers: int = 12) -> pd.
 
     raw_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for r in ex.map(lambda k: _fetch_and_parse(client, k), keys):
+        it = ex.map(lambda k: _fetch_and_parse(client, k), keys)
+        for r in _progress(it, len(keys), "positions"):
             raw_rows.extend(r)
 
     df = pd.DataFrame(raw_rows)
@@ -347,6 +363,7 @@ def score_report(
         "by_stops_ahead": _grouped(joined, "stops_ahead"),
         "arriving_now": arriving_now,
         "worst_routes": _worst_routes(joined, top=8),
+        "worst_predictions": _worst_predictions(joined, top=5),
         "coverage_gap": _coverage_gap_breakdown(
             actuals, pred_keys, predictions=predictions, feed_tz=feed_tz
         ),
@@ -438,16 +455,38 @@ def _coverage_gap_breakdown(
 
 
 def _worst_routes(joined: pd.DataFrame, top: int = 8, min_n: int = 50) -> list[dict]:
-    """Routes with the highest MAE (min sample size) — exemplars for the AI step."""
+    """Routes with the highest MAE (min sample size) — exemplars for the AI step.
+
+    Each entry also carries its own by_stops_ahead breakdown: issue #5's
+    regression was a horizon-growing bias hiding inside an unremarkable overall
+    number, so the worst routes get the same per-horizon check the offline
+    validator (validate_horizon_bias.py) runs — but live, per-route, every day.
+    """
     rows = []
     for route, g in joined.groupby("route_id", observed=True):
         if len(g) < min_n:
             continue
         m = _metrics(g)
         m["route_id"] = str(route)
+        m["by_stops_ahead"] = _grouped(g, "stops_ahead")
         rows.append(m)
     rows.sort(key=lambda m: m["mae_sec"], reverse=True)
     return rows[:top]
+
+
+def _worst_predictions(joined: pd.DataFrame, top: int = 5) -> list[dict]:
+    """The single worst individual predictions of the day — outlier exemplars.
+
+    Per-route MAE can hide a route that's mostly fine but has a handful of
+    wild misses (a stale vehicle timestamp, a mid-trip reassignment). This
+    surfaces the actual worst rows, not just which route they landed in.
+    """
+    if joined.empty:
+        return []
+    cols = ["route_id", "stop_id", "stops_ahead", "lead_sec", "error_sec", "abs_error_sec"]
+    rows = joined.nlargest(top, "abs_error_sec")[cols].copy()
+    rows["route_id"] = rows["route_id"].astype(str)
+    return rows.to_dict("records")
 
 
 # ---------------------------------------------------------------------------

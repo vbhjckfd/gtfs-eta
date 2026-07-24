@@ -109,6 +109,9 @@ class FakeGTFS:
     def get_stop(self, stop_id):
         return None
 
+    def is_ambiguous_shape(self, shape_id):
+        return False
+
 
 @pytest.fixture(scope="module")
 def gtfs():

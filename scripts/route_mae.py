@@ -105,6 +105,10 @@ def render_issue(report: dict, prev: dict | None) -> str:
     if not ranked and not thin:
         lines.append("| _no routes scored_ | | | | | | |")
 
+    lines += _horizon_section(report)
+    lines += _worst_routes_horizon_section(report)
+    lines += _worst_predictions_section(report)
+
     lines += [
         "",
         "---",
@@ -113,6 +117,56 @@ def render_issue(report: dict, prev: dict | None) -> str:
         "Deeper AI read of this day: `make diagnose DATE=" + date_str + "`.</sub>",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _horizon_section(report: dict) -> list[str]:
+    """Overall bias/MAE by stops_ahead. #5 was a bias that grew with horizon
+    while the overall number stayed unremarkable — this is the early warning."""
+    bsa = report.get("by_stops_ahead") or {}
+    if not bsa:
+        return []
+    lines = ["", "## Bias by horizon (stops_ahead)", "",
+             "Negative bias = optimistic (bus arrives later than predicted) — "
+             "the failure mode from issue #5. Should stay near zero across the "
+             "whole curve, not just in aggregate.", "",
+             "| stops_ahead | n | bias | MAE |", "|---:|---:|---:|---:|"]
+    for h in sorted(bsa, key=lambda k: int(k)):
+        m = bsa[h]
+        lines.append(f"| {h} | {m['n']:,} | {m['bias_sec']:+.0f}s | {m['mae_sec']:.0f}s |")
+    return lines
+
+
+def _worst_routes_horizon_section(report: dict) -> list[str]:
+    """Per-horizon bias for the worst-MAE routes — catches a localized version
+    of #5's regression on a single route before it shows up in the aggregate."""
+    worst = [r for r in (report.get("worst_routes") or []) if r.get("by_stops_ahead")]
+    if not worst:
+        return []
+    lines = ["", "## Worst routes — bias by horizon", ""]
+    for r in worst[:5]:
+        bsa = r["by_stops_ahead"]
+        cells = [
+            f"sa={h}: {bsa[h]['bias_sec']:+.0f}s" for h in sorted(bsa, key=lambda k: int(k))
+        ]
+        lines.append(f"- **route {r['route_id']}** ({r['mae_sec']:.0f}s MAE): " + " · ".join(cells))
+    return lines
+
+
+def _worst_predictions_section(report: dict) -> list[str]:
+    """The single worst individual predictions of the day — outlier exemplars
+    a per-route MAE average can hide."""
+    worst = report.get("worst_predictions") or []
+    if not worst:
+        return []
+    lines = ["", "## Worst individual predictions", "",
+             "| route | stop | stops_ahead | lead | error |",
+             "|---|---|---:|---:|---:|"]
+    for p in worst:
+        lines.append(
+            f"| {p['route_id']} | {p['stop_id']} | {p['stops_ahead']} | "
+            f"{p['lead_sec'] / 60:.0f}m | {p['error_sec']:+.0f}s |"
+        )
+    return lines
 
 
 def post_issue(report: dict, prev: dict | None) -> str | None:
