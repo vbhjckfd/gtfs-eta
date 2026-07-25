@@ -527,16 +527,11 @@ def _aggregate_stops_ahead_mae(reports: list[dict], min_n: int = 200) -> dict:
     return out
 
 
-def live_uncertainty_by_horizon(
-    days: int = 7, client=None, min_n: int = 200
-) -> tuple[dict, list[str]]:
-    """Per-horizon uncertainty (seconds) calibrated from the live quality archive.
+def _recent_quality_reports(days: int, client=None) -> list[dict]:
+    """The most recent *days* scored quality/<date>.json reports from R2.
 
-    Reads the most recent *days* ``quality/<date>.json`` reports from R2 and pools
-    their per-stops-ahead MAE (see ``_aggregate_stops_ahead_mae``). This reflects
-    real serving error, which runs ~2x the training-test split the bands were
-    originally derived from. Returns ``({horizon:int -> sec:int}, dates_used)``;
-    an empty dict when no usable scored history exists (caller should fall back).
+    Shared by the live uncertainty and bias calibrators — both pool
+    per-stops-ahead stats across the same recent-day window.
     """
     client = client or _make_client()
     paginator = client.get_paginator("list_objects_v2")
@@ -551,7 +546,6 @@ def live_uncertainty_by_horizon(
     keys.sort(reverse=True)
 
     reports: list[dict] = []
-    dates_used: list[str] = []
     for key in keys[:days]:
         try:
             rep = json.loads(client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read())
@@ -559,8 +553,65 @@ def live_uncertainty_by_horizon(
             continue
         if rep.get("status") == "ok" and rep.get("by_stops_ahead"):
             reports.append(rep)
-            dates_used.append(rep.get("date") or key)
-    return _aggregate_stops_ahead_mae(reports, min_n=min_n), sorted(dates_used)
+    return reports
+
+
+def live_uncertainty_by_horizon(
+    days: int = 7, client=None, min_n: int = 200
+) -> tuple[dict, list[str]]:
+    """Per-horizon uncertainty (seconds) calibrated from the live quality archive.
+
+    Reads the most recent *days* ``quality/<date>.json`` reports from R2 and pools
+    their per-stops-ahead MAE (see ``_aggregate_stops_ahead_mae``). This reflects
+    real serving error, which runs ~2x the training-test split the bands were
+    originally derived from. Returns ``({horizon:int -> sec:int}, dates_used)``;
+    an empty dict when no usable scored history exists (caller should fall back).
+    """
+    reports = _recent_quality_reports(days, client)
+    dates_used = sorted(rep.get("date") for rep in reports)
+    return _aggregate_stops_ahead_mae(reports, min_n=min_n), dates_used
+
+
+def _aggregate_stops_ahead_bias(reports: list[dict], min_n: int = 200) -> dict:
+    """Pool per-horizon signed bias across daily quality reports → {horizon:int -> sec:int}.
+
+    Same n-weighted-mean approach as ``_aggregate_stops_ahead_mae``, but over the
+    signed ``bias_sec`` and with no monotonic clamp — unlike uncertainty (which
+    must widen with horizon by construction), a real systematic bias can be flat
+    or even shrink with horizon, and forcing monotonicity would distort the
+    correction instead of just regularizing noise.
+    """
+    acc: dict[int, list[float]] = {}  # horizon -> [sum_bias, n]
+    for rep in reports:
+        bsa = (rep or {}).get("by_stops_ahead") or {}
+        for h_str, m in bsa.items():
+            try:
+                h, n, bias = int(h_str), int(m["n"]), float(m["bias_sec"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if n <= 0:
+                continue
+            slot = acc.setdefault(h, [0.0, 0.0])
+            slot[0] += bias * n
+            slot[1] += n
+    return {h: int(round(s / n)) for h, (s, n) in acc.items() if n >= min_n}
+
+
+def live_bias_by_horizon(
+    days: int = 7, client=None, min_n: int = 200
+) -> tuple[dict, list[str]]:
+    """Per-horizon signed bias (seconds) calibrated from the live quality archive.
+
+    A serving-time correction: ``corrected = predicted - bias`` cancels a
+    systematic per-horizon over/under-estimate (e.g. the flat ~-44s optimism
+    found across every stops_ahead bucket on 2026-07-25) without touching the
+    model or waiting for a retrain. Returns ``({horizon:int -> signed sec}, dates_used)``;
+    an empty dict when no usable scored history exists (caller should fall back
+    to no correction, not a stale/guessed one).
+    """
+    reports = _recent_quality_reports(days, client)
+    dates_used = sorted(rep.get("date") for rep in reports)
+    return _aggregate_stops_ahead_bias(reports, min_n=min_n), dates_used
 
 
 def score_date(date_str: str, gtfs=None, client=None) -> dict:

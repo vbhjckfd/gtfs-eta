@@ -444,6 +444,26 @@ def _uncertainty_for(table: dict | None, horizon: int) -> int | None:
     return int(v)
 
 
+def _bias_correction_for(table: dict | None, horizon: int) -> float:
+    """Per-horizon signed bias (seconds) to subtract from a raw prediction.
+
+    *table* maps stops_ahead to the live-pooled ``pred - actual`` mean (see
+    ``src.scoring.live_bias_by_horizon``). A missing table or horizon means no
+    correction (0.0), not a guessed one — an unset table must be a no-op.
+    Horizons past the largest measured key reuse that key's bias, same
+    out-of-range handling as ``_uncertainty_for``.
+    """
+    if not table:
+        return 0.0
+    v = table.get(horizon)
+    if v is None:
+        keys = [k for k in table if isinstance(k, int)]
+        if not keys:
+            return 0.0
+        v = table[min(max(keys), horizon)] if horizon < min(keys) else table[max(keys)]
+    return float(v)
+
+
 def encode_trip_updates(
     updates: list[dict], feed_ts: int, uncertainty_by_horizon: dict | None = None
 ) -> bytes:
@@ -680,6 +700,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             continue
 
         preds_sec = predict_rows(model_data, [r[0] for r in feature_rows])
+        bias_table = model_data.get("bias_by_horizon")
         updates.append({
             "vehicle_id": vid,
             "trip_id":    trip_id,
@@ -687,7 +708,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             "snap_ts":    snap_ts,
             "predictions": [
                 {"stop_id": r[1], "stop_sequence": int(r[2]),
-                 "stops_ahead": int(r[0][2]), "seconds": float(sec)}
+                 "stops_ahead": int(r[0][2]),
+                 "seconds": float(sec) - _bias_correction_for(bias_table, int(r[0][2]))}
                 for r, sec in zip(feature_rows, preds_sec)
             ],
         })

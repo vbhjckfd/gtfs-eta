@@ -253,6 +253,26 @@ def main():
     else:
         print("  WARNING: no uncertainty bands available — feed will omit the field")
 
+    # Per-horizon live bias correction (seconds): corrected = raw - bias, cancels
+    # a systematic per-horizon over/under-estimate the model itself doesn't fix
+    # (e.g. the flat ~-44s optimism found across every stops_ahead bucket on
+    # 2026-07-25). No offline fallback — an unavailable live signal means no
+    # correction, not a guessed/stale one baked in from a different model.
+    bias_table: dict | None = None
+    try:
+        from src.scoring import live_bias_by_horizon
+        bias_table, bias_dates = live_bias_by_horizon(days=7)
+        if bias_table:
+            span = f"{bias_dates[0]}..{bias_dates[-1]}" if bias_dates else "?"
+            print(f"  Bias correction (live, {len(bias_dates)} days {span}): {bias_table}")
+    except Exception as exc:  # noqa: BLE001 — calibration must never block an export
+        print(f"  WARNING: live bias calibration failed: {exc!r}")
+
+    if bias_table:
+        tree_data["bias_by_horizon"] = bias_table
+    else:
+        print("  No live bias correction available — serving uncorrected predictions")
+
     model_bytes = pickle.dumps(tree_data, protocol=4)
     size_mb = len(model_bytes) / 1e6
     print(f"Uploading model trees ({size_mb:.1f} MB) → R2:{MODEL_KEY}")
