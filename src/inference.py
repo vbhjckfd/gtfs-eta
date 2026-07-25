@@ -608,6 +608,16 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     snap_ts = datetime.fromtimestamp(feed_ts, tz=timezone.utc)
     priors = gtfs_data.get("route_hour_priors", {})
 
+    # Per-horizon bias correction, weekday/weekend split when available (falls
+    # back to the flat table, then to no correction — see _bias_correction_for).
+    # UTC weekday, matching the is_weekend feature build_features computes below.
+    bias_weekend = model_data.get("bias_by_horizon_weekend")
+    if bias_weekend:
+        bucket = "weekend" if snap_ts.weekday() >= 5 else "weekday"
+        bias_table = bias_weekend.get(bucket) or model_data.get("bias_by_horizon")
+    else:
+        bias_table = model_data.get("bias_by_horizon")
+
     updates = []
     vp_records: list[dict] = []
     for entity in vp_feed.entity:
@@ -700,7 +710,6 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             continue
 
         preds_sec = predict_rows(model_data, [r[0] for r in feature_rows])
-        bias_table = model_data.get("bias_by_horizon")
         updates.append({
             "vehicle_id": vid,
             "trip_id":    trip_id,

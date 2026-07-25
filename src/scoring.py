@@ -231,9 +231,17 @@ def join_predictions_actuals(
         joined["lead_sec"], bins=LEAD_BUCKETS_SEC, labels=LEAD_LABELS, right=False
     )
     tz = feed_tz or timezone.utc
-    joined["hour"] = pd.to_datetime(joined["feed_ts"], unit="s", utc=True).dt.tz_convert(
-        tz
-    ).dt.hour
+    local_ts = pd.to_datetime(joined["feed_ts"], unit="s", utc=True).dt.tz_convert(tz)
+    joined["hour"] = local_ts.dt.hour
+    # Weekday rush-hour bias runs meaningfully hotter than weekend rush (found
+    # 2026-07-25: -50.8s vs -18.4s at UTC 14-16, is_weekend already a raw model
+    # feature but the residual persists) — split the horizon-bias correction on
+    # this axis too, not just stops_ahead. Uses UTC (feed_ts direct, not the
+    # feed_tz-converted local_ts above) to match the model's own is_weekend
+    # feature, which build_features/labeling.py compute from UTC timestamps —
+    # a local-tz split here would disagree with the model near local midnight.
+    utc_dow = pd.to_datetime(joined["feed_ts"], unit="s", utc=True).dt.dayofweek
+    joined["is_weekend"] = utc_dow >= 5
     return joined
 
 
@@ -361,6 +369,10 @@ def score_report(
         # per-route table (and its day-over-day delta) straight from this field.
         "by_route": _grouped(joined, "route_id"),
         "by_stops_ahead": _grouped(joined, "stops_ahead"),
+        "by_stops_ahead_weekend": {
+            "weekday": _grouped(joined[~joined["is_weekend"]], "stops_ahead"),
+            "weekend": _grouped(joined[joined["is_weekend"]], "stops_ahead"),
+        },
         "arriving_now": arriving_now,
         "worst_routes": _worst_routes(joined, top=8),
         "worst_predictions": _worst_predictions(joined, top=5),
@@ -572,19 +584,16 @@ def live_uncertainty_by_horizon(
     return _aggregate_stops_ahead_mae(reports, min_n=min_n), dates_used
 
 
-def _aggregate_stops_ahead_bias(reports: list[dict], min_n: int = 200) -> dict:
-    """Pool per-horizon signed bias across daily quality reports → {horizon:int -> sec:int}.
-
-    Same n-weighted-mean approach as ``_aggregate_stops_ahead_mae``, but over the
-    signed ``bias_sec`` and with no monotonic clamp — unlike uncertainty (which
-    must widen with horizon by construction), a real systematic bias can be flat
-    or even shrink with horizon, and forcing monotonicity would distort the
-    correction instead of just regularizing noise.
+def _pool_bias(bsa_dicts: list[dict], min_n: int = 200) -> dict:
+    """Pool per-horizon signed bias across already-extracted by_stops_ahead-shaped
+    dicts → {horizon:int -> sec:int}. n-weighted mean, no monotonic clamp — unlike
+    uncertainty (which must widen with horizon by construction), a real systematic
+    bias can be flat or even shrink with horizon, and forcing monotonicity would
+    distort the correction instead of just regularizing noise.
     """
     acc: dict[int, list[float]] = {}  # horizon -> [sum_bias, n]
-    for rep in reports:
-        bsa = (rep or {}).get("by_stops_ahead") or {}
-        for h_str, m in bsa.items():
+    for bsa in bsa_dicts:
+        for h_str, m in (bsa or {}).items():
             try:
                 h, n, bias = int(h_str), int(m["n"]), float(m["bias_sec"])
             except (ValueError, KeyError, TypeError):
@@ -595,6 +604,31 @@ def _aggregate_stops_ahead_bias(reports: list[dict], min_n: int = 200) -> dict:
             slot[0] += bias * n
             slot[1] += n
     return {h: int(round(s / n)) for h, (s, n) in acc.items() if n >= min_n}
+
+
+def _aggregate_stops_ahead_bias(reports: list[dict], min_n: int = 200) -> dict:
+    """Pool per-horizon signed bias across daily quality reports → {horizon:int -> sec:int}."""
+    return _pool_bias([(rep or {}).get("by_stops_ahead") or {} for rep in reports], min_n)
+
+
+def _aggregate_stops_ahead_bias_weekend(reports: list[dict], min_n: int = 200) -> dict:
+    """Same as ``_aggregate_stops_ahead_bias``, split by weekday vs weekend.
+
+    Weekday rush-hour bias runs meaningfully hotter than weekend rush (e.g.
+    -50.8s vs -18.4s at UTC 14-16, found 2026-07-25) — a single blended
+    correction under-corrects weekday rush and over-corrects weekend rush.
+    Returns ``{"weekday": {...}, "weekend": {...}}``, each pooled independently.
+    """
+    return {
+        bucket: _pool_bias(
+            [
+                ((rep or {}).get("by_stops_ahead_weekend") or {}).get(bucket) or {}
+                for rep in reports
+            ],
+            min_n,
+        )
+        for bucket in ("weekday", "weekend")
+    }
 
 
 def live_bias_by_horizon(
@@ -612,6 +646,25 @@ def live_bias_by_horizon(
     reports = _recent_quality_reports(days, client)
     dates_used = sorted(rep.get("date") for rep in reports)
     return _aggregate_stops_ahead_bias(reports, min_n=min_n), dates_used
+
+
+def live_bias_by_horizon_weekend(
+    days: int = 14, client=None, min_n: int = 200
+) -> tuple[dict, list[str]]:
+    """Per-horizon signed bias (seconds), split by weekday vs weekend.
+
+    Same idea as ``live_bias_by_horizon`` but on the (stops_ahead, is_weekend)
+    axis — see ``_aggregate_stops_ahead_bias_weekend``. Defaults to a 14-day
+    window rather than 7: weekend days are ~2/7 of the week, so a 7-day pool
+    would only have ~2 weekend days of support per horizon. Returns
+    ``({"weekday": {...}, "weekend": {...}}, dates_used)``; either sub-table can
+    independently come back empty (insufficient support) — caller should fall
+    back to the unsplit ``live_bias_by_horizon`` table for that bucket, not
+    leave predictions uncorrected.
+    """
+    reports = _recent_quality_reports(days, client)
+    dates_used = sorted(rep.get("date") for rep in reports)
+    return _aggregate_stops_ahead_bias_weekend(reports, min_n=min_n), dates_used
 
 
 def score_date(date_str: str, gtfs=None, client=None) -> dict:

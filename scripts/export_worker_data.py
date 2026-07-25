@@ -273,6 +273,31 @@ def main():
     else:
         print("  No live bias correction available — serving uncorrected predictions")
 
+    # Weekday/weekend split (found 2026-07-25: weekday rush bias runs ~2-3x
+    # weekend rush bias — a single blended number under-corrects one and
+    # over-corrects the other). 14-day window (vs the flat table's 7) since
+    # weekend days are ~2/7 of the week and need more history for the same
+    # per-horizon support. Each bucket is merged over the flat table so a
+    # horizon too thin on just-weekday or just-weekend data still gets the
+    # blended correction rather than none.
+    try:
+        from src.scoring import live_bias_by_horizon_weekend
+        bias_weekend, bias_weekend_dates = live_bias_by_horizon_weekend(days=14)
+        if bias_weekend and (bias_weekend.get("weekday") or bias_weekend.get("weekend")):
+            span = (
+                f"{bias_weekend_dates[0]}..{bias_weekend_dates[-1]}"
+                if bias_weekend_dates else "?"
+            )
+            print(f"  Bias correction (weekday/weekend, {len(bias_weekend_dates)} days {span}): "
+                  f"{bias_weekend}")
+            merged = {
+                bucket: {**(bias_table or {}), **(bias_weekend.get(bucket) or {})}
+                for bucket in ("weekday", "weekend")
+            }
+            tree_data["bias_by_horizon_weekend"] = merged
+    except Exception as exc:  # noqa: BLE001 — calibration must never block an export
+        print(f"  WARNING: live weekday/weekend bias calibration failed: {exc!r}")
+
     model_bytes = pickle.dumps(tree_data, protocol=4)
     size_mb = len(model_bytes) / 1e6
     print(f"Uploading model trees ({size_mb:.1f} MB) → R2:{MODEL_KEY}")
