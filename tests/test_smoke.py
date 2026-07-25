@@ -452,6 +452,19 @@ def test_parity_with_reference(worker_feed, reference_feed):
             f"outside working hours (UTC hour {time.gmtime().tm_hour} not in "
             f"{WORKING_HOURS_UTC}) — no live trips to compare"
         )
+
+    # The upstream feed has been observed serving a feed body days stale behind
+    # a fresh HTTP Date header (no Cache-Control/Age — their backend, not a CDN
+    # cache) — comparing our live trips against a different service day always
+    # yields zero overlap and reads as an ID-scheme bug when it's just upstream
+    # being stale. Catch that distinctly before asserting overlap.
+    ref_age = time.time() - reference_feed.header.timestamp
+    if ref_age > MAX_FEED_AGE_SEC:
+        pytest.skip(
+            f"reference feed is stale ({ref_age / 3600:.1f}h old) — "
+            "nothing meaningful to compare against"
+        )
+
     ours = {e.trip_update.trip.trip_id for e in worker_feed.entity}
     theirs = {e.trip_update.trip.trip_id for e in reference_feed.entity}
 
