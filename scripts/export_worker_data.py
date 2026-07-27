@@ -220,13 +220,34 @@ def main():
 
     # ── Model ──
     model_path = Path(MODEL_PATH)
-    if not model_path.exists():
-        print(f"Model not found at {model_path} — skipping model upload")
-        return
-
-    import joblib
-    pipeline = joblib.load(model_path)
-    tree_data = _extract_trees(pipeline)
+    if model_path.exists():
+        import joblib
+        pipeline = joblib.load(model_path)
+        tree_data = _extract_trees(pipeline)
+    else:
+        # refresh-gtfs.yml (daily CI) checks out the repo only — it never has a
+        # local models/eta_pipeline.joblib (gitignored, only produced by a real
+        # `make train`). This used to `return` here, so every CI run silently
+        # skipped the model upload entirely — the live-calibrated bands below
+        # (uncertainty, bias) never refreshed in CI at all, only whenever
+        # someone happened to run `make export` by hand from a machine with a
+        # trained model. Reuse the trees already live on R2 (unchanged since the
+        # last real retrain) and just refresh the bands, same fallback shape as
+        # existing_priors above.
+        try:
+            existing_model = pickle.loads(
+                client.get_object(Bucket=R2_BUCKET, Key=MODEL_KEY)["Body"].read()
+            )
+            tree_data = {
+                k: existing_model[k]
+                for k in ("route_to_int", "baseline", "learning_rate", "trees")
+            }
+            print(f"  Model not found at {model_path} — reusing trees already live "
+                  "on R2, refreshing live-calibrated bands only")
+        except Exception as exc:  # noqa: BLE001 — no existing object, nothing to refresh
+            print(f"  Model not found at {model_path} and no existing model on R2 "
+                  f"({exc!r}) — skipping model upload")
+            return
 
     # Per-horizon uncertainty bands (seconds) → served as GTFS-RT
     # StopTimeEvent.uncertainty. Prefer LIVE calibration — pooled per-stops-ahead
