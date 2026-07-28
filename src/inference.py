@@ -565,8 +565,10 @@ def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
             vp.current_status = r["status"]
         if r.get("congestion") is not None:
             vp.congestion_level = r["congestion"]
-        # The position's own capture time, not the (later) feed publish time.
-        vp.timestamp = feed_ts
+        # The position's own capture time, not the (later) feed publish time —
+        # per-vehicle when the source reported one (see run_inference), falling
+        # back to the batch feed_ts only when it didn't.
+        vp.timestamp = r.get("vehicle_ts", feed_ts)
     return feed.SerializeToString()
 
 
@@ -587,6 +589,17 @@ def _congestion_level(speed: float, hist_speed: float):
     if ratio >= 0.2:
         return VP.CONGESTION
     return VP.SEVERE_CONGESTION
+
+
+# A vehicle's own position report can lag the feed's batch-capture time far
+# more than the batch timestamp suggests: upstream keeps serving some
+# vehicles' last-known fix long after the device stopped updating (observed
+# 2026-07-28: 590 vehicles, per-vehicle age median 14s / p90 62s, but 17 of
+# them 1h+ stale, one over 30 days). Predicting off a stale fix shows a
+# live-looking ETA for a bus that already passed the stop, or isn't there at
+# all — trust nothing older than this. Generous relative to the p90 above so
+# normal reporting jitter never gets caught by it.
+STALE_VEHICLE_MAX_AGE_SEC = 180
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +652,10 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         if not route_id or not lat or not lon:
             continue
         if route_id in _BAD_ROUTE_IDS:
+            continue
+
+        vehicle_ts = int(v.timestamp) if v.HasField("timestamp") else None
+        if vehicle_ts is not None and feed_ts - vehicle_ts > STALE_VEHICLE_MAX_AGE_SEC:
             continue
 
         vx, vy = project_xy(lon, lat)
@@ -699,6 +716,12 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                     else VP.IN_TRANSIT_TO
                 ),
                 "congestion": _congestion_level(speed, hist_speed),
+                # The vehicle's own reported fix time, not the batch feed_ts —
+                # a consumer honestly seeing "this position is 90s old" is the
+                # whole point of the staleness filter above; stamping every
+                # vehicle with the same fresh batch time (the previous
+                # behavior) hid that distinction entirely.
+                "vehicle_ts": vehicle_ts if vehicle_ts is not None else feed_ts,
             })
 
         # Idling at the origin pre-departure: withhold predictions until the
