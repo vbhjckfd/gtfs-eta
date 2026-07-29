@@ -30,6 +30,7 @@ from src.features import (
 from src.gtfs_static import StopTime, TripInfo
 from src.inference import (
     MAX_STOPS_AHEAD,
+    _TERMINUS_MODEL_UNCERTAINTY_SEC,
     _TERMINUS_UNCERTAINTY_SEC,
     _isotonic,
     _uncertainty_for,
@@ -550,7 +551,13 @@ def _vp_bytes(lat, lon, *, route_id=ROUTE_ID, trip_id=TRIP_ID, ts=None, bearing=
 
 
 class TestNotDepartedGate:
-    """An idling vehicle at the origin gets no predictions; a moving one does (#6)."""
+    """An idling vehicle is served only if it is standing at the terminus (#6).
+
+    It used to be served nothing at all there; it is now served either the
+    timetable or the model, depending on mode (see TestTerminusSchedule).  What
+    survives from the original gate is that idling *short of* the first stop —
+    on the lead-in, in a yard — still gets nothing.
+    """
 
     def _model(self):
         # Constant +300 s predictor (no trees), so any emitted prediction lands
@@ -564,15 +571,23 @@ class TestNotDepartedGate:
         feed.ParseFromString(out)
         return len(feed.entity)
 
-    def test_origin_idle_withheld_midroute_served(self, gtfs):
+    def test_idle_short_of_the_first_stop_withheld(self, gtfs):
         self._gtfs_data = _compact_data(gtfs)
+        self._gtfs_data["stop_distances"][(SHAPE_ID, "stop0")] = 400.0
         now = datetime.now(timezone.utc)
-        # At the shape start, first sighting → speed unknown, v_dist ≈ 0 → gated.
+        # At the shape start, first sighting → speed unknown, v_dist ≈ 0, and
+        # the terminus stop is 400 m further on → still gated.
         at_origin = _vp_bytes(LAT, _lon_at(2.0), ts=now)
         assert self._entities(at_origin) == 0
         # Mid-route, first sighting (speed still unknown) but v_dist large → served.
         mid = _vp_bytes(LAT, _lon_at(1200.0), ts=now)
         assert self._entities(mid) == 1
+
+    def test_idle_at_the_first_stop_served(self, gtfs):
+        """Standing at the terminus is served — that is the whole change."""
+        self._gtfs_data = _compact_data(gtfs)
+        now = datetime.now(timezone.utc)
+        assert self._entities(_vp_bytes(LAT, _lon_at(2.0), ts=now)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -627,15 +642,55 @@ class TestTerminusSchedule:
         now = datetime.now(timezone.utc)
         assert len(self._feed(gtfs, self.TROLLEYBUS, 300.0, now).entity) == 1
 
-    def test_bus_at_terminus_still_withheld(self, gtfs):
-        """The measured reason for the whole feature: bus timetables don't hold."""
+    def test_bus_at_terminus_served_from_the_model(self, gtfs):
+        """A bus is served too, but never from the timetable — its schedule says
+        nothing (MAE 222 s at best), so the model answers and the wide band
+        says how little either of them knows."""
         now = datetime.now(timezone.utc)
-        assert len(self._feed(gtfs, self.BUS, 300.0, now).entity) == 0
+        feed = self._feed(gtfs, self.BUS, 300.0, now)
+        assert len(feed.entity) == 1
+        stus = feed.entity[0].trip_update.stop_time_update
+        # Constant +300 s model, untouched by the 300 s of scheduled waiting
+        # (which would have put stop1 at +360 s, as it does for a tram).
+        assert stus[0].arrival.time == pytest.approx(now.timestamp() + 300, abs=2)
+        assert stus[0].arrival.uncertainty == _TERMINUS_MODEL_UNCERTAINTY_SEC
 
-    def test_departure_too_far_away_withheld(self, gtfs):
-        """An hour of parking means the matched trip is the wrong instance."""
+    def test_bus_terminus_ignores_the_timetable_entirely(self, gtfs):
+        """Same bus, wildly different scheduled departure → same ETAs."""
         now = datetime.now(timezone.utc)
-        assert len(self._feed(gtfs, self.TRAM, 3600.0, now).entity) == 0
+        early = self._feed(gtfs, self.BUS, 60.0, now).entity[0].trip_update
+        late = self._feed(gtfs, self.BUS, 1500.0, now).entity[0].trip_update
+        assert (early.stop_time_update[0].arrival.time
+                == late.stop_time_update[0].arrival.time)
+
+    def test_bus_short_of_the_terminus_stop_withheld(self, gtfs):
+        """Serving buses at the terminus does not mean serving them anywhere
+        near the shape start."""
+        now = datetime.now(timezone.utc)
+        data = self._data(gtfs, self.BUS, 300.0, now)
+        data["stop_distances"][(SHAPE_ID, "stop0")] = 400.0
+        assert len(self._feed(gtfs, self.BUS, 300.0, now, data=data).entity) == 0
+
+    def test_moving_vehicle_keeps_the_model_bands(self, gtfs):
+        """The wide terminus band must not leak onto ordinary predictions."""
+        from google.transit import gtfs_realtime_pb2
+        now = datetime.now(timezone.utc)
+        data = self._data(gtfs, self.BUS, 300.0, now)
+        vp = _vp_bytes(LAT, _lon_at(1200.0), ts=now)
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(run_inference(data, self._model(), {}, vp, ))
+        arr = feed.entity[0].trip_update.stop_time_update[0].arrival
+        assert not arr.HasField("uncertainty")   # no table passed → no field
+
+    def test_departure_too_far_away_falls_back_to_the_model(self, gtfs):
+        """An hour of parking means the matched trip is the wrong instance, so
+        the timetable is dropped — but the tram is still served, like a bus."""
+        now = datetime.now(timezone.utc)
+        feed = self._feed(gtfs, self.TRAM, 3600.0, now)
+        assert len(feed.entity) == 1
+        stus = feed.entity[0].trip_update.stop_time_update
+        assert stus[0].arrival.time == pytest.approx(now.timestamp() + 300, abs=2)
+        assert stus[0].arrival.uncertainty == _TERMINUS_MODEL_UNCERTAINTY_SEC
 
     def test_slightly_overdue_departure_leaves_now(self, gtfs):
         now = datetime.now(timezone.utc)
@@ -645,10 +700,15 @@ class TestTerminusSchedule:
         # Overdue wait clamps to zero rather than pulling arrivals into the past.
         assert stus[0].arrival.time == pytest.approx(now.timestamp() + 60, abs=2)
 
-    def test_long_overdue_departure_withheld(self, gtfs):
-        """Parked well past its departure — a layover, not a pending run."""
+    def test_long_overdue_departure_falls_back_to_the_model(self, gtfs):
+        """Parked well past its departure — a layover, not a pending run — so
+        the timetable is dropped, but the tram is still served like a bus."""
         now = datetime.now(timezone.utc)
-        assert len(self._feed(gtfs, self.TRAM, -600.0, now).entity) == 0
+        feed = self._feed(gtfs, self.TRAM, -600.0, now)
+        assert len(feed.entity) == 1
+        arr = feed.entity[0].trip_update.stop_time_update[0].arrival
+        assert arr.time == pytest.approx(now.timestamp() + 300, abs=2)
+        assert arr.uncertainty == _TERMINUS_MODEL_UNCERTAINTY_SEC
 
     def test_parked_off_the_shape_but_on_route_still_served(self, gtfs):
         """A rail- or wire-bound vehicle 100 m off the drawn shape is still at
@@ -665,15 +725,19 @@ class TestTerminusSchedule:
         data["stop_distances"][(SHAPE_ID, "stop0")] = 400.0
         assert len(self._feed(gtfs, self.TRAM, 300.0, now, data=data).entity) == 0
 
-    def test_legacy_export_without_route_types_withholds(self, gtfs):
-        """Data exported before this feature must behave exactly as before."""
+    def test_legacy_export_without_route_types_uses_the_model(self, gtfs):
+        """Data exported before this feature knows no modes, so nothing can be
+        schedule-anchored and every terminus vehicle falls to the model."""
         from google.transit import gtfs_realtime_pb2
         now = datetime.now(timezone.utc)
         vp = _vp_bytes(LAT, _lon_at(2.0), ts=now)
         out = run_inference(_compact_data(gtfs), self._model(), {}, vp)
         feed = gtfs_realtime_pb2.FeedMessage()
         feed.ParseFromString(out)
-        assert len(feed.entity) == 0
+        assert len(feed.entity) == 1
+        arr = feed.entity[0].trip_update.stop_time_update[0].arrival
+        assert arr.time == pytest.approx(now.timestamp() + 300, abs=2)
+        assert arr.uncertainty == _TERMINUS_MODEL_UNCERTAINTY_SEC
 
     def test_moving_tram_uses_the_model_not_the_schedule(self, gtfs):
         """The schedule is trusted at the terminus only; once rolling, the
@@ -782,11 +846,13 @@ class TestVehiclePositions:
         # Next stop after 1200 m is stop3 (at 1500 m) → IN_TRANSIT_TO it.
         assert v.current_status == gtfs_realtime_pb2.VehiclePosition.IN_TRANSIT_TO
 
-    def test_idle_origin_vehicle_still_gets_position(self, gtfs):
-        """ETAs are withheld for an idling origin vehicle, but its cleaned
-        position is still published — the whole point of the VP feed."""
+    def test_withheld_vehicle_still_gets_position(self, gtfs):
+        """A vehicle whose ETAs are withheld — idling short of the terminus
+        stop — still has its cleaned position published: the whole point of
+        the VP feed."""
         from google.transit import gtfs_realtime_pb2
         data = _compact_data(gtfs)
+        data["stop_distances"][(SHAPE_ID, "stop0")] = 400.0
         now = datetime.now(timezone.utc)
         vp = _vp_bytes(LAT, _lon_at(2.0), ts=now)
 
@@ -795,7 +861,7 @@ class TestVehiclePositions:
         )
         tu = gtfs_realtime_pb2.FeedMessage(); tu.ParseFromString(tu_bytes)
         vpos = gtfs_realtime_pb2.FeedMessage(); vpos.ParseFromString(vp_bytes)
-        assert len(tu.entity) == 0    # ETA withheld (idling at origin)
+        assert len(tu.entity) == 0    # ETA withheld (short of the terminus)
         assert len(vpos.entity) == 1  # position still served
 
     def test_default_call_returns_only_trip_updates(self, gtfs):

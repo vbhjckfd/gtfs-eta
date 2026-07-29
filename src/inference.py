@@ -59,10 +59,9 @@ _SPATIAL_W = 0.6
 _BEARING_W = 0.4
 
 # Idling-at-origin guard: a vehicle parked at (≈) the shape start with no
-# measurable forward motion is almost always waiting for its scheduled
-# departure.  Predicting then yields optimistically early ETAs (the warm-start
-# falls back to historical speed), so we withhold model predictions until it
-# moves — unless the schedule itself is trustworthy here, see below.
+# measurable forward motion is waiting for its departure.  How that departure is
+# estimated depends on the mode — see the two blocks below — but a vehicle idling
+# short of the terminus stop itself gets nothing either way.
 _NOT_DEPARTED_DIST_M = 20.0
 
 # Schedule-anchored terminus ETAs.
@@ -79,7 +78,8 @@ _NOT_DEPARTED_DIST_M = 20.0
 #
 # The model has no notion of a pending departure and scores MAE 208 s (tram) /
 # 395 s (trolleybus) on those same rows, so the schedule wins outright — but
-# only for the two electric modes.  Buses stay withheld.
+# only for the two electric modes.  A bus at a terminus is served by the model
+# instead; see _TERMINUS_MODEL_UNCERTAINTY_SEC.
 _SCHEDULE_RELIABLE_ROUTE_TYPES = frozenset({0, 11})   # tram, trolleybus
 
 # How far the scheduled departure may sit from now for the schedule to be
@@ -108,6 +108,22 @@ _TERMINUS_STOP_RADIUS_M = 50.0
 # table describes model error and does not apply here; this covers the measured
 # MAE of both electric modes.
 _TERMINUS_UNCERTAINTY_SEC = 150
+
+# A bus at a terminus is served from the model, never from the timetable: the
+# schedule is worthless for it (MAE 222 s at its best, 40 % within 2 min) and
+# nothing schedule-free pins its departure down either.  Every alternative tried
+# on 4 held-out days of the same rows landed in the same place — the model alone
+# MAE 406 s / median 231 s; plus a learned "how long has it already been parked"
+# residual-dwell term MAE 406 s; plus a flat learned offset MAE 388 s, which
+# halves the -282 s earliness but costs median accuracy.  None is worth its
+# machinery, so the model's own output ships uncorrected.
+#
+# What is *not* optional is saying so: the model's per-horizon bands (118-174 s)
+# describe a moving vehicle, where it scores MAE 126 s.  Publishing those here
+# would understate the error threefold, so terminus model ETAs carry a band of
+# their own, close to the measured MAE and flat across horizons — as the error
+# itself is (372-387 s from 1 stop ahead to 10).
+_TERMINUS_MODEL_UNCERTAINTY_SEC = 400
 
 _HALF_DAY_SEC = 12 * 3600
 _DAY_SEC      = 24 * 3600
@@ -902,9 +918,15 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             continue
 
         # Idling at the origin pre-departure.  A tram or trolleybus standing at
-        # its terminus leaves on the timetable, so serve the schedule; anything
-        # else gets nothing rather than the model's optimistically early ETAs.
+        # its terminus leaves on the timetable, so serve the schedule.  A bus
+        # falls through to the model below — its timetable says nothing, and no
+        # schedule-free estimate of its departure beats just asking the model —
+        # but it is published with a band that admits how wide the error is.
+        # A vehicle idling short of the terminus stop is still served nothing.
+        terminus_unc = None
         if speed <= 0.0 and v_dist < _NOT_DEPARTED_DIST_M:
+            if not at_first_stop(trip_id, v_dist, min_dist, gtfs_data):
+                continue
             sched_preds = terminus_schedule_predictions(
                 trip_id, snap_ts, gtfs_data, feature_rows, v_dist, min_dist
             )
@@ -919,7 +941,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                     # describe these, so carry their own.
                     "uncertainty": _TERMINUS_UNCERTAINTY_SEC,
                 })
-            continue
+                continue
+            terminus_unc = _TERMINUS_MODEL_UNCERTAINTY_SEC
 
         preds_sec = predict_rows(model_data, [r[0] for r in feature_rows])
         updates.append({
@@ -933,6 +956,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                  "seconds": float(sec) - _bias_correction_for(bias_table, int(r[0][2]))}
                 for r, sec in zip(feature_rows, preds_sec)
             ],
+            # None for a moving vehicle → the per-horizon model bands apply.
+            "uncertainty": terminus_unc,
         })
 
     tu_bytes = encode_trip_updates(
