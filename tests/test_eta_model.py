@@ -10,6 +10,7 @@ trained on snapshot-anchored rows), never the full previous-segment time.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -29,9 +30,11 @@ from src.features import (
 from src.gtfs_static import StopTime, TripInfo
 from src.inference import (
     MAX_STOPS_AHEAD,
+    _TERMINUS_UNCERTAINTY_SEC,
     _isotonic,
     _uncertainty_for,
     build_features,
+    terminus_seconds_until_departure,
     encode_trip_updates,
     encode_vehicle_positions,
     infer_trip,
@@ -249,25 +252,36 @@ class TestTrainingFeatures:
 # Compact production path (src/inference.py)
 # ---------------------------------------------------------------------------
 
-def _compact_data(gtfs: FakeGTFS) -> dict:
+def _compact_data(gtfs: FakeGTFS, route_type: int | None = None,
+                  start_sec: float | None = None) -> dict:
+    """Worker-format data for the fake route.
+
+    ``route_type``/``start_sec`` are what the terminus schedule path needs;
+    leaving them unset reproduces an export made before that path existed.
+    """
     import struct
     coords = list(gtfs._shape.coords)
     shape_bytes = struct.pack(f"{2 * len(coords)}d", *(v for xy in coords for v in xy))
     # Cumulative scheduled seconds: 60 s per stop (matches FakeGTFS times)
     stop_times = [(f"stop{i}", i + 1, 60.0 * i) for i in range(N_STOPS)]
-    return {
+    data = {
         "shapes": {SHAPE_ID: shape_bytes},
         "shape_lengths": {SHAPE_ID: gtfs._shape.length},
         "stop_distances": dict(gtfs._stop_dists),
         "trip_index": {
-            TRIP_ID: {"route_id": ROUTE_ID, "shape_id": SHAPE_ID, "stop_times": stop_times}
+            TRIP_ID: {"route_id": ROUTE_ID, "shape_id": SHAPE_ID,
+                      "stop_times": stop_times, "start_sec": start_sec}
         },
         "route_trips": {ROUTE_ID: [TRIP_ID]},
         "route_hour_priors": {
             f"{ROUTE_ID}:7": (8.0, 45.0),  # (hist_speed_mps, hist_time_per_stop_sec)
             "_global": (5.0, 40.0),
         },
+        "feed_timezone": "Europe/Kiev",
     }
+    if route_type is not None:
+        data["route_types"] = {ROUTE_ID: route_type}
+    return data
 
 
 class TestCompactInference:
@@ -559,6 +573,133 @@ class TestNotDepartedGate:
         # Mid-route, first sighting (speed still unknown) but v_dist large → served.
         mid = _vp_bytes(LAT, _lon_at(1200.0), ts=now)
         assert self._entities(mid) == 1
+
+
+# ---------------------------------------------------------------------------
+# Schedule-anchored terminus ETAs (tram / trolleybus only)
+# ---------------------------------------------------------------------------
+
+class TestTerminusSchedule:
+    """A tram or trolleybus idling at its terminus is served from the
+    timetable instead of being withheld — its schedule holds there, unlike a
+    bus's, and unlike either mode's mid-route schedule."""
+
+    TRAM, TROLLEYBUS, BUS = 0, 11, 3
+
+    def _model(self):
+        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+
+    def _data(self, gtfs, route_type, depart_in_sec, now):
+        """Compact data whose trip departs *depart_in_sec* from *now*."""
+        local = now.astimezone(ZoneInfo("Europe/Kiev"))
+        sod = local.hour * 3600 + local.minute * 60 + local.second
+        return _compact_data(gtfs, route_type=route_type,
+                             start_sec=sod + depart_in_sec)
+
+    def _feed(self, gtfs, route_type, depart_in_sec, now, lat=LAT, meters=2.0,
+              data=None):
+        from google.transit import gtfs_realtime_pb2
+        vp = _vp_bytes(lat, _lon_at(meters), ts=now)   # parked at the terminus
+        out = run_inference(
+            data if data is not None
+            else self._data(gtfs, route_type, depart_in_sec, now),
+            self._model(), {}, vp,
+        )
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(out)
+        return feed
+
+    def test_tram_at_terminus_served_from_schedule(self, gtfs):
+        now = datetime.now(timezone.utc)
+        feed = self._feed(gtfs, self.TRAM, 300.0, now)
+        assert len(feed.entity) == 1
+        stus = feed.entity[0].trip_update.stop_time_update
+        # stop0 sits at the vehicle's own position, so stop1 (500 m, +60 s of
+        # scheduled running time) leads: 300 s of waiting + 60 s of driving.
+        assert stus[0].stop_id == "stop1"
+        assert stus[0].arrival.time == pytest.approx(now.timestamp() + 360, abs=2)
+        # …and the stop after it another scheduled minute later.
+        assert stus[1].arrival.time == pytest.approx(now.timestamp() + 420, abs=2)
+        # Not model output — carries its own band, not the model's.
+        assert stus[0].arrival.uncertainty == _TERMINUS_UNCERTAINTY_SEC
+
+    def test_trolleybus_at_terminus_served(self, gtfs):
+        now = datetime.now(timezone.utc)
+        assert len(self._feed(gtfs, self.TROLLEYBUS, 300.0, now).entity) == 1
+
+    def test_bus_at_terminus_still_withheld(self, gtfs):
+        """The measured reason for the whole feature: bus timetables don't hold."""
+        now = datetime.now(timezone.utc)
+        assert len(self._feed(gtfs, self.BUS, 300.0, now).entity) == 0
+
+    def test_departure_too_far_away_withheld(self, gtfs):
+        """An hour of parking means the matched trip is the wrong instance."""
+        now = datetime.now(timezone.utc)
+        assert len(self._feed(gtfs, self.TRAM, 3600.0, now).entity) == 0
+
+    def test_slightly_overdue_departure_leaves_now(self, gtfs):
+        now = datetime.now(timezone.utc)
+        feed = self._feed(gtfs, self.TRAM, -60.0, now)
+        assert len(feed.entity) == 1
+        stus = feed.entity[0].trip_update.stop_time_update
+        # Overdue wait clamps to zero rather than pulling arrivals into the past.
+        assert stus[0].arrival.time == pytest.approx(now.timestamp() + 60, abs=2)
+
+    def test_long_overdue_departure_withheld(self, gtfs):
+        """Parked well past its departure — a layover, not a pending run."""
+        now = datetime.now(timezone.utc)
+        assert len(self._feed(gtfs, self.TRAM, -600.0, now).entity) == 0
+
+    def test_parked_off_the_shape_but_on_route_still_served(self, gtfs):
+        """A rail- or wire-bound vehicle 100 m off the drawn shape is still at
+        the terminus — that offset is loop geometry, not a vehicle elsewhere."""
+        now = datetime.now(timezone.utc)
+        beside = LAT + 100.0 / 111_320.0    # ≈100 m north of the shape
+        assert len(self._feed(gtfs, self.TRAM, 300.0, now, lat=beside).entity) == 1
+
+    def test_parked_at_shape_start_but_short_of_the_stop_withheld(self, gtfs):
+        """Some trips' first stop sits well into the shape; waiting on the
+        lead-in to it is not standing at the terminus."""
+        now = datetime.now(timezone.utc)
+        data = self._data(gtfs, self.TRAM, 300.0, now)
+        data["stop_distances"][(SHAPE_ID, "stop0")] = 400.0
+        assert len(self._feed(gtfs, self.TRAM, 300.0, now, data=data).entity) == 0
+
+    def test_legacy_export_without_route_types_withholds(self, gtfs):
+        """Data exported before this feature must behave exactly as before."""
+        from google.transit import gtfs_realtime_pb2
+        now = datetime.now(timezone.utc)
+        vp = _vp_bytes(LAT, _lon_at(2.0), ts=now)
+        out = run_inference(_compact_data(gtfs), self._model(), {}, vp)
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(out)
+        assert len(feed.entity) == 0
+
+    def test_moving_tram_uses_the_model_not_the_schedule(self, gtfs):
+        """The schedule is trusted at the terminus only; once rolling, the
+        vehicle goes back through the model."""
+        from google.transit import gtfs_realtime_pb2
+        now = datetime.now(timezone.utc)
+        data = self._data(gtfs, self.TRAM, 300.0, now)
+        vp = _vp_bytes(LAT, _lon_at(1200.0), ts=now)
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(run_inference(data, self._model(), {}, vp))
+        stus = feed.entity[0].trip_update.stop_time_update
+        # Constant +300 s model, not 300 s of waiting plus scheduled running.
+        assert stus[0].arrival.time == pytest.approx(now.timestamp() + 300, abs=2)
+
+    def test_service_day_wrap(self, gtfs):
+        """A 23:50 departure seen at 00:05 is 15 min overdue, not 23 h early."""
+        data = _compact_data(gtfs, route_type=self.TRAM,
+                             start_sec=23 * 3600 + 50 * 60)
+        at_five_past = datetime(2026, 6, 3, 0, 5, tzinfo=ZoneInfo("Europe/Kiev"))
+        assert terminus_seconds_until_departure(TRIP_ID, at_five_past, data) is None
+        # Mirror case: an after-midnight trip (start_sec > 86400) seen just
+        # before it is due, from the previous calendar day's clock.
+        late = _compact_data(gtfs, route_type=self.TRAM,
+                             start_sec=24 * 3600 + 10 * 60)
+        at_midnight = datetime(2026, 6, 3, 0, 5, tzinfo=ZoneInfo("Europe/Kiev"))
+        assert terminus_seconds_until_departure(TRIP_ID, at_midnight, late) == 300.0
 
 
 # ---------------------------------------------------------------------------

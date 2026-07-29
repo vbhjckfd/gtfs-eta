@@ -45,6 +45,33 @@ def _make_client():
     )
 
 
+# The Lviv feed types every trolleybus route as 3 (bus); only trams carry a
+# correct route_type. Their short names are the only reliable marker, so the
+# spec value (11, trolleybus) is restored here — src/inference.py keys its
+# schedule-anchored terminus ETAs off route_type, and trolleybuses keep the
+# schedule at a terminus just like trams do.
+_TROLLEYBUS_NAME_PREFIX = "Тр"      # Cyrillic Т + р, e.g. "Тр22"
+_ROUTE_TYPE_TROLLEYBUS = 11
+
+
+def _build_route_types(gtfs) -> dict[str, int]:
+    """route_id → GTFS route_type, with Lviv's mistyped trolleybuses restored."""
+    out: dict[str, int] = {}
+    routes = gtfs._routes
+    if routes is None:
+        return out
+    for r in routes.itertuples():
+        try:
+            rtype = int(r.route_type)
+        except (TypeError, ValueError):
+            continue
+        name = str(getattr(r, "route_short_name", "") or "")
+        if name.startswith(_TROLLEYBUS_NAME_PREFIX):
+            rtype = _ROUTE_TYPE_TROLLEYBUS
+        out[str(r.route_id)] = rtype
+    return out
+
+
 def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
     """
     Serialise GTFSStatic to a plain-dict format loadable without pyproj/pyproject.
@@ -63,7 +90,7 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
     print("Building worker GTFS data…")
 
     from src.gtfs_static import _parse_gtfs_time
-    from datetime import date
+    from datetime import date, datetime, time as dtime
     base = date(2000, 1, 1)  # dummy date — only schedule deltas are used
 
     # Trips: route_id, shape_id, stop_times with sched_cum_sec
@@ -86,6 +113,12 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
             "route_id": info.route_id,
             "shape_id": info.shape_id,
             "stop_times": stop_times,
+            # Absolute scheduled start, as seconds since local midnight of the
+            # service day (≥86400 for after-midnight trips).  The cumulative
+            # offsets above are enough for mid-route interpolation, but the
+            # terminus path in src/inference.py needs the wall-clock departure
+            # itself.  None when the trip has no parseable time at all.
+            "start_sec": None if t0 is None else (t0 - datetime.combine(base, dtime.min)).total_seconds(),
         }
 
     # Store shapes as packed float64 bytes — 16 bytes/point instead of
@@ -112,6 +145,8 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
     else:
         print(f"  WARNING: {PRIORS_PATH} not found and no existing R2 priors — using fallback constants")
 
+    route_types = _build_route_types(gtfs)
+
     data = {
         "shapes": shapes_coords,                          # shape_id → bytes (packed float64 pairs)
         "shape_lengths": dict(gtfs._shape_lengths),       # shape_id → float metres
@@ -119,6 +154,8 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
         "trip_index": trip_index,
         "route_trips": dict(gtfs._route_trips),           # route_id → [trip_id, ...]
         "route_hour_priors": priors_raw,                  # route+hour speed/dwell priors
+        "route_types": route_types,                       # route_id → GTFS route_type int
+        "feed_timezone": str(gtfs.feed_tz),               # for local-time schedule lookups
     }
 
     n_shapes = len(data["shapes"])

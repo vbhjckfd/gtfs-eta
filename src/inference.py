@@ -3,14 +3,20 @@ Pure-Python GTFS-RT ETA inference for the worker compact data format.
 
 Compatible with the data produced by scripts/export_worker_data.py:
   shapes        shape_id → bytes  (struct-packed float64 UTM pairs)
-  trip_index    trip_id  → {route_id, shape_id,
+  trip_index    trip_id  → {route_id, shape_id, start_sec,
                             stop_times: [(stop_id, seq, sched_cum_sec), ...]}
                 where sched_cum_sec is scheduled seconds since the trip's
-                first stop (cumulative)
+                first stop (cumulative) and start_sec is that first stop's
+                departure in seconds since local midnight
   stop_distances (shape_id, stop_id) → float metres along shape
   shape_lengths  shape_id → float
   route_trips    route_id → [trip_id, ...]
+  route_types    route_id → GTFS route_type int
+  feed_timezone  IANA zone name of the feed's local time
   model          {route_to_int, baseline, learning_rate, trees}
+
+``start_sec``, ``route_types`` and ``feed_timezone`` are recent additions;
+data exported before them simply disables the terminus schedule path below.
 
 The model predicts seconds_to_arrival directly per upcoming stop (multi-
 horizon), anchored at the vehicle's *projected position along the shape* —
@@ -55,8 +61,56 @@ _BEARING_W = 0.4
 # Idling-at-origin guard: a vehicle parked at (≈) the shape start with no
 # measurable forward motion is almost always waiting for its scheduled
 # departure.  Predicting then yields optimistically early ETAs (the warm-start
-# falls back to historical speed), so we withhold predictions until it moves.
+# falls back to historical speed), so we withhold model predictions until it
+# moves — unless the schedule itself is trustworthy here, see below.
 _NOT_DEPARTED_DIST_M = 20.0
+
+# Schedule-anchored terminus ETAs.
+#
+# GTFS stop times in Lviv are unreliable in general — that is why no schedule
+# feature survived into the model (src/features.py).  They are *not* unreliable
+# for an electric vehicle sitting at its terminus: it leaves on the timetable.
+# Measured on 5 days of labelled snapshots, over rows the idle-at-origin guard
+# above currently discards (ETA straight from the schedule vs actual arrival):
+#
+#     tram        MAE  94 s   median  51 s   82 % within 2 min
+#     trolleybus  MAE 140 s   median  76 s   68 % within 2 min
+#     bus         MAE 222 s   median 161 s   40 % within 2 min  (best bucket)
+#
+# The model has no notion of a pending departure and scores MAE 208 s (tram) /
+# 395 s (trolleybus) on those same rows, so the schedule wins outright — but
+# only for the two electric modes.  Buses stay withheld.
+_SCHEDULE_RELIABLE_ROUTE_TYPES = frozenset({0, 11})   # tram, trolleybus
+
+# How far the scheduled departure may sit from now for the schedule to be
+# believed.  Outside this window the vehicle is parked at a terminus it is not
+# about to leave (layover, shift change) or — more often — the matched trip is
+# the wrong instance, and accuracy collapses: beyond +30 min the tram MAE goes
+# from ~100 s to 1600 s+.  A small overdue tolerance keeps the common
+# "leaving a minute late" case covered.
+_TERMINUS_MAX_OVERDUE_SEC = 120.0
+_TERMINUS_MAX_WAIT_SEC    = 1800.0
+
+# How far along the shape the vehicle may be from the trip's first stop and
+# still count as standing at it.  Sitting near the *shape start* is not the same
+# thing: 3 % of tram/trolleybus trips have their first stop a few hundred metres
+# in, and waiting on the lead-in to a terminus is not waiting at it.
+_TERMINUS_STOP_RADIUS_M = 50.0
+#
+# Sideways, the ordinary on-route threshold (_OFF_ROUTE_DIST) is the bound —
+# 14 % of vehicles parked at a terminus are >50 m off the shape, but a tram or
+# trolleybus cannot wander: it is rail- or wire-bound, so that offset is the
+# terminus loop being drawn approximately, not a vehicle somewhere else.  The
+# measurement is thin either way (23 departures observed beyond 50 m, median
+# error 85 s against 60 s within it), so the physical argument decides.
+
+# Uncertainty published with schedule-anchored ETAs.  The model's per-horizon
+# table describes model error and does not apply here; this covers the measured
+# MAE of both electric modes.
+_TERMINUS_UNCERTAINTY_SEC = 150
+
+_HALF_DAY_SEC = 12 * 3600
+_DAY_SEC      = 24 * 3600
 
 # Routes with confirmed trip-matching failures — excluded from training in
 # src/train.py and suppressed here so their bad predictions don't reach riders
@@ -400,6 +454,124 @@ def build_features(trip_id: str, v_dist: float, speed: float,
 
 
 # ---------------------------------------------------------------------------
+# Schedule-anchored terminus predictions
+# ---------------------------------------------------------------------------
+
+_tz_cache: dict[str | None, timezone] = {}
+
+
+def _feed_tz(name: str | None):
+    """Feed-local tzinfo, falling back to UTC when zoneinfo can't resolve it."""
+    if name in _tz_cache:
+        return _tz_cache[name]
+    tz = timezone.utc
+    if name:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(name)
+        except Exception:
+            tz = timezone.utc
+    _tz_cache[name] = tz
+    return tz
+
+
+def _local_seconds_of_day(snap_ts: datetime, data: dict) -> float:
+    local = snap_ts.astimezone(_feed_tz(data.get("feed_timezone")))
+    return local.hour * 3600 + local.minute * 60 + local.second
+
+
+def terminus_seconds_until_departure(trip_id: str, snap_ts: datetime,
+                                     data: dict) -> float | None:
+    """Seconds until *trip_id* is scheduled to leave its first stop.
+
+    ``None`` when the schedule should not be trusted here: a mode whose
+    timetable does not hold (bus), an export without ``start_sec``, or a
+    departure too far from now to belong to this vehicle's next run.  A
+    departure that is only slightly overdue returns 0.0, not a negative wait.
+    """
+    trip = data["trip_index"].get(trip_id)
+    if trip is None:
+        return None
+    route_type = data.get("route_types", {}).get(str(trip["route_id"]))
+    if route_type not in _SCHEDULE_RELIABLE_ROUTE_TYPES:
+        return None
+    start_sec = trip.get("start_sec")
+    if start_sec is None:
+        return None
+
+    wait = float(start_sec) - _local_seconds_of_day(snap_ts, data)
+    # Service-day wrap: a 23:50 departure seen at 00:05 is 15 min overdue,
+    # not 23 h 45 min early (and the mirror case for after-midnight trips,
+    # whose start_sec exceeds 86400).
+    if wait < -_HALF_DAY_SEC:
+        wait += _DAY_SEC
+    elif wait > _HALF_DAY_SEC:
+        wait -= _DAY_SEC
+
+    if wait < -_TERMINUS_MAX_OVERDUE_SEC or wait > _TERMINUS_MAX_WAIT_SEC:
+        return None
+    return max(wait, 0.0)
+
+
+def at_first_stop(trip_id: str, v_dist: float, off_route_dist: float,
+                  data: dict) -> bool:
+    """Is the vehicle physically standing at this trip's first stop?
+
+    *v_dist* is its projection along the shape and *off_route_dist* its
+    perpendicular distance from it, so the pair fixes the vehicle in both axes
+    — being near the start of the shape says nothing about either.  The
+    sideways tolerance is deliberately loose; see _TERMINUS_STOP_RADIUS_M.
+    """
+    trip = data["trip_index"].get(trip_id)
+    if trip is None or not trip["stop_times"]:
+        return False
+    if off_route_dist > _OFF_ROUTE_DIST:
+        return False
+    first_stop_dist = data["stop_distances"].get(
+        (trip["shape_id"], trip["stop_times"][0][0])
+    )
+    if first_stop_dist is None:
+        return False
+    return abs(v_dist - first_stop_dist) <= _TERMINUS_STOP_RADIUS_M
+
+
+def terminus_schedule_predictions(trip_id: str, snap_ts: datetime, data: dict,
+                                  feature_rows: list, v_dist: float,
+                                  off_route_dist: float) -> list:
+    """Prediction dicts for a vehicle idling at its trip's first stop.
+
+    Same shape as the model path's predictions so the encoder stays unaware of
+    where the numbers came from; empty unless the vehicle is really standing at
+    the terminus (``at_first_stop``) and its departure is close enough to be
+    believed (``terminus_seconds_until_departure``).
+    """
+    if not feature_rows:
+        return []
+    if not at_first_stop(trip_id, v_dist, off_route_dist, data):
+        return []
+    depart_in = terminus_seconds_until_departure(trip_id, snap_ts, data)
+    if depart_in is None:
+        return []
+
+    trip = data["trip_index"][trip_id]
+    # Keyed by stop_sequence, not stop_id — a loop route visits a stop twice.
+    sched_cum = {int(seq): cum for _, seq, cum in trip["stop_times"]}
+
+    preds = []
+    for feat_row, stop_id, stop_seq in feature_rows:
+        cum = sched_cum.get(int(stop_seq))
+        if cum is None:
+            continue
+        preds.append({
+            "stop_id": stop_id,
+            "stop_sequence": int(stop_seq),
+            "stops_ahead": int(feat_row[2]),
+            "seconds": depart_in + float(cum),
+        })
+    return preds
+
+
+# ---------------------------------------------------------------------------
 # Protobuf encoder
 # ---------------------------------------------------------------------------
 
@@ -507,7 +679,9 @@ def encode_trip_updates(
             # Publish the model's confidence so consumers can widen the window
             # for far-horizon stops. Keyed by the true horizon when carried,
             # else by emitted position (matches the scorer's stops_ahead proxy).
-            unc = _uncertainty_for(
+            # An update may carry its own flat band when its numbers didn't come
+            # from the model at all (schedule-anchored terminus ETAs).
+            unc = u.get("uncertainty") or _uncertainty_for(
                 uncertainty_by_horizon, pred.get("stops_ahead", stop_count + 1)
             )
             if unc is not None:
@@ -724,12 +898,27 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 "vehicle_ts": vehicle_ts if vehicle_ts is not None else feed_ts,
             })
 
-        # Idling at the origin pre-departure: withhold predictions until the
-        # vehicle actually moves, rather than emit optimistically early ETAs.
-        if speed <= 0.0 and v_dist < _NOT_DEPARTED_DIST_M:
+        if not feature_rows:
             continue
 
-        if not feature_rows:
+        # Idling at the origin pre-departure.  A tram or trolleybus standing at
+        # its terminus leaves on the timetable, so serve the schedule; anything
+        # else gets nothing rather than the model's optimistically early ETAs.
+        if speed <= 0.0 and v_dist < _NOT_DEPARTED_DIST_M:
+            sched_preds = terminus_schedule_predictions(
+                trip_id, snap_ts, gtfs_data, feature_rows, v_dist, min_dist
+            )
+            if sched_preds:
+                updates.append({
+                    "vehicle_id": vid,
+                    "trip_id":    trip_id,
+                    "route_id":   route_id,
+                    "snap_ts":    snap_ts,
+                    "predictions": sched_preds,
+                    # Not model output — the per-horizon model bands don't
+                    # describe these, so carry their own.
+                    "uncertainty": _TERMINUS_UNCERTAINTY_SEC,
+                })
             continue
 
         preds_sec = predict_rows(model_data, [r[0] for r in feature_rows])
