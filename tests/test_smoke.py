@@ -266,10 +266,14 @@ def test_stop_60_has_arrivals(worker_feed):
 
 # ── Our VehiclePositions feed ───────────────────────────────────────────────
 
-# Lviv city bounding box (with ~5 km margin for outskirt depots/terminals).
-# Tighter than an oblast box — catches swapped lat/lon and zero-initialised coords.
-_VP_LAT_MIN, _VP_LAT_MAX = 49.72, 49.97
-_VP_LON_MIN, _VP_LON_MAX = 23.82, 24.22
+# Lviv service-area bounding box: the extent of every stop in the static feed
+# (49.772..49.975 N, 23.861..24.161 E) plus ~5 km of margin.  Routes here end in
+# the suburbs often enough that a city box is wrong — the northern terminus at
+# Зарудці alone sits at 49.9750, which a 49.97 ceiling clipped.  Still far
+# tighter than an oblast box, so it keeps catching swapped lat/lon and
+# zero-initialised coords.
+_VP_LAT_MIN, _VP_LAT_MAX = 49.72, 50.02
+_VP_LON_MIN, _VP_LON_MAX = 23.79, 24.23
 
 # Urban transit hard cap: ~130 km/h covers articulated trams on downhill tracks;
 # anything above is a GPS artefact or a unit error (m/s vs km/h).
