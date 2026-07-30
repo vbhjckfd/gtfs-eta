@@ -26,13 +26,14 @@ import argparse
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import numpy as np
 import pandas as pd
 from google.transit import gtfs_realtime_pb2
 from tqdm import tqdm
 
+from src.gtfs_static import _parse_gtfs_time_utc
 from src.labeling import build_labels
 from src.snapshots import R2_BUCKET, _fetch_and_parse, _make_client, list_snapshot_keys
 from src.trip_inference import infer_trips
@@ -54,6 +55,19 @@ ARRIVING_NOW_SEC = 60
 # reused across two trips a day): a |error| beyond this is almost certainly a
 # bad join, not a bad prediction, and would swamp the means.
 MAX_PLAUSIBLE_ERROR_SEC = 3600
+
+# A prediction is only scored if it was generated while its matched trip_id
+# could plausibly have been running — this many seconds either side of that
+# trip's own scheduled [first_departure, last_arrival]. Live serving's trip
+# matcher (src/inference.py's infer_trip) has no schedule-time check at all,
+# so a route/direction/shape with only one (or few) static trips gets that
+# one trip_id force-matched onto ANY vehicle on that shape at ANY hour —
+# found 2026-07-28: a prediction generated 21:00 Kyiv joined against a trip
+# scheduled 06:00-06:40, an 11h+ mismatch. The join can't tell that from a
+# real crossing since both share the same (vehicle_id, trip_id, stop_id,
+# stop_sequence) key. Generous margin — real delays shouldn't approach it,
+# but a genuinely wrong-hour match (the failure mode here) always will.
+SCHEDULE_WINDOW_MARGIN_SEC = 2 * 3600
 
 
 def _progress(it, total: int, desc: str):
@@ -196,8 +210,26 @@ def _to_epoch_seconds(ts) -> pd.Series:
 # Join + score
 # ---------------------------------------------------------------------------
 
+def _trip_schedule_bounds(gtfs, trip_id: str, day: date) -> tuple[float, float] | None:
+    """(start_epoch, end_epoch) of a trip's own scheduled window on *day*.
+
+    None when the trip or its times aren't resolvable — callers should treat
+    that as "unknown, don't filter" rather than reject the row.
+    """
+    trip = gtfs.get_trip(trip_id)
+    if trip is None or not trip.stop_times:
+        return None
+    first, last = trip.stop_times[0], trip.stop_times[-1]
+    start = _parse_gtfs_time_utc(first.departure_time or first.arrival_time, day, gtfs.feed_tz)
+    end = _parse_gtfs_time_utc(last.arrival_time or last.departure_time, day, gtfs.feed_tz)
+    if start is None or end is None:
+        return None
+    return start.timestamp(), end.timestamp()
+
+
 def join_predictions_actuals(
-    predictions: pd.DataFrame, actuals: pd.DataFrame, feed_tz=None
+    predictions: pd.DataFrame, actuals: pd.DataFrame, feed_tz=None,
+    gtfs=None, date_str: str | None = None,
 ) -> pd.DataFrame:
     """Inner-join predictions to their actual arrival and compute residuals."""
     if predictions.empty or actuals.empty:
@@ -226,6 +258,28 @@ def join_predictions_actuals(
     # make the published MAE look better than it is).
     joined.attrs["n_implausible_dropped"] = n_dropped
     joined.attrs["n_forward"] = n_forward
+
+    # Drop joins where the prediction was generated while its matched trip_id
+    # couldn't plausibly have been running (see SCHEDULE_WINDOW_MARGIN_SEC) —
+    # live serving's trip matcher has no schedule-time check, so a route with
+    # only one static trip per shape gets that trip_id force-matched onto any
+    # vehicle on the shape at any hour, and the join can't otherwise tell that
+    # apart from a real crossing sharing the same key. Requires gtfs + date_str;
+    # skipped (no-op) without them so existing callers/tests keep working.
+    if gtfs is not None and date_str is not None:
+        day = date.fromisoformat(date_str)
+        bounds = {tid: _trip_schedule_bounds(gtfs, tid, day) for tid in joined["trip_id"].unique()}
+        starts = joined["trip_id"].map(lambda t: bounds[t][0] if bounds[t] else -np.inf)
+        ends = joined["trip_id"].map(lambda t: bounds[t][1] if bounds[t] else np.inf)
+        schedule_ok = (
+            (joined["feed_ts"] >= starts - SCHEDULE_WINDOW_MARGIN_SEC)
+            & (joined["feed_ts"] <= ends + SCHEDULE_WINDOW_MARGIN_SEC)
+        )
+        n_schedule_dropped = int((~schedule_ok).sum())
+        joined = joined[schedule_ok]
+    else:
+        n_schedule_dropped = 0
+    joined.attrs["n_schedule_dropped"] = n_schedule_dropped
 
     joined["lead_bucket"] = pd.cut(
         joined["lead_sec"], bins=LEAD_BUCKETS_SEC, labels=LEAD_LABELS, right=False
@@ -361,6 +415,15 @@ def score_report(
                 4,
             ),
             "threshold_sec": MAX_PLAUSIBLE_ERROR_SEC,
+        },
+        "schedule_window_dropped": {
+            "n": int(joined.attrs.get("n_schedule_dropped", 0)),
+            "frac": round(
+                joined.attrs.get("n_schedule_dropped", 0)
+                / max(joined.attrs.get("n_forward", 0), 1),
+                4,
+            ),
+            "margin_sec": SCHEDULE_WINDOW_MARGIN_SEC,
         },
         "overall": _metrics(joined),
         "by_lead_bucket": _grouped(joined, "lead_bucket"),
@@ -684,7 +747,9 @@ def score_date(date_str: str, gtfs=None, client=None) -> dict:
         return {"date": date_str, "status": "no_actuals", "overall": None}
 
     feed_tz = getattr(gtfs, "feed_tz", None)
-    joined = join_predictions_actuals(predictions, actuals, feed_tz=feed_tz)
+    joined = join_predictions_actuals(
+        predictions, actuals, feed_tz=feed_tz, gtfs=gtfs, date_str=date_str
+    )
     return score_report(
         joined, actuals, date_str, feed_tz=feed_tz, predictions=predictions
     )
