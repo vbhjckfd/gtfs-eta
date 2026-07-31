@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import pickle
+import tempfile
 import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -72,6 +73,7 @@ class GTFSStatic:
         self._trip_index: dict[str, TripInfo] = {}
         self._route_trips: dict[str, list[str]] = {}   # route_id → [trip_id]
         self.feed_tz: ZoneInfo = ZoneInfo("Europe/Kiev")  # overwritten during parse
+        self._data_dir: Path = DATA_DIR  # overridden by load_from_bytes() for an isolated parse
 
     # ------------------------------------------------------------------
     # Public API
@@ -79,6 +81,7 @@ class GTFSStatic:
 
     def load(self, force_download: bool = False, force_rebuild: bool = False) -> "GTFSStatic":
         """Download (if needed), extract, parse, and cache the static feed."""
+        self._data_dir = DATA_DIR
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         zip_path = DATA_DIR / "static.zip"
 
@@ -92,6 +95,24 @@ class GTFSStatic:
             self._parse()
             self._save_cache()
 
+        return self
+
+    def load_from_bytes(self, zip_bytes: bytes) -> "GTFSStatic":
+        """Parse a specific static.zip payload in isolation.
+
+        No shared cache, no DATA_DIR writes — everything lives in a scratch
+        temp dir cleaned up before this returns. Used to score/train against
+        the schedule actually in effect on a past day (see
+        get_gtfs_for_date), which is a different zip than whatever is
+        currently live and must never collide with the live singleton's
+        on-disk cache.
+        """
+        with tempfile.TemporaryDirectory(prefix="gtfs_static_") as tmp:
+            self._data_dir = Path(tmp)
+            zip_path = self._data_dir / "static.zip"
+            zip_path.write_bytes(zip_bytes)
+            self._extract(zip_path)
+            self._parse()
         return self
 
     def get_trip(self, trip_id: str) -> TripInfo | None:
@@ -146,13 +167,13 @@ class GTFSStatic:
                         f"GTFS static feed is corrupt: {req} is missing or empty — "
                         f"zip deleted so next run will re-download"
                     )
-            zf.extractall(DATA_DIR)
+            zf.extractall(self._data_dir)
 
     def _parse(self) -> None:
-        self._routes = pd.read_csv(DATA_DIR / "routes.txt", dtype=str)
-        self._trips = pd.read_csv(DATA_DIR / "trips.txt", dtype=str)
+        self._routes = pd.read_csv(self._data_dir / "routes.txt", dtype=str)
+        self._trips = pd.read_csv(self._data_dir / "trips.txt", dtype=str)
 
-        agency_path = DATA_DIR / "agency.txt"
+        agency_path = self._data_dir / "agency.txt"
         if agency_path.exists():
             agency = pd.read_csv(agency_path, dtype=str)
             if "agency_timezone" in agency.columns and len(agency) > 0:
@@ -161,12 +182,12 @@ class GTFSStatic:
                     self.feed_tz = ZoneInfo(tz_name)
                 except Exception:
                     pass
-        stops_raw = pd.read_csv(DATA_DIR / "stops.txt", dtype=str)
-        self._stop_times = pd.read_csv(DATA_DIR / "stop_times.txt", dtype=str)
-        shapes_raw = pd.read_csv(DATA_DIR / "shapes.txt", dtype=str)
+        stops_raw = pd.read_csv(self._data_dir / "stops.txt", dtype=str)
+        self._stop_times = pd.read_csv(self._data_dir / "stop_times.txt", dtype=str)
+        shapes_raw = pd.read_csv(self._data_dir / "shapes.txt", dtype=str)
 
-        cal_path = DATA_DIR / "calendar.txt"
-        caldates_path = DATA_DIR / "calendar_dates.txt"
+        cal_path = self._data_dir / "calendar.txt"
+        caldates_path = self._data_dir / "calendar_dates.txt"
         self._calendar = pd.read_csv(cal_path, dtype=str) if cal_path.exists() else pd.DataFrame()
         self._calendar_dates = (
             pd.read_csv(caldates_path, dtype=str) if caldates_path.exists() else pd.DataFrame()
@@ -442,3 +463,63 @@ def get_gtfs(force_download: bool = False, force_rebuild: bool = False) -> GTFSS
             force_download=force_download, force_rebuild=force_rebuild
         )
     return _instance
+
+
+# ------------------------------------------------------------------
+# Era-pinned static, from gtfs-collector's daily R2 archive
+# ------------------------------------------------------------------
+#
+# gtfs-collector (~/Projects/gtfs-collector) archives the upstream static
+# feed to the same R2 bucket at static/<date>/static.zip once a day, but
+# only writes a new dated copy when the feed actually changed — most dates
+# have no snapshot of their own. Archiving started 2026-07-31; there is
+# nothing to look up before that.
+
+_STATIC_ARCHIVE_PREFIX = "static/"
+_date_gtfs_cache: dict[str, GTFSStatic] = {}
+
+
+def _list_static_snapshot_dates(client) -> list[str]:
+    from src.snapshots import R2_BUCKET
+
+    paginator = client.get_paginator("list_objects_v2")
+    dates = []
+    for page in paginator.paginate(
+        Bucket=R2_BUCKET, Prefix=_STATIC_ARCHIVE_PREFIX, Delimiter="/"
+    ):
+        for cp in page.get("CommonPrefixes", []):
+            d = cp["Prefix"][len(_STATIC_ARCHIVE_PREFIX):].rstrip("/")
+            if len(d) == 10:  # YYYY-MM-DD dirs only — skips the _latest.json marker
+                dates.append(d)
+    return sorted(dates)
+
+
+def get_gtfs_for_date(date_str: str, client=None) -> GTFSStatic:
+    """GTFS static as it was in effect on `date_str`.
+
+    Looks up gtfs-collector's daily archive for the most recent snapshot on
+    or before this date (walking back over unchanged-feed gaps), and parses
+    it in isolation via load_from_bytes — never touching the live
+    singleton's cache. Falls back to get_gtfs() (whatever is current) when
+    no archived snapshot covers this date or R2 is unreachable, so callers
+    scoring/training a day never hard-fail for missing history.
+    """
+    if date_str in _date_gtfs_cache:
+        return _date_gtfs_cache[date_str]
+
+    from src.snapshots import R2_BUCKET
+    from src.snapshots import _make_client as _make_r2_client
+
+    try:
+        client = client or _make_r2_client()
+        candidates = [d for d in _list_static_snapshot_dates(client) if d <= date_str]
+        if not candidates:
+            return get_gtfs()
+        key = f"{_STATIC_ARCHIVE_PREFIX}{candidates[-1]}/static.zip"
+        zip_bytes = client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read()
+        gtfs = GTFSStatic().load_from_bytes(zip_bytes)
+    except Exception:
+        return get_gtfs()
+
+    _date_gtfs_cache[date_str] = gtfs
+    return gtfs

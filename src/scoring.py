@@ -733,9 +733,9 @@ def live_bias_by_horizon_weekend(
 def score_date(date_str: str, gtfs=None, client=None) -> dict:
     """End-to-end: load predictions + actuals for a day and return the report."""
     if gtfs is None:
-        from src.gtfs_static import get_gtfs
+        from src.gtfs_static import get_gtfs_for_date
 
-        gtfs = get_gtfs()
+        gtfs = get_gtfs_for_date(date_str)
     client = client or _make_client()
 
     predictions = load_predictions(date_str, client=client)
