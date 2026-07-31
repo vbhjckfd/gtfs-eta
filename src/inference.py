@@ -13,10 +13,16 @@ Compatible with the data produced by scripts/export_worker_data.py:
   route_trips    route_id → [trip_id, ...]
   route_types    route_id → GTFS route_type int
   feed_timezone  IANA zone name of the feed's local time
+  calendar       calendar.txt rows (service_id, weekday flags, start/end date)
+  calendar_dates calendar_dates.txt rows (service_id, date, exception_type)
   model          {route_to_int, baseline, learning_rate, trees}
 
 ``start_sec``, ``route_types`` and ``feed_timezone`` are recent additions;
 data exported before them simply disables the terminus schedule path below.
+``calendar``/``calendar_dates`` are likewise recent; their absence disables
+the active-service filter in infer_trip() and falls back to matching on
+geometry alone across every trip ever defined for the route, regardless of
+whether it runs today.
 
 The model predicts seconds_to_arrival directly per upcoming stop (multi-
 horizon), anchored at the vehicle's *projected position along the shape* —
@@ -275,22 +281,65 @@ def _bearing_score(bearing: float | None, tangent: float) -> float:
     return _bearing_diff(bearing, tangent) / 180.0
 
 
-def infer_trip(route_id, reported_trip_id, vx, vy, bearing, data):
+def _active_service_ids(gtfs_data: dict, day) -> frozenset[str] | None:
+    """Service ids running on this calendar day (calendar.txt + calendar_dates.txt).
+
+    None when the export predates these fields (see module docstring) —
+    callers must treat that as "day filter unavailable", not "nothing runs
+    today".
+    """
+    calendar = gtfs_data.get("calendar")
+    calendar_dates = gtfs_data.get("calendar_dates")
+    if calendar is None or calendar_dates is None:
+        return None
+    dow = day.strftime("%A").lower()
+    date_str = day.strftime("%Y%m%d")
+    active = {
+        row["service_id"] for row in calendar
+        if row["start_date"] <= date_str <= row["end_date"] and row.get(dow) == "1"
+    }
+    for row in calendar_dates:
+        if row["date"] != date_str:
+            continue
+        if row["exception_type"] == "1":
+            active.add(row["service_id"])
+        elif row["exception_type"] == "2":
+            active.discard(row["service_id"])
+    return frozenset(active)
+
+
+def infer_trip(route_id, reported_trip_id, vx, vy, bearing, data, active_service_ids=None):
     """Best (trip_id, spatial_dist, tangent_bearing) for a vehicle snapshot.
 
     Combines spatial distance with heading alignment so opposite-direction
     shape variants — which sit on top of each other and defeat pure
     nearest-distance matching — are told apart.
+
+    ``active_service_ids``, when given, restricts candidates to trips actually
+    scheduled today (see _active_service_ids). Without it, two routes whose
+    weekday and weekend trips reuse the same shape — e.g. route 105 — are
+    geometrically indistinguishable, and matching silently picks whichever
+    calendar variant scores best on position alone, not the one actually
+    running.
     """
     candidates = data["route_trips"].get(str(route_id), [])
+    if active_service_ids is not None:
+        candidates = [
+            tid for tid in candidates
+            if data["trip_index"].get(tid, {}).get("service_id") in active_service_ids
+        ]
     if not candidates:
         return None, 9999.0, 0.0
 
     # Fast path: trust the reported trip only if it is both near AND not headed
     # the wrong way down its shape.
     if reported_trip_id and reported_trip_id in data["trip_index"]:
-        shape_id = data["trip_index"][reported_trip_id]["shape_id"]
-        coords = data["shapes"].get(shape_id)
+        reported_info = data["trip_index"][reported_trip_id]
+        reported_active = (
+            active_service_ids is None
+            or reported_info.get("service_id") in active_service_ids
+        )
+        coords = data["shapes"].get(reported_info["shape_id"]) if reported_active else None
         if coords is not None:
             d, tangent = poly_match(coords, vx, vy)
             if d < _REPORTED_DIST_OK and (
@@ -810,6 +859,9 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     feed_ts = int(vp_feed.header.timestamp) or int(time.time())
     snap_ts = datetime.fromtimestamp(feed_ts, tz=timezone.utc)
     priors = gtfs_data.get("route_hour_priors", {})
+    # Computed once per push (all vehicles in this batch share the same feed
+    # day) — see _active_service_ids for why this matters at all.
+    active_service_ids = _active_service_ids(gtfs_data, snap_ts.date())
 
     # Per-horizon bias correction, weekday/weekend split when available (falls
     # back to the flat table, then to no correction — see _bias_correction_for).
@@ -850,7 +902,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
 
         vx, vy = project_xy(lon, lat)
         trip_id, min_dist, tangent = infer_trip(
-            route_id, reported_tid, vx, vy, bearing, gtfs_data
+            route_id, reported_tid, vx, vy, bearing, gtfs_data, active_service_ids
         )
         if trip_id is None:
             continue

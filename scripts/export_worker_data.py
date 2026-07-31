@@ -112,6 +112,7 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
         trip_index[trip_id] = {
             "route_id": info.route_id,
             "shape_id": info.shape_id,
+            "service_id": info.service_id,
             "stop_times": stop_times,
             # Absolute scheduled start, as seconds since local midnight of the
             # service day (≥86400 for after-midnight trips).  The cumulative
@@ -156,6 +157,14 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
         "route_hour_priors": priors_raw,                  # route+hour speed/dwell priors
         "route_types": route_types,                       # route_id → GTFS route_type int
         "feed_timezone": str(gtfs.feed_tz),               # for local-time schedule lookups
+        # calendar.txt / calendar_dates.txt, as plain string-keyed rows — lets
+        # infer_trip() restrict same-shape weekday/weekend trip variants (e.g.
+        # route 105) to the ones actually running today, instead of matching
+        # on geometry alone across trips that were never scheduled today.
+        "calendar": gtfs._calendar.to_dict("records") if not gtfs._calendar.empty else [],
+        "calendar_dates": (
+            gtfs._calendar_dates.to_dict("records") if not gtfs._calendar_dates.empty else []
+        ),
     }
 
     n_shapes = len(data["shapes"])
