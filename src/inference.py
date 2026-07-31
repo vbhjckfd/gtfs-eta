@@ -840,19 +840,71 @@ def _congestion_level(speed: float, hist_speed: float):
 # normal reporting jitter never gets caught by it.
 STALE_VEHICLE_MAX_AGE_SEC = 180
 
+# How far the *whole fleet's* clock may lag the feed header before we stop
+# trusting the feed at all.  Upstream can skew the two clocks against each
+# other while the positions themselves stay live (observed 2026-07-31 09:16Z:
+# every one of 590 vehicles suddenly 9+ min behind the header, yet 221 of them
+# moved between two samples 46 s apart).  Measuring staleness against the
+# header then drops 100 % of the fleet and we serve an empty feed — see
+# staleness_reference for how the anchor slides instead.  The slide is capped
+# here because a fleet-wide lag is also what a genuinely frozen upstream looks
+# like, and past some age the positions are worthless however live the clock
+# claims they are.
+MAX_FEED_CLOCK_SKEW_SEC = 30 * 60
+
+
+def staleness_reference(vp_feed, feed_ts: int) -> tuple[int, int]:
+    """Timestamp to measure per-vehicle staleness against, plus the feed's skew.
+
+    Returns ``(reference_ts, skew_sec)``, where the skew is how far the feed's
+    *newest* fix trails the header.  A healthy feed's newest fix is seconds old
+    by construction (600 vehicles, median age ~12 s), so the reference stays the
+    header and behavior is unchanged.
+
+    Only once the whole fleet trails the header by more than a vehicle is
+    allowed to be stale — impossible for real staleness, since that would mean
+    every device stopped reporting at once — does the reference slide to the
+    newest per-vehicle timestamp, judging the fleet against itself.  Vehicles
+    whose own fix trails *that* are still dropped, so the genuine multi-hour
+    stragglers ca6bde4 was written for keep getting dropped.
+
+    The slide stops at MAX_FEED_CLOCK_SKEW_SEC: beyond it the reference falls
+    back to the header, every vehicle fails the age check, and we publish
+    nothing rather than pretend a long-dead feed is current.
+    """
+    newest = 0
+    for entity in vp_feed.entity:
+        if entity.HasField("vehicle") and entity.vehicle.HasField("timestamp"):
+            ts = int(entity.vehicle.timestamp)
+            if ts > newest:
+                newest = ts
+    if newest == 0:
+        return feed_ts, 0
+    skew = feed_ts - newest
+    if skew <= STALE_VEHICLE_MAX_AGE_SEC or skew > MAX_FEED_CLOCK_SKEW_SEC:
+        return feed_ts, max(skew, 0)
+    return newest, skew
+
 
 # ---------------------------------------------------------------------------
 # Main inference pass
 # ---------------------------------------------------------------------------
 
 def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
-                  vp_bytes: bytes, *, with_vehicle_positions: bool = False):
+                  vp_bytes: bytes, *, with_vehicle_positions: bool = False,
+                  stats: dict | None = None):
     """Vehicle-positions protobuf bytes → TripUpdates protobuf bytes.
 
     With ``with_vehicle_positions=True`` returns a ``(trip_updates_bytes,
     vehicle_positions_bytes)`` tuple — the second feed re-publishes the cleaned
     positions (corrected trip, next stop, congestion) computed in this same
     pass. The default single-bytes return keeps existing callers unchanged.
+
+    Pass a dict as *stats* to have this pass record what it saw about the
+    upstream feed — ``vehicles_in``, ``vehicles_stale`` and ``feed_skew_sec``
+    (see staleness_reference).  The daemon publishes these as R2 object
+    metadata so /health can tell "upstream went stale" apart from "inference
+    broke", which are indistinguishable from an empty feed alone.
     """
     vp_feed = gtfs_realtime_pb2.FeedMessage()
     vp_feed.ParseFromString(vp_bytes)
@@ -873,6 +925,23 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     else:
         bias_table = model_data.get("bias_by_horizon")
 
+    # Judge per-vehicle staleness against the feed's own newest fix, not blindly
+    # against the header — the two clocks can drift apart upstream.
+    stale_ref, feed_skew = staleness_reference(vp_feed, feed_ts)
+    if feed_skew > STALE_VEHICLE_MAX_AGE_SEC:
+        print(
+            f"[warn] upstream per-vehicle clock lags the feed header by "
+            f"{feed_skew}s"
+            + (
+                " — beyond the trusted skew, dropping every vehicle"
+                if stale_ref == feed_ts
+                else " — anchoring staleness to the newest fix"
+            ),
+            flush=True,
+        )
+
+    vehicles_in = 0
+    vehicles_stale = 0
     updates = []
     vp_records: list[dict] = []
     for entity in vp_feed.entity:
@@ -896,8 +965,10 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         if route_id in _BAD_ROUTE_IDS:
             continue
 
+        vehicles_in += 1
         vehicle_ts = int(v.timestamp) if v.HasField("timestamp") else None
-        if vehicle_ts is not None and feed_ts - vehicle_ts > STALE_VEHICLE_MAX_AGE_SEC:
+        if vehicle_ts is not None and stale_ref - vehicle_ts > STALE_VEHICLE_MAX_AGE_SEC:
+            vehicles_stale += 1
             continue
 
         vx, vy = project_xy(lon, lat)
@@ -1010,6 +1081,16 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             ],
             # None for a moving vehicle → the per-horizon model bands apply.
             "uncertainty": terminus_unc,
+        })
+
+    if stats is not None:
+        stats.update({
+            # Vehicles that reached the staleness check — i.e. already past the
+            # missing-position and bad-route filters, so the two counts below
+            # are directly comparable.
+            "vehicles_in": vehicles_in,
+            "vehicles_stale": vehicles_stale,
+            "feed_skew_sec": feed_skew,
         })
 
     tu_bytes = encode_trip_updates(

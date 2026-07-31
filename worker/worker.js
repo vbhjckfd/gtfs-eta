@@ -353,6 +353,18 @@ function jsonResponse(payload, status) {
   });
 }
 
+/**
+ * Read a numeric R2 customMetadata field, or null when the key is absent or
+ * not a number.  R2 metadata is always strings; a feed written before the
+ * daemon started stamping these carries none of them.
+ */
+function numMeta(obj, key) {
+  const raw = obj.customMetadata?.[key];
+  if (raw === undefined) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function handleHealth(env) {
   // worker_commit: this worker's revision (injected by `make deploy`).
   // feed_commit: revision of the push daemon that produced the feed blob
@@ -364,6 +376,15 @@ async function handleHealth(env) {
     return jsonResponse({ status: "error", detail: "feed not in R2", ...versions }, 503);
   }
   versions.feed_commit = obj.customMetadata?.commit ?? null;
+
+  // What the producing inference pass saw upstream (see push_feed._push_once).
+  // Absent on feeds written by an older daemon — then the upstream verdict just
+  // stays unknown and /health falls back to its previous wording.
+  const upstream = {
+    vehicles_in: numMeta(obj, "vehicles_in"),
+    vehicles_stale: numMeta(obj, "vehicles_stale"),
+    feed_skew_sec: numMeta(obj, "feed_skew_sec"),
+  };
 
   const data = new Uint8Array(await obj.arrayBuffer());
   const { timestamp, entities, arrivals } = parseFeedStats(data, HEALTH_CHECK_STOP_ID);
@@ -389,6 +410,14 @@ async function handleHealth(env) {
   const workingHours = hour >= WORKING_HOURS_UTC_START && hour < WORKING_HOURS_UTC_END;
 
   if (workingHours && arrivals === 0) {
+    // An empty feed has two very different causes and one symptom. When the
+    // daemon reports that it dropped (nearly) every upstream vehicle as stale,
+    // the fault is upstream and inference is fine — say so, so an alert doesn't
+    // send anyone reading this project's code.
+    const upstreamStale =
+      upstream.vehicles_in !== null &&
+      upstream.vehicles_in > 0 &&
+      upstream.vehicles_stale >= upstream.vehicles_in;
     return jsonResponse({
       status: "degraded",
       feed_timestamp: timestamp,
@@ -397,9 +426,14 @@ async function handleHealth(env) {
       stop_code: 60,
       stop_id: HEALTH_CHECK_STOP_ID,
       arrivals: 0,
-      detail:
-        "no predicted arrivals for stop 60 during working hours — " +
-        "inference may be stalled",
+      ...upstream,
+      detail: upstreamStale
+        ? `no predicted arrivals for stop 60 during working hours — upstream ` +
+          `positions all stale (${upstream.vehicles_stale}/${upstream.vehicles_in} ` +
+          `vehicles dropped, feed clock skew ${upstream.feed_skew_sec}s); ` +
+          `inference is healthy`
+        : "no predicted arrivals for stop 60 during working hours — " +
+          "inference may be stalled",
       ...versions,
     }, 503);
   }
@@ -413,6 +447,7 @@ async function handleHealth(env) {
     stop_id: HEALTH_CHECK_STOP_ID,
     arrivals,
     working_hours: workingHours,
+    ...upstream,
     ...versions,
   }, 200);
 }

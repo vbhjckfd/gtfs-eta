@@ -29,12 +29,15 @@ from src.features import (
 )
 from src.gtfs_static import StopTime, TripInfo
 from src.inference import (
+    MAX_FEED_CLOCK_SKEW_SEC,
     MAX_STOPS_AHEAD,
+    STALE_VEHICLE_MAX_AGE_SEC,
     _TERMINUS_MODEL_UNCERTAINTY_SEC,
     _TERMINUS_UNCERTAINTY_SEC,
     _isotonic,
     _uncertainty_for,
     build_features,
+    staleness_reference,
     terminus_seconds_until_departure,
     encode_trip_updates,
     encode_vehicle_positions,
@@ -887,3 +890,126 @@ class TestVehiclePositions:
         assert v.current_status == VP.STOPPED_AT
         assert v.congestion_level == VP.SEVERE_CONGESTION
         assert v.stop_id == "stop3"
+
+
+# ---------------------------------------------------------------------------
+# Staleness anchoring (upstream clock skew)
+# ---------------------------------------------------------------------------
+
+def _skewed_feed(feed_ts, vehicle_ages):
+    """A VehiclePositions feed whose vehicles are *ages* seconds behind feed_ts."""
+    from google.transit import gtfs_realtime_pb2
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    feed.header.timestamp = feed_ts
+    for i, age in enumerate(vehicle_ages):
+        ent = feed.entity.add()
+        ent.id = f"v{i}"
+        ent.vehicle.vehicle.id = f"v{i}"
+        if age is not None:
+            ent.vehicle.timestamp = feed_ts - age
+    return feed
+
+
+class TestStalenessReference:
+    """Per-vehicle staleness is judged against the feed's newest fix, not the
+    header, so an upstream clock skew doesn't drop the entire fleet (#live
+    2026-07-31: every one of 590 vehicles 9+ min behind the header, positions
+    still moving, and we published an empty feed for it)."""
+
+    FEED_TS = 1_785_490_000
+
+    def test_normal_feed_anchors_to_the_header(self):
+        """Ordinary reporting jitter must not move the reference at all."""
+        feed = _skewed_feed(self.FEED_TS, [2, 12, 60])
+        ref, skew = staleness_reference(feed, self.FEED_TS)
+        assert ref == self.FEED_TS
+        assert skew == 2
+
+    def test_anchor_holds_until_the_fleet_is_wholly_stale(self):
+        feed = _skewed_feed(self.FEED_TS, [STALE_VEHICLE_MAX_AGE_SEC, 400])
+        ref, _ = staleness_reference(feed, self.FEED_TS)
+        assert ref == self.FEED_TS
+
+    def test_fleet_wide_skew_slides_the_anchor(self):
+        feed = _skewed_feed(self.FEED_TS, [544, 556, 600])
+        ref, skew = staleness_reference(feed, self.FEED_TS)
+        assert skew == 544
+        assert ref == self.FEED_TS - 544
+
+    def test_slid_anchor_keeps_the_fleet_and_still_drops_stragglers(self):
+        # The live shape of the outage: a skewed fleet plus one month-old fix.
+        ages = [544, 556, 600, 30 * 86_400]
+        feed = _skewed_feed(self.FEED_TS, ages)
+        ref, _ = staleness_reference(feed, self.FEED_TS)
+        kept = [a for a in ages if ref - (self.FEED_TS - a) <= STALE_VEHICLE_MAX_AGE_SEC]
+        assert kept == [544, 556, 600]
+        # Measured against the header instead, every one of them would go.
+        assert not [a for a in ages if a <= STALE_VEHICLE_MAX_AGE_SEC]
+
+    def test_skew_past_the_cap_falls_back_to_the_header(self):
+        """Past the cap we publish nothing rather than trust an ancient feed."""
+        age = MAX_FEED_CLOCK_SKEW_SEC + 60
+        feed = _skewed_feed(self.FEED_TS, [age, age + 10])
+        ref, skew = staleness_reference(feed, self.FEED_TS)
+        assert ref == self.FEED_TS
+        assert skew == age
+
+    def test_future_timestamps_do_not_slide_the_anchor(self):
+        """A vehicle clock ahead of the header must not widen the age window."""
+        feed = _skewed_feed(self.FEED_TS, [-120, 30])
+        ref, skew = staleness_reference(feed, self.FEED_TS)
+        assert ref == self.FEED_TS
+        assert skew == 0
+
+    def test_feed_without_vehicle_timestamps(self):
+        feed = _skewed_feed(self.FEED_TS, [None, None])
+        assert staleness_reference(feed, self.FEED_TS) == (self.FEED_TS, 0)
+
+
+class TestSkewedFeedInference:
+    """End-to-end: a skewed-but-live feed is still served, and the pass reports
+    what it saw so /health can name the upstream as the cause."""
+
+    def _model(self):
+        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+
+    def _vp(self, now, *, vehicle_age):
+        from google.transit import gtfs_realtime_pb2
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(_vp_bytes(LAT, _lon_at(1200.0), ts=now))
+        feed.entity[0].vehicle.timestamp = int(now.timestamp()) - vehicle_age
+        return feed.SerializeToString()
+
+    def _entities(self, data, vp, stats=None):
+        from google.transit import gtfs_realtime_pb2
+        out = run_inference(data, self._model(), {}, vp, stats=stats)
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(out)
+        return len(feed.entity)
+
+    def test_whole_feed_skewed_is_still_served(self, gtfs):
+        data = _compact_data(gtfs)
+        now = datetime.now(timezone.utc)
+        stats = {}
+        assert self._entities(data, self._vp(now, vehicle_age=600), stats) == 1
+        assert stats["feed_skew_sec"] == 600
+        assert stats["vehicles_stale"] == 0
+
+    def test_stats_report_a_fully_dropped_fleet(self, gtfs):
+        """Skew past the cap: nothing served, and the counts say why."""
+        data = _compact_data(gtfs)
+        now = datetime.now(timezone.utc)
+        stats = {}
+        age = MAX_FEED_CLOCK_SKEW_SEC + 600
+        assert self._entities(data, self._vp(now, vehicle_age=age), stats) == 0
+        assert stats == {
+            "vehicles_in": 1,
+            "vehicles_stale": 1,
+            "feed_skew_sec": age,
+        }
+
+    def test_stats_are_optional(self, gtfs):
+        data = _compact_data(gtfs)
+        now = datetime.now(timezone.utc)
+        assert self._entities(data, self._vp(now, vehicle_age=5)) == 1

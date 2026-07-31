@@ -226,8 +226,10 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
     t0 = time.monotonic()
     vp_bytes = _get_vp_bytes()
 
+    stats: dict = {}
     tu_result, vp_result = run_inference(
-        gtfs_data, model_data, trackers, vp_bytes, with_vehicle_positions=True
+        gtfs_data, model_data, trackers, vp_bytes,
+        with_vehicle_positions=True, stats=stats,
     )
 
     client.put_object(
@@ -236,7 +238,16 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
         Body=tu_result,
         ContentType="application/x-protobuf",
         CacheControl=FEED_CACHE_CONTROL,
-        Metadata={"commit": FEED_COMMIT},
+        # Beyond the producing revision, carry what this pass saw upstream: an
+        # empty feed on its own can't tell "upstream stopped reporting fresh
+        # positions" from "our inference broke", and /health has nothing else
+        # to go on. R2 metadata values must be strings.
+        Metadata={
+            "commit": FEED_COMMIT,
+            "vehicles_in": str(stats.get("vehicles_in", 0)),
+            "vehicles_stale": str(stats.get("vehicles_stale", 0)),
+            "feed_skew_sec": str(stats.get("feed_skew_sec", 0)),
+        },
     )
     # Cleaned VehiclePositions feed (corrected trip match, next stop, congestion)
     # derived from the same inference pass — served at /vehicle_positions.
