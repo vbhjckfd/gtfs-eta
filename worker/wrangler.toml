@@ -13,6 +13,9 @@ bucket_name = "gtfs-lviv"
 crons = ["*/5 * * * *", "15 2 * * *"]
 
 [vars]
+# New Relic EU account. The ingest licence key itself is a secret:
+#   wrangler secret put NEW_RELIC_LICENSE_KEY
+NEW_RELIC_ACCOUNT_ID = "3352365"
 FEED_KEY = "feed/trip_updates.pb"
 GITHUB_REPO = "vbhjckfd/gtfs-eta"
 GITHUB_WORKFLOW = "push-feed.yml"

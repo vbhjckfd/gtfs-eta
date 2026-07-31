@@ -24,3 +24,6 @@ worker/python_modules/
 
 # macOS
 .DS_Store
+
+# wrangler local secrets
+.dev.vars

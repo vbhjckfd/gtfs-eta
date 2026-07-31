@@ -36,6 +36,8 @@
  *   with other services.
  */
 
+import { recordEvent } from "./newrelic.js";
+
 const FEED_KEY = "feed/trip_updates.pb";
 
 // Public R2 custom domain the feeds are served from (edge-cached). The fetch
@@ -335,7 +337,7 @@ async function dispatchWorkflow(env, workflow) {
   } catch (exc) {
     console.error(`[scheduled] dispatch of ${workflow} raised: ${exc}`);
     await reportException(env, exc, `scheduled.dispatch:${workflow}`);
-    return;
+    return false;
   }
 
   if (resp.status !== 204 && resp.status !== 200) {
@@ -343,7 +345,9 @@ async function dispatchWorkflow(env, workflow) {
     const msg = `GitHub dispatch of ${workflow} failed: HTTP ${resp.status} — ${text}`;
     console.error(`[scheduled] ${msg}`);
     await reportMessage(env, msg, `scheduled.dispatch:${workflow}`);
+    return false;
   }
+  return true;
 }
 
 function jsonResponse(payload, status) {
@@ -452,11 +456,45 @@ async function handleHealth(env) {
   }, 200);
 }
 
+/**
+ * Mirror a /health verdict into New Relic.  Reads a clone of the response
+ * rather than threading a reporter through handleHealth's four exit points, so
+ * the health logic itself stays untouched.  Every field here is already public
+ * in the /health body.
+ */
+async function reportHealth(env, response) {
+  let body = {};
+  try {
+    body = await response.json();
+  } catch {
+    return;
+  }
+  await recordEvent(env, "GtfsEtaWorkerHealth", {
+    status: body.status ?? "unknown",
+    httpStatus: response.status,
+    feedTimestamp: body.feed_timestamp ?? null,
+    ageSec: body.age_sec ?? null,
+    entities: body.entities ?? null,
+    arrivals: body.arrivals ?? null,
+    workingHours: body.working_hours ?? null,
+    vehiclesIn: body.vehicles_in ?? null,
+    vehiclesStale: body.vehicles_stale ?? null,
+    feedSkewSec: body.feed_skew_sec ?? null,
+    feedCommit: body.feed_commit ?? null,
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
       const path = new URL(request.url).pathname.replace(/\/+$/, "");
-      if (path.endsWith("/health")) return await handleHealth(env);
+      if (path.endsWith("/health")) {
+        const response = await handleHealth(env);
+        // Reported off the critical path; the redirect branch below is not
+        // instrumented on purpose — it is edge-cacheable and carries no signal.
+        ctx.waitUntil(reportHealth(env, response.clone()));
+        return response;
+      }
 
       // The feeds are served (and edge-cached) from the R2 public custom domain;
       // this worker no longer proxies them. Redirect the legacy paths there so
@@ -479,22 +517,44 @@ export default {
     //   */5 * * * *  — archive the served feed, then dispatch push-feed.yml
     //   15 2 * * *   — dispatch score-quality.yml for the day that just closed
     // event.cron is the exact expression that fired, so we branch on it.
+    const started = Date.now();
     const scoreCron = env.SCORE_CRON ?? "15 2 * * *";
     if (event.cron === scoreCron) {
-      await dispatchWorkflow(env, env.SCORE_WORKFLOW ?? "score-quality.yml");
+      const workflow = env.SCORE_WORKFLOW ?? "score-quality.yml";
+      const dispatched = await dispatchWorkflow(env, workflow);
+      await recordEvent(env, "GtfsEtaWorkerCron", {
+        cron: event.cron,
+        workflow,
+        dispatched,
+        archived: null,
+        durationMs: Date.now() - started,
+      });
       return;
     }
 
     // Snapshot the feed that consumers saw over the last cycle before we kick a
     // refresh, so quality scoring measures the *served* predictions.  Isolated
     // from the dispatch below: a failed archive must never stall the pipeline.
+    let archived = true;
     try {
       await archiveFeed(env);
     } catch (exc) {
+      archived = false;
       console.error(`[scheduled] feed archive raised: ${exc}`);
       await reportException(env, exc, "scheduled.archive");
     }
 
-    await dispatchWorkflow(env, env.GITHUB_WORKFLOW ?? "push-feed.yml");
+    const workflow = env.GITHUB_WORKFLOW ?? "push-feed.yml";
+    const dispatched = await dispatchWorkflow(env, workflow);
+
+    // Awaited rather than waitUntil'd: nothing is waiting on a cron run, and
+    // this is the only record that the 5-minute pipeline actually fired.
+    await recordEvent(env, "GtfsEtaWorkerCron", {
+      cron: event.cron,
+      workflow,
+      dispatched,
+      archived,
+      durationMs: Date.now() - started,
+    });
   },
 };

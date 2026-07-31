@@ -91,9 +91,39 @@ make check-snapshots     # verify R2 Bronze snapshot reading
 The worker also requires a Cloudflare secret:
 
 ```bash
-wrangler secret put GITHUB_TOKEN   # PAT with workflow scope
-wrangler secret put SENTRY_DSN    # optional — enables error reporting to Sentry
+wrangler secret put GITHUB_TOKEN            # PAT with workflow scope
+wrangler secret put SENTRY_DSN              # optional — error reporting to Sentry
+wrangler secret put NEW_RELIC_LICENSE_KEY   # optional — telemetry to New Relic
 ```
+
+### New Relic
+
+The New Relic Node APM agent cannot run in a Worker — it is CommonJS, spawns
+background harvest timers and reads Node internals that a V8 isolate does not
+have. So [worker/newrelic.js](worker/newrelic.js) posts custom events straight
+to the Event API over `fetch`, the same no-SDK approach as `sendSentryEvent`.
+Without the key, reporting is a no-op.
+
+Two event types, both tagged `service = gtfs-eta-worker` and stamped with
+`GIT_COMMIT`:
+
+- `GtfsEtaWorkerHealth` — one per `/health` hit, mirroring the verdict:
+  `status`, `ageSec`, `entities`, `arrivals`, `workingHours`, `vehiclesIn`,
+  `vehiclesStale`, `feedSkewSec`, `feedCommit`. Every field is already public in
+  the `/health` body. The legacy redirect paths are deliberately not
+  instrumented — they are edge-cacheable and carry no signal.
+- `GtfsEtaWorkerCron` — one per cron fire: which `cron` matched, the `workflow`
+  dispatched, whether the dispatch and the feed archive succeeded, `durationMs`.
+  This is the only record that the 5-minute pipeline actually fired.
+
+```sql
+SELECT max(ageSec) FROM GtfsEtaWorkerHealth TIMESERIES SINCE 1 day ago
+SELECT count(*) FROM GtfsEtaWorkerCron WHERE dispatched IS false SINCE 1 day ago
+```
+
+The account is in New Relic's **EU** region: ingest goes to
+`insights-collector.eu01.nr-data.net` and the key is the 40-character licence
+key starting `eu01xx`, not an `NRAK-...` user API key.
 
 ## Model
 
