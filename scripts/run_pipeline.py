@@ -91,22 +91,24 @@ def process_day(date_str: str, gtfs, client, max_workers: int = 12,
 
 
 # --- Parallel workers -------------------------------------------------------
-# Initialised once per worker process; GTFS static loads from the cache
-# pickle, the boto3 client cannot cross process boundaries.
+# Initialised once per worker process; the boto3 client cannot cross process
+# boundaries. GTFS static is loaded per day, not once — see
+# get_gtfs_for_date: a static change mid-range must label each day against
+# the schedule actually in effect that day, not whatever the worker process
+# happened to load first.
 
-_worker_gtfs = None
 _worker_client = None
 
 
 def _init_worker():
-    global _worker_gtfs, _worker_client
-    from src.gtfs_static import get_gtfs
-    _worker_gtfs = get_gtfs()
+    global _worker_client
     _worker_client = _make_client()
 
 
 def _process_day_in_worker(date_str: str) -> dict:
-    return process_day(date_str, _worker_gtfs, _worker_client, quiet=True)
+    from src.gtfs_static import get_gtfs_for_date
+    gtfs = get_gtfs_for_date(date_str, client=_worker_client)
+    return process_day(date_str, gtfs, _worker_client, quiet=True)
 
 
 def _run_parallel(days: list[str], n_workers: int) -> list[dict]:
@@ -148,11 +150,11 @@ def main():
     if args.parallel > 1 and len(days) > 1:
         results = _run_parallel(days, min(args.parallel, len(days)))
     else:
-        from src.gtfs_static import get_gtfs
-        print("Loading GTFS static…")
-        gtfs = get_gtfs()
+        from src.gtfs_static import get_gtfs_for_date
         client = _make_client()
-        results = [process_day(d, gtfs, client) for d in days]
+        results = [
+            process_day(d, get_gtfs_for_date(d, client=client), client) for d in days
+        ]
 
     print("\n=== Summary ===")
     for r in results:

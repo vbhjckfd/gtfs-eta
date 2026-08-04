@@ -202,6 +202,25 @@ def _time_split(df: pd.DataFrame, test_fraction: float) -> tuple[pd.DataFrame, p
     cutoff = dates[cutoff_idx]
     train_df = df[df["date"] < cutoff].copy()
     test_df  = df[df["date"] >= cutoff].copy()
+
+    # A route whose entire history postdates the cutoff (brand-new — e.g.
+    # route 137/A67, added days before this run) would otherwise never reach
+    # train_df no matter how often this reruns: a chronological split always
+    # puts the newest data in test, and a route that young has no older data
+    # to fall on the train side of any cutoff. Carve most of its rows into
+    # train so the model at least learns it exists, keeping a small held-out
+    # slice of its own rows for eval rather than giving up on that entirely.
+    train_routes = set(train_df["route_id"].astype(str))
+    new_routes = set(test_df["route_id"].astype(str)) - train_routes
+    if new_routes:
+        is_new = test_df["route_id"].astype(str).isin(new_routes)
+        new_rows = test_df[is_new]
+        moved = new_rows.sample(frac=0.8, random_state=42)
+        train_df = pd.concat([train_df, moved], ignore_index=True)
+        test_df = test_df.drop(moved.index)
+        print(f"  {len(new_routes)} route(s) new since the cutoff {sorted(new_routes)}: "
+              f"moved {len(moved):,}/{len(new_rows):,} rows into train so the model learns them")
+
     print(f"  Train: {len(train_df):,} rows  ({dates[0].date()} → {dates[cutoff_idx - 1].date()})")
     print(f"  Test:  {len(test_df):,} rows  ({cutoff.date()} → {dates[-1].date()})")
     return train_df, test_df
