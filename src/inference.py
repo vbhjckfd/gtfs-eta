@@ -37,6 +37,7 @@ import math
 import struct
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from google.transit import gtfs_realtime_pb2
 
@@ -58,11 +59,16 @@ _BEARING_WRONG_DEG = 90.0   # heading vs shape-tangent diff that looks off-route
 # Trip-matching thresholds (bring the compact serving path in line with
 # src/trip_inference.py, which both training and scoring use).  Bearing
 # disambiguates overlapping opposite-direction shape variants that pure
-# nearest-distance matching cannot tell apart.
+# nearest-distance matching cannot tell apart; progress disambiguates
+# same-shape trips running at different times of day (e.g. route 105's
+# back-to-back weekday runs) that bearing alone cannot — weights match
+# src/trip_inference.py's score_trip exactly, since that weighting is
+# already proven in production via the batch/actuals path.
 _MATCH_DIST_CAP   = 100.0   # spatial-score normaliser
 _REPORTED_DIST_OK = 75.0    # trust a reported trip_id within this distance
-_SPATIAL_W = 0.6
-_BEARING_W = 0.4
+_SPATIAL_W  = 0.4
+_BEARING_W  = 0.3
+_PROGRESS_W = 0.3
 
 # Idling-at-origin guard: a vehicle parked at (≈) the shape start with no
 # measurable forward motion is waiting for its departure.  How that departure is
@@ -192,24 +198,33 @@ def _bearing_diff(b1: float, b2: float) -> float:
     return diff if diff <= 180.0 else 360.0 - diff
 
 
-def poly_match(shape_bytes: bytes, px: float, py: float) -> tuple[float, float]:
-    """Nearest distance to the polyline and the shape's tangent bearing there.
+def poly_match(shape_bytes: bytes, px: float, py: float) -> tuple[float, float, float]:
+    """Nearest distance to the polyline, the shape's tangent bearing there,
+    and the distance along the shape to that nearest point.
 
     The tangent points in the trip's direction of travel (shapes are ordered
     start→end), so comparing it to the vehicle's heading tells the two
-    directions of an overlapping route apart.
+    directions of an overlapping route apart. Distance-along-shape lets a
+    caller compare against where the schedule expects the vehicle to be —
+    telling apart same-shape trips running at different times of day, which
+    position and bearing alone cannot.
     """
     n = len(shape_bytes) // 16
     min_d = math.inf
     tangent = 0.0
+    dist_along = 0.0
+    cum = 0.0
     for i in range(n - 1):
         ax, ay = struct.unpack_from("dd", shape_bytes, i * 16)
         bx, by = struct.unpack_from("dd", shape_bytes, (i + 1) * 16)
-        d, _ = _seg_nearest(px, py, ax, ay, bx, by)
+        seg_len = math.hypot(bx - ax, by - ay)
+        d, t = _seg_nearest(px, py, ax, ay, bx, by)
         if d < min_d:
             min_d = d
             tangent = _seg_bearing(ax, ay, bx, by)
-    return min_d, tangent
+            dist_along = cum + t * seg_len
+        cum += seg_len
+    return min_d, tangent, dist_along
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +323,55 @@ def _active_service_ids(gtfs_data: dict, day) -> frozenset[str] | None:
     return frozenset(active)
 
 
-def infer_trip(route_id, reported_trip_id, vx, vy, bearing, data, active_service_ids=None):
+def _expected_dist_along(trip_id: str, now_sec: float, data: dict) -> float | None:
+    """Expected distance (m) along the shape at `now_sec` (local seconds
+    since midnight of the service day — may exceed 86400 for a trip that
+    runs past midnight), from scheduled stop times.
+
+    Mirrors src/trip_inference.py's _expected_dist_along for the compact
+    data format: trip_index[tid]["stop_times"] holds (stop_id, seq,
+    sched_cum_sec) — seconds since the trip's own first stop — and
+    "start_sec" anchors that to local midnight.
+    """
+    info = data["trip_index"].get(trip_id)
+    if info is None or info.get("start_sec") is None:
+        return None
+    shape_id = info["shape_id"]
+    start_sec = info["start_sec"]
+    stop_distances = data["stop_distances"]
+
+    dists, times = [], []
+    for stop_id, _seq, cum_sec in info["stop_times"]:
+        d = stop_distances.get((shape_id, stop_id))
+        if d is None:
+            continue
+        dists.append(d)
+        times.append(start_sec + cum_sec)
+    if len(dists) < 2:
+        return None
+
+    # An after-midnight trip (times[-1] >= a day) is still "now" during the
+    # early-morning hours before its own start_sec — shift now_sec into the
+    # same >=24h numbering rather than wrongly comparing against yesterday.
+    if times[-1] >= _DAY_SEC and now_sec < times[0] - _HALF_DAY_SEC:
+        now_sec = now_sec + _DAY_SEC
+
+    if now_sec <= times[0]:
+        return dists[0]
+    if now_sec >= times[-1]:
+        return dists[-1]
+    for i in range(len(times) - 1):
+        if times[i] <= now_sec <= times[i + 1]:
+            span = times[i + 1] - times[i]
+            frac = (now_sec - times[i]) / span if span > 0 else 0.0
+            return dists[i] + frac * (dists[i + 1] - dists[i])
+    return None
+
+
+def infer_trip(
+    route_id, reported_trip_id, vx, vy, bearing, data,
+    active_service_ids=None, now_sec=None,
+):
     """Best (trip_id, spatial_dist, tangent_bearing) for a vehicle snapshot.
 
     Combines spatial distance with heading alignment so opposite-direction
@@ -321,6 +384,14 @@ def infer_trip(route_id, reported_trip_id, vx, vy, bearing, data, active_service
     geometrically indistinguishable, and matching silently picks whichever
     calendar variant scores best on position alone, not the one actually
     running.
+
+    ``now_sec`` (local seconds since midnight — see _expected_dist_along),
+    when given, adds a schedule-progress term so that among same-day
+    candidates sharing a shape — e.g. route 105's back-to-back weekday runs
+    on the one shape it didn't stop sharing with the weekend calendar —
+    matching prefers the trip whose scheduled position is actually close to
+    the vehicle, not just whichever happens to score best on position and
+    heading alone.
     """
     candidates = data["route_trips"].get(str(route_id), [])
     if active_service_ids is not None:
@@ -341,7 +412,7 @@ def infer_trip(route_id, reported_trip_id, vx, vy, bearing, data, active_service
         )
         coords = data["shapes"].get(reported_info["shape_id"]) if reported_active else None
         if coords is not None:
-            d, tangent = poly_match(coords, vx, vy)
+            d, tangent, _ = poly_match(coords, vx, vy)
             if d < _REPORTED_DIST_OK and (
                 bearing is None
                 or _bearing_diff(bearing, tangent) <= _BEARING_WRONG_DEG
@@ -356,10 +427,22 @@ def infer_trip(route_id, reported_trip_id, vx, vy, bearing, data, active_service
         coords = data["shapes"].get(trip["shape_id"])
         if coords is None:
             continue
-        d, tangent = poly_match(coords, vx, vy)
+        d, tangent, dist_along = poly_match(coords, vx, vy)
+
+        if now_sec is not None:
+            expected = _expected_dist_along(tid, now_sec, data)
+        else:
+            expected = None
+        if expected is not None:
+            shape_len = data["shape_lengths"].get(trip["shape_id"], 0.0)
+            progress_score = min(abs(dist_along - expected) / max(shape_len, 1.0), 1.0)
+        else:
+            progress_score = 0.5
+
         score = (
             _SPATIAL_W * min(d / _MATCH_DIST_CAP, 5.0)
             + _BEARING_W * _bearing_score(bearing, tangent)
+            + _PROGRESS_W * progress_score
         )
         if score < best_score:
             best_score, best_dist, best_id, best_tangent = score, d, tid, tangent
@@ -915,6 +998,15 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     # day) — see _active_service_ids for why this matters at all.
     active_service_ids = _active_service_ids(gtfs_data, snap_ts.date())
 
+    # Local wall-clock seconds since midnight, for _expected_dist_along's
+    # schedule-progress term — GTFS stop times are local, not UTC.
+    try:
+        feed_tz = ZoneInfo(gtfs_data.get("feed_timezone") or "Europe/Kiev")
+    except Exception:
+        feed_tz = ZoneInfo("Europe/Kiev")
+    local_ts = snap_ts.astimezone(feed_tz)
+    now_sec = local_ts.hour * 3600 + local_ts.minute * 60 + local_ts.second
+
     # Per-horizon bias correction, weekday/weekend split when available (falls
     # back to the flat table, then to no correction — see _bias_correction_for).
     # UTC weekday, matching the is_weekend feature build_features computes below.
@@ -973,7 +1065,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
 
         vx, vy = project_xy(lon, lat)
         trip_id, min_dist, tangent = infer_trip(
-            route_id, reported_tid, vx, vy, bearing, gtfs_data, active_service_ids
+            route_id, reported_tid, vx, vy, bearing, gtfs_data,
+            active_service_ids, now_sec,
         )
         if trip_id is None:
             continue

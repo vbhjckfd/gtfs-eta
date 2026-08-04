@@ -506,6 +506,50 @@ class TestBearingMatcher:
         assert dist == pytest.approx(0.0, abs=1e-6)
 
 
+class TestScheduleProgressMatcher:
+    """Same-shape trips running at different times of day are indistinguishable
+    by position/bearing alone — e.g. route 105's back-to-back weekday runs on
+    the one shape it doesn't stop sharing with the weekend calendar. Only the
+    schedule-progress term (now_sec) can tell them apart (#3)."""
+
+    def _data(self):
+        shape = _pack_shape([(0.0, 0.0), (1000.0, 0.0)])
+        return {
+            "shapes": {"s": shape},
+            "shape_lengths": {"s": 1000.0},
+            "stop_distances": {("s", "A"): 0.0, ("s", "B"): 1000.0},
+            "trip_index": {
+                "early": {
+                    "route_id": "R", "shape_id": "s", "start_sec": 0.0,
+                    "stop_times": [("A", 1, 0.0), ("B", 2, 600.0)],
+                },
+                "late": {
+                    "route_id": "R", "shape_id": "s", "start_sec": 900.0,
+                    "stop_times": [("A", 1, 0.0), ("B", 2, 600.0)],
+                },
+            },
+            "route_trips": {"R": ["early", "late"]},
+        }
+
+    def test_ties_without_schedule_signal(self):
+        data = self._data()
+        # Halfway along the shared shape — spatially identical for both trips.
+        tid, _, _ = infer_trip("R", None, 500.0, 0.0, None, data)
+        assert tid in {"early", "late"}
+
+    def test_schedule_progress_picks_the_running_trip(self):
+        data = self._data()
+        # now_sec=300: "early" (start 0) is halfway at x=500 right now;
+        # "late" (start 900) hasn't started — expected at its first stop, x=0.
+        tid, _, _ = infer_trip("R", None, 500.0, 0.0, None, data, now_sec=300.0)
+        assert tid == "early"
+
+        # now_sec=1200: "late" (start 900) is halfway at x=500 right now;
+        # "early" (ended at 600) is long finished — expected at its last stop, x=1000.
+        tid, _, _ = infer_trip("R", None, 500.0, 0.0, None, data, now_sec=1200.0)
+        assert tid == "late"
+
+
 class TestIsotonicMonotonicity:
     """PAVA distributes the correction instead of only pushing stops late (#4)."""
 
