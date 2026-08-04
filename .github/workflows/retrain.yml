@@ -1,0 +1,68 @@
+name: Weekly model retrain
+
+# Regenerates training data for any day since the last run (run_pipeline.py
+# skips already-labeled days, so a cached data/training/ only costs a
+# week's worth of new labeling, not the full history), retrains the ETA
+# model + route×hour priors, and exports both to R2.
+#
+# No deploy step: the daemon (push-feed.yml) reloads the model pkl from R2
+# fresh every 5 minutes, so export alone goes live.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'  # weekly, Monday 03:00 UTC — after refresh-gtfs (02:00) and the previous night's route-mae digest
+
+concurrency:
+  group: retrain
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300  # labeling new days + training; generous since a cold cache reprocesses everything
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      # Grows week over week: run_pipeline.py --all only computes days
+      # missing from data/training/, so a warm cache turns this into ~a
+      # week of labeling instead of the full history. A cold/evicted cache
+      # (10 GB repo-wide cache limit) just falls back to reprocessing
+      # everything — slower, not broken.
+      - name: Restore training data cache
+        uses: actions/cache@v4
+        with:
+          path: data/training
+          key: training-data-${{ github.run_id }}
+          restore-keys: |
+            training-data-
+
+      - name: Regenerate training data for new days
+        run: python scripts/run_pipeline.py --all --parallel 2
+        env:
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET:            gtfs-lviv
+
+      - name: Train model
+        run: python -m src.train data/training/
+
+      - name: Export model + priors to R2
+        run: python scripts/export_worker_data.py
+        env:
+          R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET:            gtfs-lviv
