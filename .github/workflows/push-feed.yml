@@ -6,7 +6,11 @@ on:
     # for ~4 min, so there is always a fresh process ready well before the
     # next trigger fires.
     - cron: '*/5 * * * *'
-  workflow_dispatch:  # manual trigger
+  workflow_dispatch:  # manual trigger, and the Cloudflare worker watchdog
+    inputs:
+      retry_depth:
+        description: 'Internal — depth of the automatic retry chain (leave at 0)'
+        default: '0'
 
 jobs:
   guard:
@@ -32,7 +36,9 @@ jobs:
             age_s=$(( now - started_s ))
             if [ "$age_s" -ge "$SIX_MIN_S" ]; then
               echo "Cancelling stale run $id (${age_s}s old)"
-              gh run cancel "$id" --repo "$REPO"
+              # The run can finish between the list above and this call; that is
+              # the outcome we wanted anyway, so do not fail the guard on it.
+              gh run cancel "$id" --repo "$REPO" || echo "  (already finished)"
             else
               echo "Skipping: run $id already in progress (${age_s}s old)"
               proceed=false
@@ -72,3 +78,51 @@ jobs:
           GTFS_RT_URL:          https://track.ua-gis.com/gtfs/lviv/vehicle_position
           SENTRY_DSN:           ${{ secrets.SENTRY_DSN }}
           SENTRY_RELEASE:       ${{ github.sha }}
+
+  # Most failures here are GitHub-side and transient: action download returning
+  # "Service Unavailable" during Set up job, or "The job was not acquired by
+  # Runner of type hosted".  Neither can be retried from inside the job — it
+  # never starts — so recovery has to be a fresh dispatch.  Without one the feed
+  # stays stale until the next 5-minute cron.
+  retry:
+    needs: [guard, push-feed]
+    if: ${{ always() && (needs.guard.result == 'failure' || needs['push-feed'].result == 'failure') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Back off, then dispatch a replacement run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          DEPTH: ${{ github.event.inputs.retry_depth || '0' }}
+        run: |
+          MAX_DEPTH=2
+          if [ "$DEPTH" -ge "$MAX_DEPTH" ]; then
+            echo "Retry chain at depth $DEPTH — giving up, the 5-minute cron takes over."
+            exit 0
+          fi
+
+          # A GitHub blip usually clears inside a minute; an immediate retry just
+          # hits the same wall. 60 s on the first retry, 120 s on the second.
+          sleep $(( 60 * (DEPTH + 1) ))
+
+          # Cron or the Cloudflare watchdog may have started a run in the
+          # meantime. Retrying on top of it duplicates the push and, during a
+          # runner-capacity outage, deepens the very queue that caused the
+          # failure. Run IDs increase monotonically, so "newer" is an ID compare.
+          active=$(gh run list --repo "$REPO" --workflow push-feed.yml --limit 30 \
+                     --json databaseId,status \
+                   | jq --argjson me "$RUN_ID" \
+                       '[.[] | select(.databaseId > $me
+                                      and (.status == "in_progress" or .status == "queued"))] | length')
+          if [ "$active" -gt 0 ]; then
+            echo "$active newer run(s) already active — skipping retry."
+            exit 0
+          fi
+
+          echo "Dispatching retry at depth $(( DEPTH + 1 ))"
+          gh workflow run push-feed.yml --repo "$REPO" --ref "$REF" \
+            -f retry_depth="$(( DEPTH + 1 ))"
