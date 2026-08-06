@@ -165,6 +165,11 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
         "calendar_dates": (
             gtfs._calendar_dates.to_dict("records") if not gtfs._calendar_dates.empty else []
         ),
+        # Self-intersecting shapes (out-and-back routes, tram turnarounds) —
+        # see GTFSStatic.is_ambiguous_shape. vehicle_dist_along() clamps raw
+        # nearest-point projection on these to avoid snapping to a distant,
+        # wrong occurrence of the same physical road (e.g. route 122).
+        "ambiguous_shapes": set(gtfs._ambiguous_shapes),
     }
 
     n_shapes = len(data["shapes"])

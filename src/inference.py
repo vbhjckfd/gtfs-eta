@@ -15,6 +15,8 @@ Compatible with the data produced by scripts/export_worker_data.py:
   feed_timezone  IANA zone name of the feed's local time
   calendar       calendar.txt rows (service_id, weekday flags, start/end date)
   calendar_dates calendar_dates.txt rows (service_id, date, exception_type)
+  ambiguous_shapes  set of shape_ids that self-intersect (out-and-back
+                    routes, tram turnarounds) — see vehicle_dist_along
   model          {route_to_int, baseline, learning_rate, trees}
 
 ``start_sec``, ``route_types`` and ``feed_timezone`` are recent additions;
@@ -22,7 +24,9 @@ data exported before them simply disables the terminus schedule path below.
 ``calendar``/``calendar_dates`` are likewise recent; their absence disables
 the active-service filter in infer_trip() and falls back to matching on
 geometry alone across every trip ever defined for the route, regardless of
-whether it runs today.
+whether it runs today. ``ambiguous_shapes`` absence disables the projection
+clamp in vehicle_dist_along() and falls back to raw, unconstrained
+nearest-point projection everywhere.
 
 The model predicts seconds_to_arrival directly per upcoming stop (multi-
 horizon), anchored at the vehicle's *projected position along the shape* —
@@ -490,16 +494,53 @@ _SPEED_MIN_GAP_SEC = 3.0
 _SPEED_MAX_GAP_SEC = 120.0
 _SPEED_MAX_BACKWARD_M = 30.0
 
+# Speed cap for the ambiguous-shape projection clamp below — mirrors
+# src/labeling.py's _MAX_VEHICLE_SPEED_MPS (144 km/h, generous on purpose:
+# this only needs to rule out impossible jumps, not track real speed).
+_MAX_VEHICLE_SPEED_MPS = 40.0
 
-def vehicle_dist_along(trip_id: str, vx: float, vy: float, data: dict) -> float:
-    """Vehicle's projected distance (m) along the trip's shape."""
+
+def vehicle_dist_along(
+    trip_id: str, vx: float, vy: float, data: dict,
+    trackers: dict | None = None, vid: str | None = None, ts_sec: float | None = None,
+) -> float:
+    """Vehicle's projected distance (m) along the trip's shape.
+
+    Self-intersecting shapes (out-and-back routes, tram turnarounds — see
+    GTFSStatic.is_ambiguous_shape, exported as data["ambiguous_shapes"])
+    make raw nearest-point projection ambiguous: a snapshot can snap onto a
+    distant, wrong occurrence of the same physical road just because it's
+    geographically nearby, corrupting remaining-distance-to-stop and
+    everything downstream of it (route 122's chronic flat bias was this).
+
+    When trackers/vid/ts_sec are given and the shape is flagged ambiguous,
+    the raw projection is clamped to [previous, previous + max_speed *
+    elapsed] against this vehicle's last resolved position — mirroring the
+    batch/labeling constraint in src/labeling.py's _project_vehicle_positions,
+    minus its next-snapshot confirmation (live serving is causal: there is no
+    next snapshot yet), so this is the more conservative one-sided version.
+    Ordinary shapes are returned unconstrained, same as before.
+    """
     trip = data["trip_index"].get(trip_id)
     if trip is None:
         return 0.0
-    coords = data["shapes"].get(trip["shape_id"])
+    shape_id = trip["shape_id"]
+    coords = data["shapes"].get(shape_id)
     if coords is None:
         return 0.0
-    return poly_project(coords, vx, vy)
+    raw = poly_project(coords, vx, vy)
+
+    if trackers is None or vid is None or ts_sec is None:
+        return raw
+    if shape_id not in data.get("ambiguous_shapes", ()):
+        return raw
+    prev = trackers.get(vid, {}).get("pos")
+    if prev is None or prev[2] != trip_id:
+        return raw
+    prev_ts, prev_dist, _ = prev
+    elapsed = max(ts_sec - prev_ts, 0.0)
+    max_forward = prev_dist + _MAX_VEHICLE_SPEED_MPS * elapsed
+    return max(min(raw, max_forward), prev_dist)
 
 
 def progress_speed(trackers: dict, vid: str, trip_id: str, v_dist: float,
@@ -1091,7 +1132,9 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         if update_tracker(trackers, vid, min_dist, bearing_diff):
             continue
 
-        v_dist = vehicle_dist_along(trip_id, vx, vy, gtfs_data)
+        v_dist = vehicle_dist_along(
+            trip_id, vx, vy, gtfs_data, trackers, vid, float(feed_ts)
+        )
         speed  = progress_speed(trackers, vid, trip_id, v_dist, float(feed_ts))
 
         feature_rows = build_features(trip_id, v_dist, speed, snap_ts, gtfs_data)

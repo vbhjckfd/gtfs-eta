@@ -550,6 +550,51 @@ class TestScheduleProgressMatcher:
         assert tid == "late"
 
 
+class TestAmbiguousShapeClamp:
+    """Self-intersecting shapes (out-and-back routes, tram turnarounds — e.g.
+    route 122) make raw nearest-point projection snap to a distant, wrong
+    occurrence of the same physical road. vehicle_dist_along() clamps this
+    to monotonic + speed-capped progress from the vehicle's last resolved
+    position, mirroring src/labeling.py's batch constraint (#4)."""
+
+    def _data(self, ambiguous):
+        shape = _pack_shape([(0.0, 0.0), (2000.0, 0.0)])
+        data = {
+            "shapes": {"s": shape},
+            "trip_index": {"t": {"shape_id": "s"}},
+        }
+        if ambiguous:
+            data["ambiguous_shapes"] = {"s"}
+        return data
+
+    def test_clamps_implausible_jump_on_ambiguous_shape(self):
+        data = self._data(ambiguous=True)
+        trackers = {"v1": {"pos": (1000.0, 100.0, "t")}}  # (ts_sec, dist, trip_id)
+        # Raw position is far along the shape (x=1900), but only 5s elapsed
+        # since the last resolved point (dist=100) — 1800m in 5s is not a bus.
+        d = vehicle_dist_along("t", 1900.0, 0.0, data, trackers, "v1", 1005.0)
+        assert d == pytest.approx(100.0 + 40.0 * 5.0)  # capped at max_speed * elapsed
+
+    def test_ordinary_shape_is_unconstrained(self):
+        data = self._data(ambiguous=False)
+        trackers = {"v1": {"pos": (1000.0, 100.0, "t")}}
+        d = vehicle_dist_along("t", 1900.0, 0.0, data, trackers, "v1", 1005.0)
+        assert d == pytest.approx(1900.0, abs=1.0)
+
+    def test_first_sighting_is_unconstrained(self):
+        data = self._data(ambiguous=True)
+        trackers = {}  # no prior position for this vehicle yet
+        d = vehicle_dist_along("t", 1900.0, 0.0, data, trackers, "v1", 1005.0)
+        assert d == pytest.approx(1900.0, abs=1.0)
+
+    def test_plausible_forward_progress_passes_through(self):
+        data = self._data(ambiguous=True)
+        trackers = {"v1": {"pos": (1000.0, 100.0, "t")}}
+        # 50s elapsed, moving 400m -> 8 m/s, well under the 40 m/s cap.
+        d = vehicle_dist_along("t", 500.0, 0.0, data, trackers, "v1", 1050.0)
+        assert d == pytest.approx(500.0, abs=1.0)
+
+
 class TestIsotonicMonotonicity:
     """PAVA distributes the correction instead of only pushing stops late (#4)."""
 
