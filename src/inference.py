@@ -514,12 +514,20 @@ def vehicle_dist_along(
     everything downstream of it (route 122's chronic flat bias was this).
 
     When trackers/vid/ts_sec are given and the shape is flagged ambiguous,
-    the raw projection is clamped to [previous, previous + max_speed *
-    elapsed] against this vehicle's last resolved position — mirroring the
-    batch/labeling constraint in src/labeling.py's _project_vehicle_positions,
-    minus its next-snapshot confirmation (live serving is causal: there is no
-    next snapshot yet), so this is the more conservative one-sided version.
-    Ordinary shapes are returned unconstrained, same as before.
+    a raw projection that jumps beyond a plausible speed cap isn't decided
+    on the spot — mirroring src/labeling.py's _project_vehicle_positions,
+    which accepts a jump only if the *next* snapshot confirms it (stays past
+    the midpoint between old and new). Live serving is causal — there is no
+    next snapshot yet when this push is served — so the confirmation is
+    delayed by exactly one push instead of looked ahead: a first-seen jump
+    is held as "pending" and clamped conservatively this push; only once the
+    *following* push's raw position corroborates it does the anchor fast-
+    forward to the jump, rather than crawling there at the speed cap (which,
+    at this route's ~22 km self-intersection gap, would take ~9 minutes). An
+    unconfirmed pending jump is dropped and replaced by whatever raw value
+    caused the rejection, so a jump that keeps recurring across pushes still
+    confirms quickly, while an isolated bad projection self-corrects after
+    one push instead of poisoning every later push of the trip.
     """
     trip = data["trip_index"].get(trip_id)
     if trip is None:
@@ -534,13 +542,42 @@ def vehicle_dist_along(
         return raw
     if shape_id not in data.get("ambiguous_shapes", ()):
         return raw
-    prev = trackers.get(vid, {}).get("pos")
-    if prev is None or prev[2] != trip_id:
+
+    state = trackers.setdefault(vid, {"status": "on_route", "off": 0, "on": 0})
+    clamp = state.get("clamp")
+    if clamp is None or clamp["trip_id"] != trip_id:
+        # New trip: no anchor to clamp against yet — same one-row exception
+        # src/labeling.py's own first-row case accepts unconstrained.
+        state["clamp"] = {
+            "trip_id": trip_id, "resolved_dist": raw, "resolved_ts": ts_sec,
+            "pending_dist": None, "pending_ts": None,
+        }
         return raw
-    prev_ts, prev_dist, _ = prev
-    elapsed = max(ts_sec - prev_ts, 0.0)
-    max_forward = prev_dist + _MAX_VEHICLE_SPEED_MPS * elapsed
-    return max(min(raw, max_forward), prev_dist)
+
+    elapsed = max(ts_sec - clamp["resolved_ts"], 0.0)
+    max_forward = clamp["resolved_dist"] + _MAX_VEHICLE_SPEED_MPS * elapsed
+
+    if raw <= max_forward:
+        out = max(raw, clamp["resolved_dist"])
+        clamp["resolved_dist"], clamp["resolved_ts"] = out, ts_sec
+        clamp["pending_dist"] = clamp["pending_ts"] = None
+        return out
+
+    if clamp["pending_dist"] is not None:
+        midpoint = (clamp["resolved_dist"] + clamp["pending_dist"]) / 2
+        if raw >= midpoint:
+            # Confirmed by this push — fast-forward the anchor to the jump
+            # instead of crawling there at the speed cap.
+            clamp["resolved_dist"], clamp["resolved_ts"] = raw, ts_sec
+            clamp["pending_dist"] = clamp["pending_ts"] = None
+            return raw
+
+    # Unconfirmed (first sighting of this jump, or the previous pending
+    # jump wasn't corroborated): clamp conservatively and hold this push's
+    # raw value as the new pending candidate for the next push to judge.
+    out = max(min(raw, max_forward), clamp["resolved_dist"])
+    clamp["pending_dist"], clamp["pending_ts"] = raw, ts_sec
+    return out
 
 
 def progress_speed(trackers: dict, vid: str, trip_id: str, v_dist: float,
