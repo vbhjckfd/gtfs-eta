@@ -24,9 +24,9 @@ data exported before them simply disables the terminus schedule path below.
 ``calendar``/``calendar_dates`` are likewise recent; their absence disables
 the active-service filter in infer_trip() and falls back to matching on
 geometry alone across every trip ever defined for the route, regardless of
-whether it runs today. ``ambiguous_shapes`` absence disables the projection
-clamp in vehicle_dist_along() and falls back to raw, unconstrained
-nearest-point projection everywhere.
+whether it runs today. ``ambiguous_shapes`` absence disables the
+schedule-aware tie-break in vehicle_dist_along() and falls back to raw,
+unconstrained nearest-point projection everywhere.
 
 The model predicts seconds_to_arrival directly per upcoming stop (multi-
 horizon), anchored at the vehicle's *projected position along the shape* —
@@ -189,6 +189,51 @@ def poly_project(shape_bytes: bytes, px: float, py: float) -> float:
             best = cum + t * seg_len
         cum += seg_len
     return best
+
+
+# Two points geographically within this of each other are treated as a tie
+# for poly_project_near — self-intersecting shapes revisit the same physical
+# spot exactly, but real GPS/segment-sampling jitter means "the same point"
+# rarely comes out at exactly 0.0 apart.
+_PROJECT_TIE_TOLERANCE_M = 30.0
+
+
+def poly_project_near(
+    shape_bytes: bytes, px: float, py: float, expected_dist: float | None,
+) -> float:
+    """Distance along the polyline to the point nearest (px, py) — except
+    when the shape revisits the same physical location (self-intersecting:
+    out-and-back routes, tram turnarounds), where multiple far-apart
+    distances-along-shape can tie for nearest. plain poly_project breaks
+    that tie arbitrarily (whichever segment is walked first); this instead
+    prefers whichever tied candidate sits closest to `expected_dist` — the
+    schedule-implied position (see _expected_dist_along) — since the two
+    occurrences of a self-intersection are rarely both schedule-plausible
+    at once. Falls back to plain nearest-point when expected_dist is None
+    (no usable schedule for this trip) or there's no tie to break.
+    """
+    n = len(shape_bytes) // 16
+    cum = 0.0
+    dists_alongs: list[tuple[float, float]] = []
+    nearest_dist_along = 0.0
+    min_d = math.inf
+    for i in range(n - 1):
+        ax, ay = struct.unpack_from("dd", shape_bytes, i * 16)
+        bx, by = struct.unpack_from("dd", shape_bytes, (i + 1) * 16)
+        seg_len = math.hypot(bx - ax, by - ay)
+        d, t = _seg_nearest(px, py, ax, ay, bx, by)
+        dist_along = cum + t * seg_len
+        dists_alongs.append((d, dist_along))
+        if d < min_d:
+            min_d = d
+            nearest_dist_along = dist_along
+        cum += seg_len
+
+    if expected_dist is None:
+        return nearest_dist_along
+
+    tied = [da for d, da in dists_alongs if d <= min_d + _PROJECT_TIE_TOLERANCE_M]
+    return min(tied, key=lambda da: abs(da - expected_dist))
 
 
 def _seg_bearing(ax, ay, bx, by) -> float:
@@ -494,40 +539,35 @@ _SPEED_MIN_GAP_SEC = 3.0
 _SPEED_MAX_GAP_SEC = 120.0
 _SPEED_MAX_BACKWARD_M = 30.0
 
-# Speed cap for the ambiguous-shape projection clamp below — mirrors
-# src/labeling.py's _MAX_VEHICLE_SPEED_MPS (144 km/h, generous on purpose:
-# this only needs to rule out impossible jumps, not track real speed).
-_MAX_VEHICLE_SPEED_MPS = 40.0
-
 
 def vehicle_dist_along(
-    trip_id: str, vx: float, vy: float, data: dict,
-    trackers: dict | None = None, vid: str | None = None, ts_sec: float | None = None,
+    trip_id: str, vx: float, vy: float, data: dict, now_sec: float | None = None,
 ) -> float:
     """Vehicle's projected distance (m) along the trip's shape.
 
     Self-intersecting shapes (out-and-back routes, tram turnarounds — see
     GTFSStatic.is_ambiguous_shape, exported as data["ambiguous_shapes"])
-    make raw nearest-point projection ambiguous: a snapshot can snap onto a
-    distant, wrong occurrence of the same physical road just because it's
-    geographically nearby, corrupting remaining-distance-to-stop and
-    everything downstream of it (route 122's chronic flat bias was this).
+    make raw nearest-point projection ambiguous: two far-apart points along
+    the shape can sit at the same physical location, so a snapshot can snap
+    onto the wrong one just because it's geographically nearby — corrupting
+    remaining-distance-to-stop and everything downstream (route 122's
+    chronic flat bias was this).
 
-    When trackers/vid/ts_sec are given and the shape is flagged ambiguous,
-    a raw projection that jumps beyond a plausible speed cap isn't decided
-    on the spot — mirroring src/labeling.py's _project_vehicle_positions,
-    which accepts a jump only if the *next* snapshot confirms it (stays past
-    the midpoint between old and new). Live serving is causal — there is no
-    next snapshot yet when this push is served — so the confirmation is
-    delayed by exactly one push instead of looked ahead: a first-seen jump
-    is held as "pending" and clamped conservatively this push; only once the
-    *following* push's raw position corroborates it does the anchor fast-
-    forward to the jump, rather than crawling there at the speed cap (which,
-    at this route's ~22 km self-intersection gap, would take ~9 minutes). An
-    unconfirmed pending jump is dropped and replaced by whatever raw value
-    caused the rejection, so a jump that keeps recurring across pushes still
-    confirms quickly, while an isolated bad projection self-corrects after
-    one push instead of poisoning every later push of the trip.
+    Earlier attempt: clamp a projection that jumps too far, confirming it
+    over one push before trusting it. That works for a GPS glitch, but not
+    for a real out-and-back trip — a vehicle genuinely re-approaching a
+    self-intersection mid-route also "jumps" and then "confirms" it on the
+    next push, since confirmation only checks consistency between pushes,
+    not correctness. Measured live: made route 122 worse (887s MAE), not
+    better. This version resolves the ambiguity at its source instead —
+    poly_project_near() picks whichever tied-nearest occurrence is closer to
+    where the schedule says the trip should be right now (_expected_dist_along,
+    the same signal infer_trip's progress term already uses to pick between
+    candidate trips, just applied here to pick between positions on one
+    shape). No per-vehicle state needed: unlike a jump clamp, this needs no
+    trajectory history and gets the very first snapshot of a trip right too.
+    ``now_sec`` missing, or no schedule for this trip, falls back to plain
+    nearest-point projection — same as an ordinary, non-ambiguous shape.
     """
     trip = data["trip_index"].get(trip_id)
     if trip is None:
@@ -536,48 +576,12 @@ def vehicle_dist_along(
     coords = data["shapes"].get(shape_id)
     if coords is None:
         return 0.0
-    raw = poly_project(coords, vx, vy)
 
-    if trackers is None or vid is None or ts_sec is None:
-        return raw
-    if shape_id not in data.get("ambiguous_shapes", ()):
-        return raw
+    if now_sec is None or shape_id not in data.get("ambiguous_shapes", ()):
+        return poly_project(coords, vx, vy)
 
-    state = trackers.setdefault(vid, {"status": "on_route", "off": 0, "on": 0})
-    clamp = state.get("clamp")
-    if clamp is None or clamp["trip_id"] != trip_id:
-        # New trip: no anchor to clamp against yet — same one-row exception
-        # src/labeling.py's own first-row case accepts unconstrained.
-        state["clamp"] = {
-            "trip_id": trip_id, "resolved_dist": raw, "resolved_ts": ts_sec,
-            "pending_dist": None, "pending_ts": None,
-        }
-        return raw
-
-    elapsed = max(ts_sec - clamp["resolved_ts"], 0.0)
-    max_forward = clamp["resolved_dist"] + _MAX_VEHICLE_SPEED_MPS * elapsed
-
-    if raw <= max_forward:
-        out = max(raw, clamp["resolved_dist"])
-        clamp["resolved_dist"], clamp["resolved_ts"] = out, ts_sec
-        clamp["pending_dist"] = clamp["pending_ts"] = None
-        return out
-
-    if clamp["pending_dist"] is not None:
-        midpoint = (clamp["resolved_dist"] + clamp["pending_dist"]) / 2
-        if raw >= midpoint:
-            # Confirmed by this push — fast-forward the anchor to the jump
-            # instead of crawling there at the speed cap.
-            clamp["resolved_dist"], clamp["resolved_ts"] = raw, ts_sec
-            clamp["pending_dist"] = clamp["pending_ts"] = None
-            return raw
-
-    # Unconfirmed (first sighting of this jump, or the previous pending
-    # jump wasn't corroborated): clamp conservatively and hold this push's
-    # raw value as the new pending candidate for the next push to judge.
-    out = max(min(raw, max_forward), clamp["resolved_dist"])
-    clamp["pending_dist"], clamp["pending_ts"] = raw, ts_sec
-    return out
+    expected = _expected_dist_along(trip_id, now_sec, data)
+    return poly_project_near(coords, vx, vy, expected)
 
 
 def progress_speed(trackers: dict, vid: str, trip_id: str, v_dist: float,
@@ -1169,9 +1173,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         if update_tracker(trackers, vid, min_dist, bearing_diff):
             continue
 
-        v_dist = vehicle_dist_along(
-            trip_id, vx, vy, gtfs_data, trackers, vid, float(feed_ts)
-        )
+        v_dist = vehicle_dist_along(trip_id, vx, vy, gtfs_data, now_sec)
         speed  = progress_speed(trackers, vid, trip_id, v_dist, float(feed_ts))
 
         feature_rows = build_features(trip_id, v_dist, speed, snap_ts, gtfs_data)

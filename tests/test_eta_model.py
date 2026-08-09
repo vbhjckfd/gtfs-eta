@@ -550,78 +550,68 @@ class TestScheduleProgressMatcher:
         assert tid == "late"
 
 
-class TestAmbiguousShapeClamp:
+class TestAmbiguousShapeProjection:
     """Self-intersecting shapes (out-and-back routes, tram turnarounds — e.g.
-    route 122) make raw nearest-point projection snap to a distant, wrong
-    occurrence of the same physical road. vehicle_dist_along() clamps an
-    implausible jump for one push, then either fast-forwards to it (if the
-    *next* push corroborates — a 1-push-delayed version of src/labeling.py's
-    next-snapshot lookahead) or discards it as a one-off glitch (#4)."""
+    route 122) revisit the same physical location at two far-apart
+    distances-along-shape, so raw nearest-point projection can tie between
+    them and pick either arbitrarily. vehicle_dist_along() resolves the tie
+    using the schedule-implied position instead (#4).
+
+    An earlier version clamped/confirmed jumps across pushes instead — that
+    breaks for a real out-and-back trip, where re-approaching the
+    intersection mid-route also looks like a "jump that gets confirmed".
+    Measured live: made route 122 worse. This is the source-level fix, no
+    per-vehicle state needed.
+    """
 
     def _data(self, ambiguous):
-        shape = _pack_shape([(0.0, 0.0), (2000.0, 0.0)])
+        # Out-and-back: (0,0)->(1000,0) is the outbound leg (dist_along
+        # 0-1000), a short hop up to (1000,1) (1000-1001), then the return
+        # leg (1000,1)->(0,1) (1001-2001). A vehicle near x=500 sits ~1m
+        # from BOTH legs — a real tie, not a rounding fluke. Two stops
+        # spanning the whole shape 1:1 with scheduled seconds, so
+        # _expected_dist_along(now_sec) == now_sec exactly — whichever leg
+        # now_sec numerically lands near is the schedule-implied occurrence.
+        shape = _pack_shape([(0.0, 0.0), (1000.0, 0.0), (1000.0, 1.0), (0.0, 1.0)])
         data = {
             "shapes": {"s": shape},
-            "trip_index": {"t": {"shape_id": "s"}},
+            "stop_distances": {("s", "origin"): 0.0, ("s", "terminus"): 2001.0},
+            "trip_index": {
+                "t": {
+                    "shape_id": "s",
+                    "start_sec": 0.0,
+                    "stop_times": [("origin", 1, 0.0), ("terminus", 2, 2001.0)],
+                },
+            },
         }
         if ambiguous:
             data["ambiguous_shapes"] = {"s"}
         return data
 
-    def test_first_sighting_is_unconstrained(self):
-        data = self._data(ambiguous=True)
-        trackers = {}  # no prior position for this vehicle yet
-        d = vehicle_dist_along("t", 1900.0, 0.0, data, trackers, "v1", 1005.0)
-        assert d == pytest.approx(1900.0, abs=1.0)
-
-    def test_ordinary_shape_is_unconstrained(self):
+    def test_ordinary_shape_ignores_schedule_hint(self):
         data = self._data(ambiguous=False)
-        trackers = {}
-        vehicle_dist_along("t", 100.0, 0.0, data, trackers, "v1", 1000.0)
-        # A later implausible jump still passes straight through — no
-        # ambiguous_shapes entry means no clamp is ever applied.
-        d = vehicle_dist_along("t", 1900.0, 0.0, data, trackers, "v1", 1005.0)
-        assert d == pytest.approx(1900.0, abs=1.0)
-
-    def test_plausible_forward_progress_passes_through(self):
-        data = self._data(ambiguous=True)
-        trackers = {}
-        vehicle_dist_along("t", 100.0, 0.0, data, trackers, "v1", 1000.0)
-        # 50s elapsed, moving 400m -> 8 m/s, well under the 40 m/s cap.
-        d = vehicle_dist_along("t", 500.0, 0.0, data, trackers, "v1", 1050.0)
+        # now_sec=1501 would favor the return leg if this shape were
+        # ambiguous — an ordinary shape ignores it: plain nearest point,
+        # ties broken by walk order, wins (the outbound leg, walked first).
+        d = vehicle_dist_along("t", 500.0, 0.5, data, now_sec=1501.0)
         assert d == pytest.approx(500.0, abs=1.0)
 
-    def test_first_jump_is_clamped_and_held_pending(self):
+    def test_no_schedule_hint_falls_back_to_plain_nearest(self):
         data = self._data(ambiguous=True)
-        trackers = {}
-        vehicle_dist_along("t", 100.0, 0.0, data, trackers, "v1", 1000.0)
-        # Raw position is far along the shape (x=1900), but only 5s elapsed
-        # since the last resolved point (dist=100) — 1800m in 5s is not a bus.
-        d = vehicle_dist_along("t", 1900.0, 0.0, data, trackers, "v1", 1005.0)
-        assert d == pytest.approx(100.0 + 40.0 * 5.0)  # capped at max_speed * elapsed
+        d = vehicle_dist_along("t", 500.0, 0.5, data, now_sec=None)
+        assert d == pytest.approx(500.0, abs=1.0)
 
-    def test_isolated_glitch_is_discarded_after_one_push(self):
+    def test_tie_breaks_toward_outbound_when_schedule_says_early(self):
         data = self._data(ambiguous=True)
-        trackers = {}
-        vehicle_dist_along("t", 100.0, 0.0, data, trackers, "v1", 1000.0)
-        vehicle_dist_along("t", 1900.0, 0.0, data, trackers, "v1", 1005.0)  # clamped, pending=1900
-        # Next push reverts near the original trajectory — doesn't
-        # corroborate the 1900 jump (nowhere near its midpoint with 100).
-        # The stale pending is dropped; this ordinary-speed value passes
-        # through and becomes the new anchor.
-        d = vehicle_dist_along("t", 150.0, 0.0, data, trackers, "v1", 1010.0)
-        assert d == pytest.approx(150.0, abs=1.0)
+        d = vehicle_dist_along("t", 500.0, 0.5, data, now_sec=500.0)
+        assert d == pytest.approx(500.0, abs=1.0)
 
-    def test_repeated_jump_confirms_and_fast_forwards(self):
+    def test_tie_breaks_toward_return_leg_when_schedule_says_late(self):
         data = self._data(ambiguous=True)
-        trackers = {}
-        vehicle_dist_along("t", 100.0, 0.0, data, trackers, "v1", 1000.0)
-        vehicle_dist_along("t", 1900.0, 0.0, data, trackers, "v1", 1005.0)  # clamped, pending=1900
-        # Next push stays near the jump (past the midpoint of 100 and
-        # 1900) — corroborates it. Fast-forward straight to it instead of
-        # crawling there at the 40 m/s cap over several more pushes.
-        d = vehicle_dist_along("t", 1950.0, 0.0, data, trackers, "v1", 1010.0)
-        assert d == pytest.approx(1950.0, abs=1.0)
+        # Same geometry, same vehicle position — only the schedule-implied
+        # time changes, and it alone flips which occurrence wins.
+        d = vehicle_dist_along("t", 500.0, 0.5, data, now_sec=1501.0)
+        assert d == pytest.approx(1501.0, abs=1.0)
 
 
 class TestIsotonicMonotonicity:
