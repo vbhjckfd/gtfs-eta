@@ -421,14 +421,23 @@ def test_our_vp_feed_bearing_present_on_all(our_vp_feed):
 def test_our_vp_feed_speed_in_realistic_range(our_vp_feed):
     """Non-zero speeds must be physically plausible for Lviv urban transit.
 
-    Lower bound: 0.5 m/s filters GPS noise from truly stationary vehicles.
+    This feed republishes position.speed from upstream verbatim, so the bounds
+    exist to catch *our* corrupting it, not to police the source.
+
+    Lower bound: upstream quantises speed to whole km/h, and its smallest
+    non-zero value is exactly 1 km/h = 0.2778 m/s — emitted for a couple of
+    vehicles at a time and perfectly healthy. The floor sits just under that
+    quantum, so it still catches a value mangled down into GPS noise without
+    failing on the source's own smallest legal reading.
+
     Upper bound: _SPEED_MAX_MPS catches unit errors (e.g. km/h reported as m/s
     would turn a 60 km/h tram into a 60 m/s ≈ 216 km/h rocket).
     """
+    _UPSTREAM_SPEED_QUANTUM_MPS = 1 / 3.6
     bad = []
     for eid, v in _vp_vehicles(our_vp_feed):
         s = v.position.speed
-        if 0 < s < 0.5 or s > _SPEED_MAX_MPS:
+        if 0 < s < _UPSTREAM_SPEED_QUANTUM_MPS - 0.01 or s > _SPEED_MAX_MPS:
             bad.append((eid, f"speed={s:.2f} m/s ({s * 3.6:.1f} km/h)"))
     assert not bad, f"implausible speed values: {bad[:10]}"
 
