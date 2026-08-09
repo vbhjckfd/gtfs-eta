@@ -147,12 +147,17 @@ class Reader {
 /**
  * Extract what /health needs from a serialized gtfs_realtime.FeedMessage:
  * the header timestamp, the entity count, and how many stop_time_updates
- * reference targetStopId.  Field numbers from gtfs-realtime.proto:
+ * predict an arrival at targetStopId.  Field numbers from gtfs-realtime.proto:
  *   FeedMessage:    header = 1, entity = 2 (repeated)
  *   FeedHeader:     timestamp = 3
  *   FeedEntity:     trip_update = 3
  *   TripUpdate:     stop_time_update = 2 (repeated)
- *   StopTimeUpdate: stop_id = 4
+ *   StopTimeUpdate: stop_id = 4, schedule_relationship = 5
+ *
+ * A stop_time_update with schedule_relationship = NO_DATA (2) is the sentinel
+ * that fences off the stops past our prediction horizon — the explicit absence
+ * of a prediction.  Counting one as an arrival would let /health report a
+ * healthy busiest stop on a feed that predicts nothing for it.
  */
 export function parseFeedStats(buf, targetStopId) {
   let timestamp = 0;
@@ -180,12 +185,17 @@ export function parseFeedStats(buf, targetStopId) {
             const [tField, tWire] = tripUpdate.key();
             if (tField === 2 && tWire === 2) {
               const stu = tripUpdate.sub();
+              let matches = false;
+              let noData = false;
               while (!stu.done()) {
                 const [sField, sWire] = stu.key();
                 if (sField === 4 && sWire === 2) {
-                  if (stu.string() === targetStopId) arrivals += 1;
+                  matches = stu.string() === targetStopId;
+                } else if (sField === 5 && sWire === 0) {
+                  noData = stu.varint() === 2; // NO_DATA
                 } else stu.skip(sWire);
               }
+              if (matches && !noData) arrivals += 1;
             } else tripUpdate.skip(tWire);
           }
         } else entity.skip(eWire);

@@ -91,9 +91,19 @@ def _progress(it, total: int, desc: str):
 def _parse_prediction_feed(data: bytes) -> list[dict]:
     """One row per stop_time_update in an archived TripUpdates feed.
 
-    stops_ahead is the 1-based position of the stop within the vehicle's
-    update list at that snapshot — a post-hoc proxy for the prediction horizon
-    in stops (the feed doesn't carry the vehicle's own stop_sequence).
+    stops_ahead is the 1-based position of the stop within the vehicle's update
+    list at that snapshot — the feed doesn't carry the vehicle's own
+    stop_sequence, so position is the only horizon signal available here. That
+    position is the *true* horizon only because the encoder now publishes every
+    predicted stop, clamping an already-elapsed arrival to "now" instead of
+    dropping it (src/inference.encode_trip_updates); while stops were dropped,
+    this silently measured horizon N-1 for what was served at horizon N, and
+    the per-horizon uncertainty/bias tables inherited the shift. Archives
+    written before that change still carry it, so a pooling window spanning it
+    is mildly mixed until the window rolls past.
+
+    Entries with no arrival — the trailing NO_DATA sentinel that fences off the
+    stops beyond the served horizon — are not predictions and are skipped.
     """
     feed = gtfs_realtime_pb2.FeedMessage()
     try:
@@ -111,6 +121,9 @@ def _parse_prediction_feed(data: bytes) -> list[dict]:
         trip_id = tu.trip.trip_id
         route_id = tu.trip.route_id or None
         for ahead, stu in enumerate(tu.stop_time_update, start=1):
+            if (stu.schedule_relationship
+                    == gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.NO_DATA):
+                continue
             if not stu.HasField("arrival"):
                 continue
             rows.append({

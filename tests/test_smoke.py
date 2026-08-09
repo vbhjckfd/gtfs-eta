@@ -22,6 +22,23 @@ _LVIV_TRIP_ID_RE = re.compile(r"^\d+_\d+_\d+$")
 
 # Worker caps upcoming stops per trip (src/predict.py: MAX_STOPS_AHEAD).
 MAX_STOPS_AHEAD = 10
+
+_NO_DATA = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.NO_DATA
+
+
+def _predictions(trip_update):
+    """The predicted stops of a trip update.
+
+    Excludes the trailing NO_DATA sentinel, which is not a prediction: it marks
+    the first stop past our horizon so a consumer stops propagating our last
+    stop's deviation down the rest of the trip (see
+    src/inference.encode_trip_updates). It carries a stop but deliberately no
+    arrival or departure.
+    """
+    return [
+        stu for stu in trip_update.stop_time_update
+        if stu.schedule_relationship != _NO_DATA
+    ]
 # Feed header timestamp must be fresh — upstream vehicle positions are
 # republished every few seconds; allow generous slack for clock skew / caching.
 MAX_FEED_AGE_SEC = 15 * 60
@@ -109,7 +126,7 @@ def test_entities_are_trip_updates(worker_feed):
 
 def test_stop_time_updates_well_formed(worker_feed):
     for e in worker_feed.entity:
-        stus = e.trip_update.stop_time_update
+        stus = _predictions(e.trip_update)
         assert len(stus) > 0, f"trip {e.trip_update.trip.trip_id} has no stops"
         assert len(stus) <= MAX_STOPS_AHEAD, (
             f"trip {e.trip_update.trip.trip_id} has {len(stus)} stops "
@@ -124,12 +141,59 @@ def test_stop_time_updates_well_formed(worker_feed):
             )
 
 
+def test_horizon_sentinel_is_well_formed(worker_feed):
+    """The NO_DATA fence, when present, is last, has a stop, and no times.
+
+    Its whole job is to stop a consumer extrapolating our 10th-stop deviation
+    across the rest of the trip; carrying a time of its own would defeat that.
+    """
+    seen = 0
+    for e in worker_feed.entity:
+        stus = list(e.trip_update.stop_time_update)
+        sentinels = [i for i, s in enumerate(stus) if s.schedule_relationship == _NO_DATA]
+        tid = e.trip_update.trip.trip_id
+        assert len(sentinels) <= 1, f"trip {tid} has {len(sentinels)} NO_DATA entries"
+        if not sentinels:
+            continue
+        seen += 1
+        i = sentinels[0]
+        assert i == len(stus) - 1, f"trip {tid} NO_DATA is not the last entry"
+        assert stus[i].stop_id, f"trip {tid} NO_DATA sentinel has no stop_id"
+        assert not stus[i].HasField("arrival"), (
+            f"trip {tid} NO_DATA sentinel carries an arrival time"
+        )
+        assert not stus[i].HasField("departure"), (
+            f"trip {tid} NO_DATA sentinel carries a departure time"
+        )
+    if seen == 0:
+        pytest.skip("no trip in this snapshot runs past the served horizon")
+
+
+def test_trip_updates_carry_a_prediction_timestamp(worker_feed):
+    """TripUpdate.timestamp dates the vehicle fix the prediction was made from.
+
+    The header timestamp is the publish time and is always fresh, so this is
+    the only field that tells a consumer how old the underlying position is.
+    """
+    missing = [
+        e.trip_update.trip.trip_id
+        for e in worker_feed.entity
+        if not e.trip_update.HasField("timestamp")
+    ]
+    assert not missing, f"trip updates without a timestamp: {missing[:5]}"
+    # Deliberately not asserting an upper bound on the fix age. When the whole
+    # fleet's clock drifts behind the feed header, staleness_reference slides
+    # the anchor to the newest fix and keeps serving — a documented healthy
+    # state in which every fix legitimately looks minutes old against the
+    # header. /health reports feed_skew_sec for exactly that case.
+
+
 def test_arrival_times_are_monotonic_and_future(worker_feed):
     feed_ts = worker_feed.header.timestamp
     for e in worker_feed.entity:
         tid = e.trip_update.trip.trip_id
         prev = None
-        for stu in e.trip_update.stop_time_update:
+        for stu in _predictions(e.trip_update):
             t = stu.arrival.time
             assert t >= feed_ts - 60, (
                 f"trip {tid} stop {stu.stop_id} arrival is in the past "
@@ -255,7 +319,9 @@ def test_stop_60_has_arrivals(worker_feed):
     arrivals = [
         (e.trip_update.trip.trip_id, stu)
         for e in worker_feed.entity
-        for stu in e.trip_update.stop_time_update
+        # The NO_DATA fence can land on this stop too; it is the opposite of an
+        # arrival prediction, so it must not satisfy this check.
+        for stu in _predictions(e.trip_update)
         if stu.stop_id == HEALTH_CHECK_STOP_ID
     ]
     assert arrivals, (

@@ -34,6 +34,10 @@ R2_BUCKET = os.environ.get("R2_BUCKET", "gtfs-lviv")
 GTFS_KEY = "worker/gtfs_worker_data.pkl"
 MODEL_KEY = "worker/eta_pipeline.pkl"
 
+# Measured stop-dwell sidecar (scripts/measure_dwell.py). Optional: without it
+# the served feed falls back to src/inference._DWELL_SECS.
+DWELL_PATH = MODEL_PATH.parent / "dwell.joblib"
+
 
 def _make_client():
     return boto3.client(
@@ -113,6 +117,10 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
             "route_id": info.route_id,
             "shape_id": info.shape_id,
             "service_id": info.service_id,
+            # Parsed from trips.txt all along but never exported, so the feed
+            # could not publish TripDescriptor.direction_id — leaving consumers
+            # to infer a trip's direction from its shape.
+            "direction_id": info.direction_id,
             "stop_times": stop_times,
             # Absolute scheduled start, as seconds since local midnight of the
             # service day (≥86400 for after-midnight trips).  The cumulative
@@ -130,6 +138,14 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
         sid: _struct.pack(f"{2 * len(pts)}d", *(v for xy in pts for v in xy))
         for sid, geom in gtfs._shapes.items()
         for pts in (list(geom.coords),)
+    }
+
+    # Axis-aligned bounds per shape, so trip matching can prove a shape cannot
+    # win before walking its polyline (src/inference.infer_trip). Four floats
+    # per shape against ~180 shapes — no meaningful size cost.
+    shape_bboxes = {
+        sid: tuple(float(v) for v in geom.bounds)   # (minx, miny, maxx, maxy)
+        for sid, geom in gtfs._shapes.items()
     }
 
     # Route+hour speed/dwell priors — converted to string keys for fast dict lookup.
@@ -150,7 +166,12 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
 
     data = {
         "shapes": shapes_coords,                          # shape_id → bytes (packed float64 pairs)
+        "shape_bboxes": shape_bboxes,                     # shape_id → (minx, miny, maxx, maxy)
         "shape_lengths": dict(gtfs._shape_lengths),       # shape_id → float metres
+        # stop_id → stop_name. Nothing in the serving path needs it, but every
+        # diagnostic that reports a stop currently prints a bare internal id and
+        # has to reload the whole static feed to name it.
+        "stop_names": {sid: s.stop_name for sid, s in gtfs._stops.items()},
         "stop_distances": dict(gtfs._stop_distances),     # (shape_id, stop_id) → float
         "trip_index": trip_index,
         "route_trips": dict(gtfs._route_trips),           # route_id → [trip_id, ...]
@@ -369,6 +390,28 @@ def main():
             tree_data["bias_by_horizon_weekend"] = merged
     except Exception as exc:  # noqa: BLE001 — calibration must never block an export
         print(f"  WARNING: live weekday/weekend bias calibration failed: {exc!r}")
+
+    # Measured per-route-type stop dwell (scripts/measure_dwell.py), published
+    # as the gap between StopTimeEvent arrival and departure. Static — it comes
+    # off the labelled history, not the live archive — so unlike the bands above
+    # there is nothing to recalibrate per export; it is simply carried when the
+    # sidecar exists. Absent, src/inference.py keeps the old flat 15 s.
+    if DWELL_PATH.exists():
+        dwell_table = joblib.load(DWELL_PATH)
+        tree_data["dwell_by_route_type"] = dwell_table
+        print(f"  Dwell by route_type: {dwell_table}")
+    else:
+        try:
+            existing = pickle.loads(
+                client.get_object(Bucket=R2_BUCKET, Key=MODEL_KEY)["Body"].read()
+            ).get("dwell_by_route_type")
+        except Exception:  # noqa: BLE001 — no existing object is fine
+            existing = None
+        if existing:
+            tree_data["dwell_by_route_type"] = existing
+            print(f"  {DWELL_PATH} not found — preserving dwell table live on R2")
+        else:
+            print(f"  {DWELL_PATH} not found — feed keeps the flat fallback dwell")
 
     model_bytes = pickle.dumps(tree_data, protocol=4)
     size_mb = len(model_bytes) / 1e6

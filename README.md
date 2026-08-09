@@ -6,7 +6,7 @@ ML-based GTFS-RT TripUpdates feed for Lviv public transport. Predicts per-stop a
 
 ```
 track.ua-gis.com/vehicle_position  (GTFS-RT)
-        │  every 60 s
+        │  ~11 s (median gap between archived snapshots)
         ▼
   Cloudflare R2 (Bronze)           raw/*.pb  — immutable protobuf snapshots
         │  run_pipeline.py
@@ -64,6 +64,7 @@ make pipeline            # process all days from R2 → training parquets (incre
 make pipeline-date DATE=2026-06-01   # single date
 make train               # build features + train model from data/training/
 make learn               # pipeline + train in one step
+make measure-dwell       # measure real per-route-type stop dwell → models/dwell.joblib
 make export              # serialise GTFS + model, upload to R2
 make deploy              # deploy Cloudflare Worker
 make release             # export + deploy in one step
@@ -133,7 +134,7 @@ Training examples are **snapshot-anchored**: every vehicle position snapshot yie
 
 **Algorithm**: `sklearn.ensemble.HistGradientBoostingRegressor` wrapped in a `Pipeline` with `OrdinalEncoder` for `route_id`. The full pipeline is saved to `models/eta_pipeline.joblib` — a single file contains everything needed for inference.
 
-**Features** (13 total):
+**Features** (16 total — 13 base + 3 prior-derived):
 
 | Feature | Description |
 |---|---|
@@ -147,6 +148,17 @@ Training examples are **snapshot-anchored**: every vehicle position snapshot yie
 | `progress_speed_mps` | Observed speed over the last snapshot interval (−1 when unknown) |
 | `stops_remaining` | Stops left after the target |
 | `trip_progress_frac` | Position along route [0, 1] |
+| `dist_per_stop_m` | `remaining_dist_m / stops_ahead` |
+| `speed_eta_warm` | `remaining_dist_m / effective_speed`, warm-started from the prior when speed is unknown |
+| `hist_speed_mps` | Route×hour historical median speed |
+| `hist_travel_time_est` | `stops_ahead ×` historical seconds-per-stop (dwell-aware) |
+
+The last three are computed by `apply_priors()` from a route×hour speed/dwell
+table built on the training split only, so they carry no test-set leakage. The
+feature vector is indexed **positionally** by the exported tree traversal, so
+`FEATURE_COLS` in [src/features.py](src/features.py), `build_features` in
+[src/inference.py](src/inference.py) and `_extract_trees` in
+[scripts/export_worker_data.py](scripts/export_worker_data.py) must stay in sync.
 
 **Baseline**: scheduled remaining time (`sched_remaining_sec`). The model is evaluated against this baseline and must beat it on the held-out test set (last 20% of days by date).
 
@@ -161,7 +173,37 @@ Per cycle (every ~10 s):
 4. Run the serialised GBT model.
 5. Encode a GTFS-RT TripUpdates protobuf and a cleaned VehiclePositions protobuf, and upload both to R2.
 
+A Lviv route averages 216 trips over just 2.5 distinct shapes, so trip matching
+memoises the polyline walk per shape, caches the schedule-progress lookup per
+push (every vehicle in a push shares one `now_sec`), and skips any shape whose
+bounding box already scores worse than the best full candidate. Together these
+cut a full inference pass from **4.0 s to 0.76 s** on the live fleet, with
+byte-identical output. The caches live on the loaded data dict, so they expire
+with the export they describe.
+
 Each `StopTimeUpdate` carries a `StopTimeEvent.uncertainty` (seconds) so a consumer can widen the arrival window for far-horizon stops instead of treating a 1-stop and a 10-stop ETA as equally certain. The bands are **calibrated from live serving error**: `make export` pools the per-stops-ahead MAE from the last 7 days of the quality archive (`quality/*.json`) — which runs ~2× the training-test split — and bakes the result into the model blob. The training-test MAE (`models/uncertainty.joblib`) is only a cold-start fallback for before any day has been scored.
+
+### What else each TripUpdate carries
+
+Every field below is optional in GTFS-RT, so a consumer that ignores them sees
+exactly the feed it saw before. Each is omitted rather than guessed when the
+underlying data is missing (an older export, a trip with no parseable schedule).
+
+| Field | Why |
+|---|---|
+| `TripUpdate.timestamp` | Age of the vehicle fix the prediction was computed from. The feed header is the *publish* time and is always fresh, so this is the only thing distinguishing a prediction made from a 2 s-old position from one made from a 170 s-old one (the staleness filter tolerates up to 180 s). |
+| `TripDescriptor.start_date` / `start_time` | Binds an update to a specific *run* of the trip. `trip_id` alone cannot: a loop route repeats through the day, and an after-midnight trip belongs to the previous service day. |
+| `TripDescriptor.direction_id` | Parsed from `trips.txt` all along, previously never exported — consumers had to infer direction from the shape. |
+| `TripUpdate.delay` | Deviation from the timetable, **tram and trolleybus only**. Lviv's bus timetable is unreliable enough that no schedule feature survived into the model at all, and measured live, bus delay spans roughly ±30 min at the 10th/90th percentile. Since consumers use `delay` to extrapolate stops that aren't listed, publishing that would mislead; the two electric modes are the same measured exception the terminus path already makes. |
+| Trailing `NO_DATA` `StopTimeUpdate` | Fences off the stops past the 10-stop horizon. Per the spec a consumer applies the last listed stop's deviation to every later stop of the trip — so without the fence, our 10th stop's error was being extrapolated across the whole remainder of the route. It carries a stop but deliberately no times. |
+| `StopTimeEvent.departure` | `arrival + dwell`, where dwell is **measured**, not assumed: 32 s for trams, 27 s for buses and trolleybuses, from 1.76 M stationary events over 14 days of labelled history (`make measure-dwell`). It was a flat 15 s guess before. |
+
+A prediction whose arrival has already elapsed is published as *arriving now*
+rather than dropped. Dropping it hid the one arrival a waiting rider most wants,
+and — because the horizon it served vanished from the emitted list — silently
+renumbered every later stop. The quality scorer reads the horizon from exactly
+that position, so serving and calibration had been keying their per-horizon
+uncertainty and bias tables off horizons that differed by one.
 
 The **cleaned VehiclePositions feed** (`feed/vehicle_positions.pb`) re-emits the upstream positions enriched with this project's corrected trip match (often better than the operator's reported `trip_id`), the next stop + `current_status` (STOPPED_AT / IN_TRANSIT_TO), and a `congestion_level` derived from observed-vs-historical speed. It is a by-product of the same inference pass, so it costs no extra geometry work.
 
@@ -213,6 +255,8 @@ Tests hit the live worker over the network and verify:
 - Feed parses as a valid `FeedMessage`, timestamp is fresh
 - All entities are `TripUpdate` with well-formed stop sequences
 - Arrival times are monotonically increasing and in the future
+- Every TripUpdate carries a prediction `timestamp`
+- The `NO_DATA` horizon fence, where present, is last, names a stop and carries no times
 - Trip ID format matches Lviv's `DIGITS_DIGIT_DIGIT` scheme
 - Stop codes are numeric (matching physical signage)
 - ≥50% vehicle coverage vs the upstream vehicle positions feed

@@ -1,6 +1,7 @@
 .PHONY: install pipeline pipeline-date train learn export deploy \
         sanity validate-off-route validate-horizon check-gtfs check-snapshots \
-        push-feed serve-feed smoke score route-mae review-quality diagnose help
+        push-feed serve-feed smoke score route-mae review-quality diagnose \
+        measure-dwell help
 
 # Days processed concurrently by `make pipeline` / `make learn`.
 # Each worker peaks at ~2 GB — keep ≤ 4-5 on a 16 GB machine.
@@ -29,6 +30,13 @@ train:
 
 ## Full learning cycle: regenerate training data (parallel) + train the model
 learn: pipeline train
+
+## Measure real per-route-type stop dwell from the labelled parquets.
+## Writes models/dwell.joblib, which `make export` bakes into the served feed
+## as the gap between each stop's arrival and departure. Static — rerun only
+## after a large batch of new training days.
+measure-dwell:
+	python scripts/measure_dwell.py --days 14 --out models/dwell.joblib
 
 ## Report held-out bias + MAE per stops_ahead (curve should stay flat, near zero)
 validate-horizon:

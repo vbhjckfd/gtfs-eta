@@ -1121,3 +1121,230 @@ class TestSkewedFeedInference:
         data = _compact_data(gtfs)
         now = datetime.now(timezone.utc)
         assert self._entities(data, self._vp(now, vehicle_age=5)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Trip-instance identity, horizon fencing, dwell and past-due clamping
+# ---------------------------------------------------------------------------
+
+def _encode_one(predictions, **extra):
+    """Encode a single trip update and return its parsed TripUpdate."""
+    from google.transit import gtfs_realtime_pb2
+    now = datetime.now(tz=timezone.utc)
+    updates = [{
+        "vehicle_id": "v1", "trip_id": TRIP_ID, "route_id": ROUTE_ID,
+        "snap_ts": now, "predictions": predictions, **extra,
+    }]
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(
+        encode_trip_updates(updates, int(now.timestamp()),
+                            extra.pop("_bands", None))
+    )
+    return feed
+
+
+class TestPastDueClamping:
+    """An already-elapsed prediction is published as 'arriving now', not dropped.
+
+    Dropping it removed the most useful arrival there is and renumbered every
+    later stop in the emitted list — which is the horizon the quality scorer
+    reads, so serving and calibration keyed off different horizons.
+    """
+
+    def test_elapsed_prediction_is_kept_and_clamped(self):
+        feed = _encode_one([
+            {"stop_id": "stop1", "stop_sequence": 2, "stops_ahead": 1, "seconds": -300.0},
+            {"stop_id": "stop2", "stop_sequence": 3, "stops_ahead": 2, "seconds": 400.0},
+        ])
+        stus = feed.entity[0].trip_update.stop_time_update
+        assert len(stus) == 2, "the elapsed stop must not vanish from the feed"
+        now = feed.header.timestamp
+        assert stus[0].arrival.time > now
+        assert stus[0].arrival.time <= now + 2, "elapsed arrival should read as 'now'"
+
+    def test_emitted_position_matches_true_horizon(self):
+        """With nothing dropped, list position *is* stops_ahead — which is what
+        src.scoring._parse_prediction_feed measures the horizon by."""
+        preds = [
+            {"stop_id": f"stop{i}", "stop_sequence": i + 1, "stops_ahead": i,
+             "seconds": -100.0 + 60.0 * i}
+            for i in range(1, 5)
+        ]
+        stus = _encode_one(preds).entity[0].trip_update.stop_time_update
+        assert len(stus) == len(preds)
+        for emitted_position, pred in enumerate(preds, start=1):
+            assert pred["stops_ahead"] == emitted_position
+
+
+class TestHorizonFence:
+    def test_no_data_sentinel_appended(self):
+        feed = _encode_one(
+            [{"stop_id": "stop1", "stop_sequence": 2, "stops_ahead": 1, "seconds": 100.0}],
+            horizon_end={"stop_id": "stop9", "stop_sequence": 9},
+        )
+        from google.transit import gtfs_realtime_pb2
+        stus = feed.entity[0].trip_update.stop_time_update
+        assert len(stus) == 2
+        fence = stus[-1]
+        assert (fence.schedule_relationship
+                == gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.NO_DATA)
+        assert fence.stop_id == "stop9" and fence.stop_sequence == 9
+        # A time on the fence would defeat its purpose.
+        assert not fence.HasField("arrival")
+        assert not fence.HasField("departure")
+
+    def test_absent_without_a_stop_past_the_horizon(self):
+        feed = _encode_one(
+            [{"stop_id": "stop1", "stop_sequence": 2, "stops_ahead": 1, "seconds": 100.0}]
+        )
+        assert len(feed.entity[0].trip_update.stop_time_update) == 1
+
+    def test_stop_after_horizon_is_the_eleventh_upcoming_stop(self, gtfs):
+        from src.inference import stop_after_horizon
+        data = _compact_data(gtfs)
+        # The fake route has only N_STOPS (5) stops — nothing past the horizon.
+        assert stop_after_horizon(TRIP_ID, 0.0, data) is None
+
+        # A trip long enough to overflow the cap fences at stop index 10 (0-based)
+        # of the stops still ahead.
+        n = MAX_STOPS_AHEAD + 4
+        data["trip_index"]["long"] = {
+            "route_id": ROUTE_ID, "shape_id": "L",
+            "stop_times": [(f"s{i}", i + 1, 60.0 * i) for i in range(n)],
+            "start_sec": None,
+        }
+        data["stop_distances"].update({("L", f"s{i}"): 100.0 * i for i in range(n)})
+        # s0 sits exactly at the vehicle, so the stops *ahead* are s1..s13 and
+        # the ten predicted ones are s1..s10 — the fence lands on s11, matching
+        # build_features' own `d_target <= v_dist` skip.
+        fence = stop_after_horizon("long", 0.0, data)
+        assert fence == {"stop_id": f"s{MAX_STOPS_AHEAD + 1}",
+                         "stop_sequence": MAX_STOPS_AHEAD + 2}
+        predicted = build_features("long", 0.0, 5.0,
+                                   datetime.now(timezone.utc), data)
+        assert [stop_id for _row, stop_id, _seq in predicted][-1] == f"s{MAX_STOPS_AHEAD}"
+
+
+class TestTripInstanceFields:
+    def test_encoder_publishes_instance_identity(self):
+        tu = _encode_one(
+            [{"stop_id": "stop1", "stop_sequence": 2, "stops_ahead": 1, "seconds": 100.0}],
+            start_date="20260809", start_time="07:15:00", direction_id=1,
+            trip_ts=1786000000, delay=-42,
+        ).entity[0].trip_update
+        assert tu.trip.start_date == "20260809"
+        assert tu.trip.start_time == "07:15:00"
+        assert tu.trip.direction_id == 1
+        assert tu.timestamp == 1786000000
+        assert tu.delay == -42
+
+    def test_fields_omitted_when_unknown(self):
+        """An export predating these keys must produce the old feed exactly."""
+        tu = _encode_one(
+            [{"stop_id": "stop1", "stop_sequence": 2, "stops_ahead": 1, "seconds": 100.0}]
+        ).entity[0].trip_update
+        assert not tu.trip.HasField("start_date")
+        assert not tu.trip.HasField("start_time")
+        assert not tu.trip.HasField("direction_id")
+        assert not tu.HasField("timestamp")
+        assert not tu.HasField("delay")
+
+    def test_context_resolves_the_service_day(self, gtfs):
+        from src.inference import trip_instance_context
+        data = _compact_data(gtfs, start_sec=7 * 3600.0)
+        snap = datetime(2026, 8, 9, 5, 30, tzinfo=timezone.utc)  # 08:30 Kyiv
+        start_date, start_time, sched = trip_instance_context(
+            TRIP_ID, snap, data, 8.5 * 3600, ZoneInfo("Europe/Kiev")
+        )
+        assert start_date == "20260809"
+        assert start_time == "07:00:00"
+        # 60 s per stop from a 07:00 local start.
+        assert sched[1] == pytest.approx(sched[2] - 60.0)
+
+    def test_context_is_empty_without_a_schedule(self, gtfs):
+        from src.inference import trip_instance_context
+        data = _compact_data(gtfs)  # start_sec is None
+        assert trip_instance_context(
+            TRIP_ID, datetime.now(timezone.utc), data, 0.0, timezone.utc
+        ) == (None, None, {})
+
+    def test_delay_only_for_modes_whose_timetable_holds(self):
+        from src.inference import publishes_delay
+        assert publishes_delay(0) is True     # tram
+        assert publishes_delay(11) is True    # trolleybus
+        assert publishes_delay(3) is False    # bus — Lviv timetable is noise
+        assert publishes_delay(None) is False
+
+
+class TestDwell:
+    def test_measured_table_beats_the_flat_fallback(self):
+        from src.inference import _DWELL_SECS, _dwell_for
+        table = {0: 32, 3: 27, "_global": 28}
+        assert _dwell_for(table, 0) == 32
+        assert _dwell_for(table, 3) == 27
+        assert _dwell_for(table, 11) == 28       # unmeasured type → global
+        assert _dwell_for(None, 0) == _DWELL_SECS  # older export → old behaviour
+
+    def test_encoder_uses_the_supplied_dwell(self):
+        stus = _encode_one(
+            [{"stop_id": "stop1", "stop_sequence": 2, "stops_ahead": 1, "seconds": 100.0}],
+            dwell=32,
+        ).entity[0].trip_update.stop_time_update
+        assert stus[0].departure.time - stus[0].arrival.time == 32
+
+
+class TestMatcherMemoisation:
+    """The per-push caches and the bbox prune are optimisations: they must not
+    move a single prediction."""
+
+    def _many_trips(self):
+        data = {
+            "shapes": {
+                "near": _pack_shape([(0.0, 0.0), (1000.0, 0.0)]),
+                "far":  _pack_shape([(0.0, 50000.0), (1000.0, 50000.0)]),
+            },
+            "shape_lengths": {"near": 1000.0, "far": 1000.0},
+            "stop_distances": {("near", "A"): 0.0, ("near", "B"): 1000.0,
+                               ("far", "A"): 0.0, ("far", "B"): 1000.0},
+            "trip_index": {}, "route_trips": {"R": []},
+        }
+        for i in range(20):
+            shape = "near" if i % 2 else "far"
+            tid = f"t{i}"
+            data["trip_index"][tid] = {
+                "route_id": "R", "shape_id": shape, "start_sec": float(i * 60),
+                "stop_times": [("A", 1, 0.0), ("B", 2, 600.0)],
+            }
+            data["route_trips"]["R"].append(tid)
+        return data
+
+    def test_bbox_prune_does_not_change_the_match(self):
+        import copy
+        plain = self._many_trips()
+        boxed = copy.deepcopy(plain)
+        boxed["shape_bboxes"] = {
+            "near": (0.0, 0.0, 1000.0, 0.0),
+            "far":  (0.0, 50000.0, 1000.0, 50000.0),
+        }
+        for now_sec in (None, 300.0, 1200.0):
+            assert infer_trip("R", None, 500.0, 0.0, 90.0, plain, now_sec=now_sec) == \
+                   infer_trip("R", None, 500.0, 0.0, 90.0, boxed, now_sec=now_sec)
+
+    def test_expected_dist_cache_matches_the_uncached_result(self):
+        from src.inference import _expected_dist_along
+        data = self._many_trips()
+        cache: dict = {}
+        for tid in data["trip_index"]:
+            uncached = _expected_dist_along(tid, 400.0, data)
+            assert _expected_dist_along(tid, 400.0, data, cache) == uncached
+            # Second hit comes from the cache and must agree with itself.
+            assert _expected_dist_along(tid, 400.0, data, cache) == uncached
+
+    def test_caches_do_not_leak_between_data_dicts(self):
+        """The memos live on the data dict, so two exports never mix."""
+        from src.inference import _trip_sched_arrays
+        a = self._many_trips()
+        b = self._many_trips()
+        b["trip_index"]["t1"]["start_sec"] = None
+        assert _trip_sched_arrays("t1", a) is not None
+        assert _trip_sched_arrays("t1", b) is None

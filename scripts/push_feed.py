@@ -7,9 +7,10 @@ iteration:
   2. Runs ETA inference (geometry + GBT tree traversal in native Python).
   3. Pushes the resulting TripUpdates protobuf to R2 as FEED_KEY.
 
-The Cloudflare Worker (worker/worker.py) simply reads that pre-computed blob
-from R2 and returns it — no inference CPU needed, so it fits in Cloudflare's
-free-plan 10 ms CPU budget.
+The feeds are served straight off the R2 public custom domain, which edge-caches
+them; the Cloudflare Worker (worker/worker.js) only redirects the legacy paths,
+answers /health and drives the cron — no inference CPU anywhere in the request
+path.
 
 Usage:
     python scripts/push_feed.py              # push once and exit
@@ -82,7 +83,7 @@ REQUEST_TIMEOUT = 20
 # This daemon is a single long-lived process (`python scripts/push_feed.py
 # --loop 10`), so a module-level cache lives for the whole run and is shared
 # across iterations — exactly what we want. (The Cloudflare Worker in
-# worker/worker.py can't rely on module state this way, since its isolates are
+# worker/worker.js can't rely on module state this way, since its isolates are
 # ephemeral — but it only reads a pre-computed blob from R2; the upstream fetch
 # that needs this fallback happens here, in the daemon.)
 STALE_MAX_AGE_MS = 3 * 60 * 1000

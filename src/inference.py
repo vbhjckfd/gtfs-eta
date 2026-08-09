@@ -40,7 +40,7 @@ from __future__ import annotations
 import math
 import struct
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from google.transit import gtfs_realtime_pb2
@@ -144,6 +144,11 @@ _TERMINUS_MODEL_UNCERTAINTY_SEC = 400
 _HALF_DAY_SEC = 12 * 3600
 _DAY_SEC      = 24 * 3600
 
+# Cache-miss sentinel. The memo dicts below cache values whose legitimate
+# result is often None ("this trip has no usable schedule"), so `is _MISS` is
+# the only way to tell a miss from a cached negative.
+_MISS = object()
+
 # Routes with confirmed trip-matching failures — excluded from training in
 # src/train.py and suppressed here so their bad predictions don't reach riders
 # or pollute the quality scorer.
@@ -234,6 +239,18 @@ def poly_project_near(
 
     tied = [da for d, da in dists_alongs if d <= min_d + _PROJECT_TIE_TOLERANCE_M]
     return min(tied, key=lambda da: abs(da - expected_dist))
+
+
+def bbox_min_distance(bbox, px: float, py: float) -> float:
+    """Lower bound on the distance from (px, py) to any point of *bbox*.
+
+    Zero inside the box. Never exceeds the true nearest-point distance, which
+    is what makes it usable to rule a shape out without walking it.
+    """
+    minx, miny, maxx, maxy = bbox
+    dx = minx - px if px < minx else (px - maxx if px > maxx else 0.0)
+    dy = miny - py if py < miny else (py - maxy if py > maxy else 0.0)
+    return math.hypot(dx, dy)
 
 
 def _seg_bearing(ax, ay, bx, by) -> float:
@@ -372,7 +389,44 @@ def _active_service_ids(gtfs_data: dict, day) -> frozenset[str] | None:
     return frozenset(active)
 
 
-def _expected_dist_along(trip_id: str, now_sec: float, data: dict) -> float | None:
+def _trip_sched_arrays(trip_id: str, data: dict):
+    """``(dists, times)`` for a trip's scheduled stops, or None when unusable.
+
+    ``dists`` is distance along the shape, ``times`` is local seconds since
+    midnight of the service day (>= 86400 for a trip running past midnight).
+    Both depend only on static export data, so the result is memoised — on the
+    *data dict itself* rather than a module global, so the cache lives and dies
+    with the export it describes and two different dicts (a test fixture, a
+    reloaded blob) can never see each other's entries.
+    """
+    cache = data.setdefault("_sched_arrays", {})
+    cached = cache.get(trip_id, _MISS)
+    if cached is not _MISS:
+        return cached
+
+    result = None
+    info = data["trip_index"].get(trip_id)
+    if info is not None and info.get("start_sec") is not None:
+        shape_id = info["shape_id"]
+        start_sec = info["start_sec"]
+        stop_distances = data["stop_distances"]
+        dists, times = [], []
+        for stop_id, _seq, cum_sec in info["stop_times"]:
+            d = stop_distances.get((shape_id, stop_id))
+            if d is None:
+                continue
+            dists.append(d)
+            times.append(start_sec + cum_sec)
+        if len(dists) >= 2:
+            result = (dists, times)
+
+    cache[trip_id] = result
+    return result
+
+
+def _expected_dist_along(
+    trip_id: str, now_sec: float, data: dict, cache: dict | None = None,
+) -> float | None:
     """Expected distance (m) along the shape at `now_sec` (local seconds
     since midnight of the service day — may exceed 86400 for a trip that
     runs past midnight), from scheduled stop times.
@@ -381,23 +435,30 @@ def _expected_dist_along(trip_id: str, now_sec: float, data: dict) -> float | No
     data format: trip_index[tid]["stop_times"] holds (stop_id, seq,
     sched_cum_sec) — seconds since the trip's own first stop — and
     "start_sec" anchors that to local midnight.
-    """
-    info = data["trip_index"].get(trip_id)
-    if info is None or info.get("start_sec") is None:
-        return None
-    shape_id = info["shape_id"]
-    start_sec = info["start_sec"]
-    stop_distances = data["stop_distances"]
 
-    dists, times = [], []
-    for stop_id, _seq, cum_sec in info["stop_times"]:
-        d = stop_distances.get((shape_id, stop_id))
-        if d is None:
-            continue
-        dists.append(d)
-        times.append(start_sec + cum_sec)
-    if len(dists) < 2:
+    ``cache`` memoises the answer by trip_id. Every vehicle in one inference
+    pass shares a single ``now_sec`` (run_inference computes it once for the
+    whole feed), so this returns an identical value for a given trip however
+    many vehicles are scored against it — without the cache, a route's
+    candidate trips are re-interpolated once per vehicle, hundreds of times
+    per push. The caller owns the dict's lifetime, which is what makes the
+    trip_id-only key safe: a new ``now_sec`` means a new cache.
+    """
+    arrays = _trip_sched_arrays(trip_id, data)
+    if cache is not None:
+        cached = cache.get(trip_id, _MISS)
+        if cached is not _MISS:
+            return cached
+    result = _interp_expected_dist(arrays, now_sec)
+    if cache is not None:
+        cache[trip_id] = result
+    return result
+
+
+def _interp_expected_dist(arrays, now_sec: float) -> float | None:
+    if arrays is None:
         return None
+    dists, times = arrays
 
     # An after-midnight trip (times[-1] >= a day) is still "now" during the
     # early-morning hours before its own start_sec — shift now_sec into the
@@ -419,7 +480,7 @@ def _expected_dist_along(trip_id: str, now_sec: float, data: dict) -> float | No
 
 def infer_trip(
     route_id, reported_trip_id, vx, vy, bearing, data,
-    active_service_ids=None, now_sec=None,
+    active_service_ids=None, now_sec=None, expected_cache=None,
 ):
     """Best (trip_id, spatial_dist, tangent_bearing) for a vehicle snapshot.
 
@@ -441,6 +502,8 @@ def infer_trip(
     matching prefers the trip whose scheduled position is actually close to
     the vehicle, not just whichever happens to score best on position and
     heading alone.
+
+    ``expected_cache`` is passed straight to _expected_dist_along — see there.
     """
     candidates = data["route_trips"].get(str(route_id), [])
     if active_service_ids is not None:
@@ -451,6 +514,20 @@ def infer_trip(
     if not candidates:
         return None, 9999.0, 0.0
 
+    # poly_match walks every point of a shape, and depends only on the shape and
+    # this one vehicle's position — but a Lviv route averages 216 trips over
+    # just 2.5 distinct shapes, so scoring candidates trip-by-trip re-walked the
+    # same polyline dozens of times per vehicle. Memoise it for this call.
+    shape_match: dict[str, tuple | None] = {}
+
+    def _match(shape_id):
+        cached = shape_match.get(shape_id, _MISS)
+        if cached is _MISS:
+            coords = data["shapes"].get(shape_id)
+            cached = poly_match(coords, vx, vy) if coords is not None else None
+            shape_match[shape_id] = cached
+        return cached
+
     # Fast path: trust the reported trip only if it is both near AND not headed
     # the wrong way down its shape.
     if reported_trip_id and reported_trip_id in data["trip_index"]:
@@ -459,27 +536,42 @@ def infer_trip(
             active_service_ids is None
             or reported_info.get("service_id") in active_service_ids
         )
-        coords = data["shapes"].get(reported_info["shape_id"]) if reported_active else None
-        if coords is not None:
-            d, tangent, _ = poly_match(coords, vx, vy)
+        match = _match(reported_info["shape_id"]) if reported_active else None
+        if match is not None:
+            d, tangent, _ = match
             if d < _REPORTED_DIST_OK and (
                 bearing is None
                 or _bearing_diff(bearing, tangent) <= _BEARING_WRONG_DEG
             ):
                 return reported_trip_id, d, tangent
 
+    # Bounding boxes let a shape be ruled out without walking it. The bearing
+    # and progress terms are each in [0, 1] and non-negative, so a shape whose
+    # *nearest possible* point already scores worse than the best full score so
+    # far cannot win, whatever its heading or schedule. Skipping it is therefore
+    # exact, not approximate — the chosen trip and its reported distance are
+    # unchanged. Absent from an older export, in which case nothing is pruned.
+    bboxes = data.get("shape_bboxes") or {}
+
     best_id, best_dist, best_tangent, best_score = None, math.inf, 0.0, math.inf
     for tid in candidates:
         trip = data["trip_index"].get(tid)
         if trip is None:
             continue
-        coords = data["shapes"].get(trip["shape_id"])
-        if coords is None:
+        shape_id = trip["shape_id"]
+        if shape_id not in shape_match:
+            bbox = bboxes.get(shape_id)
+            if bbox is not None and best_score < math.inf:
+                floor = _SPATIAL_W * min(bbox_min_distance(bbox, vx, vy) / _MATCH_DIST_CAP, 5.0)
+                if floor >= best_score:
+                    continue
+        match = _match(shape_id)
+        if match is None:
             continue
-        d, tangent, dist_along = poly_match(coords, vx, vy)
+        d, tangent, dist_along = match
 
         if now_sec is not None:
-            expected = _expected_dist_along(tid, now_sec, data)
+            expected = _expected_dist_along(tid, now_sec, data, expected_cache)
         else:
             expected = None
         if expected is not None:
@@ -542,6 +634,7 @@ _SPEED_MAX_BACKWARD_M = 30.0
 
 def vehicle_dist_along(
     trip_id: str, vx: float, vy: float, data: dict, now_sec: float | None = None,
+    expected_cache: dict | None = None,
 ) -> float:
     """Vehicle's projected distance (m) along the trip's shape.
 
@@ -580,7 +673,7 @@ def vehicle_dist_along(
     if now_sec is None or shape_id not in data.get("ambiguous_shapes", ()):
         return poly_project(coords, vx, vy)
 
-    expected = _expected_dist_along(trip_id, now_sec, data)
+    expected = _expected_dist_along(trip_id, now_sec, data, expected_cache)
     return poly_project_near(coords, vx, vy, expected)
 
 
@@ -629,6 +722,43 @@ def _sched_sec_at_dist(stop_dists: list, sched_cums: list, d: float) -> float:
     return sched_cums[-1]
 
 
+def _trip_stop_entries(trip_id: str, data: dict) -> list:
+    """A trip's stops as ``[(dist_along, stop_id, stop_sequence, orig_idx), ...]``,
+    sorted by distance along the shape.
+
+    Static per trip, so memoised on the data dict for the same reason (and with
+    the same lifetime) as _trip_sched_arrays — otherwise every vehicle re-sorts
+    its trip's stop list on every push.
+    """
+    cache = data.setdefault("_trip_entries", {})
+    entries = cache.get(trip_id)
+    if entries is None:
+        trip = data["trip_index"].get(trip_id)
+        if trip is None:
+            return []
+        sts = trip["stop_times"]  # [(stop_id, seq, sched_cum_sec), ...]
+        entries = sorted(
+            (data["stop_distances"].get((trip["shape_id"], st[0]), 0.0), st[0], st[1], i)
+            for i, st in enumerate(sts)
+        )
+        cache[trip_id] = entries
+    return entries
+
+
+def stop_after_horizon(trip_id: str, v_dist: float, data: dict) -> dict | None:
+    """The first upcoming stop this pass does *not* predict, or None.
+
+    ``None`` when the trip ends within MAX_STOPS_AHEAD — there is nothing past
+    the horizon to say anything about. See encode_trip_updates for why the
+    caller wants it.
+    """
+    ahead = [e for e in _trip_stop_entries(trip_id, data) if e[0] > v_dist]
+    if len(ahead) <= MAX_STOPS_AHEAD:
+        return None
+    _d, stop_id, stop_seq, _idx = ahead[MAX_STOPS_AHEAD]
+    return {"stop_id": stop_id, "stop_sequence": int(stop_seq)}
+
+
 def build_features(trip_id: str, v_dist: float, speed: float,
                    snap_ts: datetime, data: dict) -> list:
     """Returns [(feat_row, stop_id, stop_sequence), ...] for upcoming stops.
@@ -643,12 +773,8 @@ def build_features(trip_id: str, v_dist: float, speed: float,
     d = snap_ts.date()
     is_holiday = int((d.month, d.day) in _UA_HOLIDAYS)
 
-    sts = trip["stop_times"]  # [(stop_id, seq, sched_cum_sec), ...]
-    n_stops_total = len(sts)
-    entries = sorted(
-        (data["stop_distances"].get((trip["shape_id"], st[0]), 0.0), st[0], st[1], i)
-        for i, st in enumerate(sts)
-    )
+    n_stops_total = len(trip["stop_times"])
+    entries = _trip_stop_entries(trip_id, data)
 
     # Route+hour priors for warm-started ETA and dwell-aware estimate.
     route_id = trip["route_id"]
@@ -708,6 +834,55 @@ def _feed_tz(name: str | None):
 def _local_seconds_of_day(snap_ts: datetime, data: dict) -> float:
     local = snap_ts.astimezone(_feed_tz(data.get("feed_timezone")))
     return local.hour * 3600 + local.minute * 60 + local.second
+
+
+def trip_instance_context(trip_id: str, snap_ts: datetime, data: dict,
+                          now_sec: float, feed_tz, cache: dict | None = None):
+    """Instance identity and scheduled arrival epochs for one trip.
+
+    Returns ``(start_date, start_time, sched_epoch_by_seq)``: the GTFS-RT
+    TripDescriptor pair that binds an update to a specific *run* of the trip,
+    plus each stop's scheduled arrival as epoch seconds (for TripUpdate.delay).
+    ``(None, None, {})`` when the trip carries no parseable schedule — which is
+    also what an export predating ``start_sec`` looks like, so the fields simply
+    stay off the feed rather than being guessed.
+
+    Cached by trip_id, with the same one-push lifetime and for the same reason
+    as _expected_dist_along's cache.
+    """
+    if cache is not None:
+        hit = cache.get(trip_id, _MISS)
+        if hit is not _MISS:
+            return hit
+
+    result = (None, None, {})
+    trip = data["trip_index"].get(trip_id)
+    arrays = _trip_sched_arrays(trip_id, data)
+    if trip is not None and arrays is not None:
+        _dists, times = arrays
+        start_sec = float(trip["start_sec"])
+        service_date = snap_ts.astimezone(feed_tz).date()
+        # Same service-day-wrap rule as _interp_expected_dist: a trip whose
+        # schedule runs past midnight is still *yesterday's* run during the
+        # early-morning hours before its own scheduled start.
+        if times[-1] >= _DAY_SEC and now_sec < times[0] - _HALF_DAY_SEC:
+            service_date -= timedelta(days=1)
+        midnight = datetime.combine(service_date, dtime.min, tzinfo=feed_tz).timestamp()
+        hh, rem = divmod(int(start_sec), 3600)
+        mm, ss = divmod(rem, 60)
+        result = (
+            service_date.strftime("%Y%m%d"),
+            # GTFS start_time may legitimately exceed 24:00:00 for an
+            # after-midnight trip; it is left in that numbering, as in the
+            # static feed it came from.
+            f"{hh:02d}:{mm:02d}:{ss:02d}",
+            {int(seq): midnight + start_sec + cum
+             for _sid, seq, cum in trip["stop_times"]},
+        )
+
+    if cache is not None:
+        cache[trip_id] = result
+    return result
 
 
 def terminus_seconds_until_departure(trip_id: str, snap_ts: datetime,
@@ -805,6 +980,41 @@ def terminus_schedule_predictions(trip_id: str, snap_ts: datetime, data: dict,
 # Protobuf encoder
 # ---------------------------------------------------------------------------
 
+def _delay_for(predictions: list, snap_ts: datetime,
+               sched_epoch: dict) -> int | None:
+    """Schedule deviation in seconds at the nearest predicted stop, late positive.
+
+    ``None`` when there is nothing to compare against — no predictions, or a
+    trip with no parseable schedule — so the field is omitted rather than
+    reported as an on-time zero.
+    """
+    if not predictions or not sched_epoch:
+        return None
+    first = predictions[0]
+    sched = sched_epoch.get(int(first["stop_sequence"]))
+    if sched is None:
+        return None
+    return int(snap_ts.timestamp() + float(first["seconds"]) - sched)
+
+
+def publishes_delay(route_type) -> bool:
+    """Whether a trip-level delay is meaningful for this mode.
+
+    Delay is deviation from the published timetable, so it is only worth as
+    much as that timetable. Lviv's is unreliable enough that no schedule
+    feature survived into the model at all (src/features.py) — and measured on
+    the live feed, bus delay spans roughly ±30 min at the 10th/90th percentile,
+    which is noise dressed as a number. Consumers use TripUpdate.delay to
+    extrapolate stops we don't list, so publishing that would actively mislead.
+
+    The two electric modes are the same exception the terminus path already
+    makes, and for the same measured reason (see
+    _SCHEDULE_RELIABLE_ROUTE_TYPES): rail- and wire-bound vehicles do keep
+    their timetable. An unknown route_type is treated as unreliable.
+    """
+    return route_type in _SCHEDULE_RELIABLE_ROUTE_TYPES
+
+
 def _isotonic(values: list[float]) -> list[float]:
     """Least-squares non-decreasing fit (pool-adjacent-violators).
 
@@ -886,7 +1096,31 @@ def encode_trip_updates(
         tu.trip.schedule_relationship = gtfs_realtime_pb2.TripDescriptor.SCHEDULED
         if u.get("route_id"):
             tu.trip.route_id = u["route_id"]
+        # Trip-instance binding. trip_id alone does not say *which run* an update
+        # describes: a loop route repeats its trip through the day and an
+        # after-midnight trip belongs to the previous service day. Consumers that
+        # key their own state on (trip_id, start_date) had nothing to key on.
+        if u.get("start_date"):
+            tu.trip.start_date = u["start_date"]
+        if u.get("start_time"):
+            tu.trip.start_time = u["start_time"]
+        if u.get("direction_id") is not None:
+            tu.trip.direction_id = int(u["direction_id"])
         tu.vehicle.id = u["vehicle_id"]
+        # When these predictions were computed — i.e. how old the vehicle fix
+        # behind them is. The header timestamp is the *publish* time and is
+        # always fresh, so without this a prediction made from a 170 s-old
+        # position (the staleness filter tolerates up to
+        # STALE_VEHICLE_MAX_AGE_SEC) looked exactly as current as one made from
+        # a 2 s-old fix. The VehiclePositions feed has carried this per vehicle
+        # since it existed; TripUpdates simply never did.
+        if u.get("trip_ts"):
+            tu.timestamp = int(u["trip_ts"])
+        # Schedule deviation at the nearest predicted stop, positive = late.
+        # Still widely consumed at trip level (OTP and friends) as a summary of
+        # how the run is doing, which per-stop absolute times don't give directly.
+        if u.get("delay") is not None:
+            tu.delay = int(u["delay"])
         t0 = u["snap_ts"]
         stop_count = 0
         last_arr_ts = 0
@@ -897,15 +1131,23 @@ def encode_trip_updates(
             # Direct multi-horizon seconds from the snapshot; the final max only
             # repairs integer-rounding ties (the isotonic fit is already monotone).
             arr_ts = max(int(t0.timestamp() + sec), last_arr_ts)
+            # A stop whose predicted arrival has already elapsed is published as
+            # "arriving now" rather than dropped.  Dropping it removed the one
+            # arrival a waiting rider cares about most, and — because the
+            # horizon it served vanished from the emitted list — silently
+            # renumbered every later stop's position in the feed.  The quality
+            # scorer reads stops_ahead from exactly that position
+            # (src/scoring._parse_prediction_feed), so the per-horizon
+            # uncertainty and bias tables were being calibrated against
+            # horizon N-1 and then served at horizon N.
+            arr_ts = max(arr_ts, now_ts + 1)
             last_arr_ts = arr_ts
-            if arr_ts <= now_ts:
-                continue
             stu = tu.stop_time_update.add()
             stu.stop_id = pred["stop_id"]
             stu.stop_sequence = pred["stop_sequence"]
             stu.schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SCHEDULED
             stu.arrival.time = arr_ts
-            stu.departure.time = arr_ts + _DWELL_SECS
+            stu.departure.time = arr_ts + int(u.get("dwell") or _DWELL_SECS)
             # Publish the model's confidence so consumers can widen the window
             # for far-horizon stops. Keyed by the true horizon when carried,
             # else by emitted position (matches the scorer's stops_ahead proxy).
@@ -918,6 +1160,23 @@ def encode_trip_updates(
                 stu.arrival.uncertainty = unc
                 stu.departure.uncertainty = unc
             stop_count += 1
+
+        # Fence off the stops beyond our horizon.  GTFS-RT says a consumer
+        # applies the last StopTimeUpdate's deviation to every *later* stop of
+        # the trip that isn't listed — so with a MAX_STOPS_AHEAD cap, our 10th
+        # stop's error was being extrapolated across the entire remainder of the
+        # route by any spec-following consumer.  A single NO_DATA sentinel at
+        # the next stop ends the propagation and says plainly "no prediction
+        # past here".  Carries no arrival/departure, as the spec requires.
+        term = u.get("horizon_end")
+        if stop_count and term is not None:
+            stu = tu.stop_time_update.add()
+            stu.stop_id = term["stop_id"]
+            stu.stop_sequence = int(term["stop_sequence"])
+            stu.schedule_relationship = (
+                gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.NO_DATA
+            )
+
         if stop_count == 0:
             del feed.entity[-1]
     return feed.SerializeToString()
@@ -930,8 +1189,35 @@ _STOPPED_AT_RADIUS_M = 25.0
 # it the status is IN_TRANSIT_TO.
 _INCOMING_AT_RADIUS_M = 150.0
 
-# Typical stop dwell so departure ≠ arrival.  Fixed per-stop; no dwell model yet.
+# Fallback stop dwell, used only when the export carries no measured table.
+# The measured medians are 27-32 s (see _dwell_for), so this legacy 15 s is
+# kept purely so an older model blob behaves exactly as it did before.
 _DWELL_SECS = 15
+
+
+def _dwell_for(table: dict | None, route_type) -> int:
+    """Stop dwell in seconds for a route type.
+
+    *table* maps GTFS route_type to the measured median dwell, with a
+    ``_global`` catch-all (scripts/measure_dwell.py builds it; `make export`
+    bakes it into the model blob). A missing table means an export that
+    predates the measurement, and falls back to the old flat constant.
+
+    The measurement conditions on the vehicle actually having stopped — a
+    stationary run is what it detects — so this is the dwell at stops that are
+    served, not an average diluted by drive-throughs. That is the right
+    quantity for a published departure time: a stop the vehicle sails through
+    has arrival ≈ departure anyway, and overstating departure slightly is the
+    safe direction for someone deciding whether to run for it. Note also that
+    dwells shorter than one sampling gap (~11 s) are invisible to the detector,
+    so these medians are, if anything, mildly high.
+    """
+    if not table:
+        return _DWELL_SECS
+    value = table.get(route_type)
+    if value is None:
+        value = table.get("_global", _DWELL_SECS)
+    return int(value)
 
 
 def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
@@ -1089,6 +1375,12 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     local_ts = snap_ts.astimezone(feed_tz)
     now_sec = local_ts.hour * 3600 + local_ts.minute * 60 + local_ts.second
 
+    # Per-push memo dicts. Both cache values that are a pure function of a trip
+    # and this pass's single now_sec, so they are keyed by trip_id alone and
+    # must not outlive the push — see _expected_dist_along.
+    expected_cache: dict = {}
+    instance_cache: dict = {}
+
     # Per-horizon bias correction, weekday/weekend split when available (falls
     # back to the flat table, then to no correction — see _bias_correction_for).
     # UTC weekday, matching the is_weekend feature build_features computes below.
@@ -1098,6 +1390,10 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         bias_table = bias_weekend.get(bucket) or model_data.get("bias_by_horizon")
     else:
         bias_table = model_data.get("bias_by_horizon")
+
+    # Measured per-route-type stop dwell; absent on an older export, in which
+    # case _dwell_for falls back to the legacy flat constant.
+    dwell_table = model_data.get("dwell_by_route_type")
 
     # Judge per-vehicle staleness against the feed's own newest fix, not blindly
     # against the header — the two clocks can drift apart upstream.
@@ -1148,7 +1444,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         vx, vy = project_xy(lon, lat)
         trip_id, min_dist, tangent = infer_trip(
             route_id, reported_tid, vx, vy, bearing, gtfs_data,
-            active_service_ids, now_sec,
+            active_service_ids, now_sec, expected_cache,
         )
         if trip_id is None:
             continue
@@ -1173,7 +1469,9 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         if update_tracker(trackers, vid, min_dist, bearing_diff):
             continue
 
-        v_dist = vehicle_dist_along(trip_id, vx, vy, gtfs_data, now_sec)
+        v_dist = vehicle_dist_along(
+            trip_id, vx, vy, gtfs_data, now_sec, expected_cache
+        )
         speed  = progress_speed(trackers, vid, trip_id, v_dist, float(feed_ts))
 
         feature_rows = build_features(trip_id, v_dist, speed, snap_ts, gtfs_data)
@@ -1215,6 +1513,23 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         if not feature_rows:
             continue
 
+        # Trip-level fields shared by both prediction paths below. horizon_end
+        # is the first stop we deliberately say nothing about; trip_ts is the
+        # age of the fix these numbers rest on (see encode_trip_updates).
+        start_date, start_time, sched_epoch = trip_instance_context(
+            trip_id, snap_ts, gtfs_data, now_sec, feed_tz, instance_cache
+        )
+        route_type = gtfs_data.get("route_types", {}).get(route_id)
+        instance_fields = {
+            "start_date":   start_date,
+            "start_time":   start_time,
+            "direction_id": gtfs_data["trip_index"][trip_id].get("direction_id"),
+            "horizon_end":  stop_after_horizon(trip_id, v_dist, gtfs_data),
+            "trip_ts":      vehicle_ts if vehicle_ts is not None else feed_ts,
+            "dwell":        _dwell_for(dwell_table, route_type),
+        }
+        delay_ok = publishes_delay(route_type)
+
         # Idling at the origin pre-departure.  A tram or trolleybus standing at
         # its terminus leaves on the timetable, so serve the schedule.  A bus
         # falls through to the model below — its timetable says nothing, and no
@@ -1238,24 +1553,29 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                     # Not model output — the per-horizon model bands don't
                     # describe these, so carry their own.
                     "uncertainty": _TERMINUS_UNCERTAINTY_SEC,
+                    "delay": _delay_for(sched_preds, snap_ts, sched_epoch) if delay_ok else None,
+                    **instance_fields,
                 })
                 continue
             terminus_unc = _TERMINUS_MODEL_UNCERTAINTY_SEC
 
         preds_sec = predict_rows(model_data, [r[0] for r in feature_rows])
+        model_preds = [
+            {"stop_id": r[1], "stop_sequence": int(r[2]),
+             "stops_ahead": int(r[0][2]),
+             "seconds": float(sec) - _bias_correction_for(bias_table, int(r[0][2]))}
+            for r, sec in zip(feature_rows, preds_sec)
+        ]
         updates.append({
             "vehicle_id": vid,
             "trip_id":    trip_id,
             "route_id":   route_id,
             "snap_ts":    snap_ts,
-            "predictions": [
-                {"stop_id": r[1], "stop_sequence": int(r[2]),
-                 "stops_ahead": int(r[0][2]),
-                 "seconds": float(sec) - _bias_correction_for(bias_table, int(r[0][2]))}
-                for r, sec in zip(feature_rows, preds_sec)
-            ],
+            "predictions": model_preds,
             # None for a moving vehicle → the per-horizon model bands apply.
             "uncertainty": terminus_unc,
+            "delay": _delay_for(model_preds, snap_ts, sched_epoch) if delay_ok else None,
+            **instance_fields,
         })
 
     if stats is not None:
