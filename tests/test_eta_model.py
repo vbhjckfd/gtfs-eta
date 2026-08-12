@@ -332,6 +332,37 @@ class TestCompactInference:
         # Excessive gap → unknown
         assert progress_speed(trackers, "v1", "other", 500.0, 2000.0) == SPEED_UNKNOWN
 
+    def test_stationary_seconds_accumulates_and_resets(self):
+        from src.inference import stationary_seconds
+
+        trackers: dict = {}
+        # First sighting has no history — "moving" is the neutral answer.
+        assert stationary_seconds(trackers, "v1", TRIP_ID, 100.0, 1000.0) == 0.0
+        # Parked: jitter below _MOVE_EPS_M must not reset the anchor, so the
+        # count keeps growing across pushes instead of restarting each time.
+        assert stationary_seconds(trackers, "v1", TRIP_ID, 105.0, 1060.0) == 60.0
+        assert stationary_seconds(trackers, "v1", TRIP_ID, 118.0, 1300.0) == 300.0
+        # A real advance re-anchors.
+        assert stationary_seconds(trackers, "v1", TRIP_ID, 400.0, 1330.0) == 0.0
+        assert stationary_seconds(trackers, "v1", TRIP_ID, 402.0, 1390.0) == 60.0
+        # Trip change re-anchors too — layover time is per trip, not per vehicle.
+        assert stationary_seconds(trackers, "v1", "other", 402.0, 1400.0) == 0.0
+
+    def test_stationary_seconds_matches_batch_labeling(self):
+        """Live and batch must agree — they are hand-synced (see #2)."""
+        from src.inference import stationary_seconds
+        from src.labeling import _stationary_seconds
+
+        dists = np.array([0.0, 5.0, 12.0, 300.0, 305.0, 310.0, 900.0])
+        times = np.array([0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0])
+
+        trackers: dict = {}
+        live = [
+            stationary_seconds(trackers, "v1", TRIP_ID, float(d), float(t))
+            for d, t in zip(dists, times)
+        ]
+        np.testing.assert_allclose(live, _stationary_seconds(dists, times))
+
     def test_encode_trip_updates_direct_and_monotonic(self):
         now = datetime.now(tz=timezone.utc)
         updates = [{
@@ -402,6 +433,9 @@ class TestTreeExportParity:
             "speed_eta_warm": remaining_dist / np.maximum(eff_speed, 0.1),
             "hist_speed_mps": hist_speed,
             "hist_travel_time_est": stops_ahead * hist_tps,
+            # Mostly moving, with a stopped minority — the real shape of this
+            # feature, so the traversal is exercised on both sides of its splits.
+            "stationary_sec": np.where(rng.random(n) < 0.1, rng.uniform(0, 2400, n), 0.0),
         })
         y = (df["remaining_dist_m"] / 6.0 + rng.normal(0, 10, n)).clip(0)
 

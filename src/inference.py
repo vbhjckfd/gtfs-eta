@@ -630,6 +630,7 @@ SPEED_UNKNOWN = -1.0
 _SPEED_MIN_GAP_SEC = 3.0
 _SPEED_MAX_GAP_SEC = 120.0
 _SPEED_MAX_BACKWARD_M = 30.0
+_MOVE_EPS_M = 25.0  # below this a vehicle has not advanced — jitter, not progress
 
 
 def vehicle_dist_along(
@@ -705,6 +706,34 @@ def progress_speed(trackers: dict, vid: str, trip_id: str, v_dist: float,
     return speed
 
 
+def stationary_seconds(trackers: dict, vid: str, trip_id: str, v_dist: float,
+                       ts_sec: float) -> float:
+    """Seconds since this vehicle last advanced more than ``_MOVE_EPS_M``.
+
+    The live counterpart of ``labeling._stationary_seconds`` (feature index 16).
+    ``progress_speed`` already reports ~0 for a stopped vehicle, but says nothing
+    about *how long* it has been stopped — and a bus 20 minutes into a terminus
+    layover reaches its next stop nothing like a bus paused at a light.
+
+    Anchored state, so a vehicle that never moves keeps accumulating rather than
+    resetting each push. Returns 0.0 ("moving") on a first sighting or a trip
+    change — the neutral value, matching what a moving vehicle reports.
+
+    The anchor has to outlive the process: the daemon is restarted by every cron
+    tick, which would otherwise cap this at the ~5.5 min a single run lasts even
+    though training measures it over whole-day trajectories. push_feed carries
+    the anchors across runs through R2 (see its TRACKER_STATE_KEY); if that
+    carryover is unavailable the daemon simply starts cold, costing accuracy on
+    stopped vehicles rather than producing a wrong value.
+    """
+    state = trackers.setdefault(vid, {"status": "on_route", "off": 0, "on": 0})
+    anchor = state.get("still")
+    if anchor is None or anchor[2] != trip_id or v_dist - anchor[1] > _MOVE_EPS_M:
+        state["still"] = (ts_sec, v_dist, trip_id)
+        return 0.0
+    return max(0.0, ts_sec - anchor[0])
+
+
 def _sched_sec_at_dist(stop_dists: list, sched_cums: list, d: float) -> float:
     """Interpolated cumulative scheduled seconds at shape distance *d*.
     stop_dists/sched_cums are parallel lists sorted by distance."""
@@ -760,7 +789,7 @@ def stop_after_horizon(trip_id: str, v_dist: float, data: dict) -> dict | None:
 
 
 def build_features(trip_id: str, v_dist: float, speed: float,
-                   snap_ts: datetime, data: dict) -> list:
+                   snap_ts: datetime, data: dict, stationary_sec: float = 0.0) -> list:
     """Returns [(feat_row, stop_id, stop_sequence), ...] for upcoming stops.
 
     Feature order must match FEATURE_COLS in src/features.py (the exported
@@ -804,6 +833,7 @@ def build_features(trip_id: str, v_dist: float, speed: float,
             rem_dist / max(eff_speed, 0.1),              # idx 13 speed_eta_warm
             hist_speed,                                  # idx 14 hist_speed_mps
             stops_ahead * hist_tps,                      # idx 15 hist_travel_time_est
+            stationary_sec,                              # idx 16 stationary_sec
         ]
         result.append((feat_row, stop_id, stop_seq))
     return result
@@ -1473,8 +1503,11 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             trip_id, vx, vy, gtfs_data, now_sec, expected_cache
         )
         speed  = progress_speed(trackers, vid, trip_id, v_dist, float(feed_ts))
+        still  = stationary_seconds(trackers, vid, trip_id, v_dist, float(feed_ts))
 
-        feature_rows = build_features(trip_id, v_dist, speed, snap_ts, gtfs_data)
+        feature_rows = build_features(
+            trip_id, v_dist, speed, snap_ts, gtfs_data, still
+        )
 
         # Cleaned vehicle position: emitted for every on-route matched vehicle,
         # including ones whose ETAs we withhold below — the position itself is

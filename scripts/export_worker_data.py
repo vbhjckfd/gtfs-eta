@@ -229,6 +229,7 @@ def _extract_trees(pipeline) -> dict:
       13 speed_eta_warm       (remaining_dist / effective_speed, warm-started)
       14 hist_speed_mps       (route+hour historical median speed)
       15 hist_travel_time_est (stops_ahead * hist seconds-per-stop, dwell-aware)
+      16 stationary_sec       (seconds since the vehicle last advanced >25 m)
     """
     prep = pipeline.named_steps["prep"]
     model = pipeline.named_steps["model"]

@@ -105,6 +105,28 @@ _vp_cache: dict | None = None
 # protobuf just to read the header timestamp.
 STATUS_KEY = os.environ.get("STATUS_KEY", "feed/status.json")
 
+# Per-vehicle "stopped since" anchors, carried across daemon runs.
+#
+# This process is started fresh by every push-feed cron tick (`--loop 10
+# --count 33`, ~5.5 min) so its in-memory trackers die with it. That is fine for
+# progress_speed, which only looks one push back, but not for stationary_sec:
+# training measures it over a whole day's trajectory (values reach ~4 h), and a
+# tracker that resets every 5.5 min could never report more than ~330 s. The
+# model would then see a feature range at serving time that it never saw while
+# training — precisely on the stopped vehicles the feature exists to catch.
+#
+# Only the anchors travel, not the whole tracker state: the off-route counters
+# are a debounce over consecutive pushes and are meant to restart cold. Anchors
+# are absolute timestamps, so a stale one stays correct — a vehicle that really
+# has not moved keeps accumulating, and one that moved during a gap clears the
+# anchor on its next push (see inference.stationary_seconds).
+TRACKER_STATE_KEY = os.environ.get("TRACKER_STATE_KEY", "feed/tracker_state.json")
+
+# Drop anchors older than this on load: past it the vehicle is far more likely
+# to have finished its day than to still be sitting at the same stop, and a
+# resurrected anchor would report a bogus multi-hour dwell.
+TRACKER_STATE_MAX_AGE_SEC = 6 * 3600
+
 # Publishing a collapsed feed is worse than publishing nothing: consumers filter
 # out arrivals already in the past, so an empty feed empties every stop at once,
 # while the previous blob keeps working for the couple of minutes its
@@ -288,6 +310,55 @@ def _put_status(client, payload: dict) -> None:
         print(f"[warn] status.json write failed: {exc!r}", flush=True)
 
 
+def _load_tracker_state(client) -> dict:
+    """Seed trackers with the previous run's stationary anchors.
+
+    Never raises: a missing, unreadable or malformed object just means the
+    daemon starts cold, which is the pre-existing behaviour (stationary_sec
+    then reads 0 — "moving" — until each vehicle is seen twice).
+    """
+    try:
+        raw = client.get_object(Bucket=R2_BUCKET, Key=TRACKER_STATE_KEY)["Body"].read()
+        stored = json.loads(raw)
+    except Exception as exc:  # noqa: BLE001 — cold start is an acceptable outcome
+        print(f"[warn] no tracker state carried over: {exc!r}", flush=True)
+        return {}
+
+    now = time.time()
+    trackers: dict = {}
+    for vid, entry in (stored.get("still") or {}).items():
+        try:
+            ts, dist, trip_id = float(entry[0]), float(entry[1]), str(entry[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if now - ts > TRACKER_STATE_MAX_AGE_SEC:
+            continue
+        trackers[vid] = {"status": "on_route", "off": 0, "on": 0,
+                         "still": (ts, dist, trip_id)}
+    print(f"[info] carried over {len(trackers)} stationary anchors", flush=True)
+    return trackers
+
+
+def _save_tracker_state(client, trackers: dict) -> None:
+    """Persist stationary anchors for the next run. Never raises — losing them
+    costs accuracy on stopped vehicles, not the feed."""
+    try:
+        still = {
+            vid: [state["still"][0], state["still"][1], state["still"][2]]
+            for vid, state in trackers.items()
+            if isinstance(state.get("still"), tuple)
+        }
+        client.put_object(
+            Bucket=R2_BUCKET,
+            Key=TRACKER_STATE_KEY,
+            Body=json.dumps({"still": still}).encode(),
+            ContentType="application/json",
+            CacheControl="no-store",
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] could not persist tracker state: {exc!r}", flush=True)
+
+
 def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> None:
     global _last_published_entities
 
@@ -386,7 +457,7 @@ def main() -> None:
 
     client = _make_client()
     gtfs_data, model_data = _load_resources(client)
-    trackers: dict = {}
+    trackers: dict = _load_tracker_state(client)
 
     if args.loop:
         n = 0
@@ -402,6 +473,11 @@ def main() -> None:
                 sentry_sdk.capture_exception(exc)
                 print(f"[error] push iteration failed: {exc!r}", flush=True)
             n += 1
+            # Checkpoint periodically as well as at exit: this job is killed
+            # outright if it overruns its timeout, and anchors lost that way
+            # would restart every stopped vehicle's dwell clock at zero.
+            if n % 10 == 0:
+                _save_tracker_state(client, trackers)
             if args.count and n >= args.count:
                 break
             # Drift-free cadence: the interval covers fetch+inference+upload,
@@ -409,6 +485,7 @@ def main() -> None:
             # 5-minute cron window).
             elapsed = time.monotonic() - iter_start
             time.sleep(max(0.0, args.loop - elapsed))
+        _save_tracker_state(client, trackers)
     else:
         # One-shot mode: report, then re-raise so the exit code reflects failure.
         try:
@@ -416,6 +493,7 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             sentry_sdk.capture_exception(exc)
             raise
+        _save_tracker_state(client, trackers)
 
 
 if __name__ == "__main__":

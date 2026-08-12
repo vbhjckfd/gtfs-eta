@@ -287,6 +287,32 @@ def _progress_speeds(dists: np.ndarray, times_sec: np.ndarray) -> np.ndarray:
     return speeds
 
 
+# A vehicle has not really advanced until it clears this much shape distance —
+# below it, consecutive projections are GPS jitter, not progress.
+_MOVE_EPS_M = 25.0
+
+
+def _stationary_seconds(dists: np.ndarray, times_sec: np.ndarray) -> np.ndarray:
+    """Seconds since the vehicle last advanced more than ``_MOVE_EPS_M``.
+
+    Distinct from ``progress_speed_mps``, which only says the vehicle is not
+    moving *right now*: a bus 20 minutes into a terminus layover and a bus
+    paused at a red light both read ~0 m/s, but they are hours apart in when
+    they next reach a stop. Measured on 2026-08-10, rows with this above 300s
+    are 4.2% of the day and carry 12% of its MAE mass — the single largest
+    identified error concentration, and the tail is flat across stops_ahead
+    (4.4% of even next-stop predictions land >600s out), which is the signature
+    of vehicle state rather than of a modelling error.
+    """
+    out = np.zeros(len(dists), dtype=float)
+    anchor = 0
+    for i in range(1, len(dists)):
+        if dists[i] - dists[anchor] > _MOVE_EPS_M:
+            anchor = i
+        out[i] = times_sec[i] - times_sec[anchor]
+    return out
+
+
 def training_rows_for_trajectory(
     vehicle_id: str,
     trip_id: str,
@@ -359,6 +385,7 @@ def training_rows_for_trajectory(
     times = traj["timestamp"].to_numpy()
     times_sec = np.array([pd.Timestamp(t).timestamp() for t in times])
     speeds = _progress_speeds(dists, times_sec)
+    stationary = _stationary_seconds(dists, times_sec)
     arr_dists = np.array([a[2] for a in arrived])
 
     rows = []
@@ -385,6 +412,7 @@ def training_rows_for_trajectory(
                 "snapshot_ts": datetime.fromtimestamp(t_vehicle, tz=timezone.utc),
                 "dist_along_m": d_vehicle,
                 "progress_speed_mps": speeds[i],
+                "stationary_sec": stationary[i],
                 "stop_id": stop_id,
                 "stop_sequence": stop_seq,
                 "stop_dist_along_m": stop_dist,

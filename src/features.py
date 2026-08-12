@@ -148,6 +148,13 @@ def compute_features_for_training(
         rem_dist = np.maximum(0.0, d_target - d_vehicle)
         stops_ahead_safe = np.maximum(1, stops_ahead_arr)
         speed = grp["progress_speed_mps"].to_numpy(dtype=float)
+        # Absent on training parquets built before stationary_sec was labelled —
+        # 0.0 reads as "moving", the same value a healthy vehicle gets.
+        stationary = (
+            grp["stationary_sec"].to_numpy(dtype=float)
+            if "stationary_sec" in grp.columns
+            else np.zeros(len(grp), dtype=float)
+        )
 
         pieces.append(pd.DataFrame({
             "route_id": trip.route_id,
@@ -163,6 +170,7 @@ def compute_features_for_training(
             "stops_remaining": grp["stops_remaining"].astype(int).to_numpy(),
             "trip_progress_frac": d_target / shape_len,
             "dist_per_stop_m": rem_dist / stops_ahead_safe,
+            "stationary_sec": stationary,
             # Reference-only columns (not model features):
             "sched_remaining_sec": sched_rem,
             "date": grp["date"].to_numpy(),
@@ -182,6 +190,7 @@ def compute_features_for_inference(
     gtfs: GTFSStatic,
     max_stops_ahead: int = 10,
     priors: dict | None = None,
+    stationary_sec: float = 0.0,
 ) -> pd.DataFrame:
     """One feature row per upcoming stop for live inference."""
     trip = gtfs.get_trip(trip_id)
@@ -223,6 +232,7 @@ def compute_features_for_inference(
             "stops_remaining": n_stops_total - 1 - seq_to_index.get(stop_seq, 0),
             "trip_progress_frac": d_target / shape_len,
             "dist_per_stop_m": rem_dist / max(1, stops_ahead),
+            "stationary_sec": stationary_sec,
             # Reference-only: schedule interpolation kept for sanity checks.
             "sched_remaining_sec": sched_rem,
         })
@@ -311,6 +321,16 @@ PRIOR_FEATURE_COLS = [
     "hist_travel_time_est",  # 15  stops_ahead * hist seconds-per-stop (dwell-aware)
 ]
 
-FEATURE_COLS = BASE_FEATURE_COLS + PRIOR_FEATURE_COLS
+# Per-vehicle live state, appended last so every index above stays put (the
+# exported trees index features positionally — see build_features in inference).
+# progress_speed_mps already says "not moving right now"; stationary_sec says
+# "and it has been that way for 20 minutes", which is a different prediction.
+# Measured on 2026-08-10: rows with stationary_sec > 300 are 4.2% of the day but
+# carry 12% of its MAE mass (MAE 378-657s against a 149s baseline).
+STATE_FEATURE_COLS = [
+    "stationary_sec",        # 16  seconds since the vehicle last advanced
+]
+
+FEATURE_COLS = BASE_FEATURE_COLS + PRIOR_FEATURE_COLS + STATE_FEATURE_COLS
 
 TARGET_COL = "seconds_to_arrival"
