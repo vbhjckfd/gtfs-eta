@@ -152,11 +152,20 @@ def _build_pipeline() -> Pipeline:
         ],
         remainder="drop",
     )
+    # Sized by a held-out sweep (2026-08-12, 2.46M train / 428k test rows), all
+    # arms on the same split and feature set:
+    #    500 x  63  142.2s   <- previous setting, stopped at the cap
+    #   1200 x  63  137.0s
+    #   1200 x 127  133.3s   <- here
+    #   2500 x 127  133.1s   (2.5x the fit time for 0.2s — the curve is flat)
+    # The old 500 never early-stopped, so it was cut off while still improving;
+    # that also made added features look harmful, since in a capacity-bound
+    # model they compete for splits rather than adding to them.
     hgbt = HistGradientBoostingRegressor(
         loss="absolute_error",
-        max_iter=500,
+        max_iter=1200,
         learning_rate=0.05,
-        max_leaf_nodes=63,
+        max_leaf_nodes=127,
         min_samples_leaf=20,
         early_stopping=True,
         validation_fraction=0.1,
