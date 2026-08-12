@@ -22,12 +22,14 @@ Environment (read from .env):
     GTFS_KEY        (default: worker/gtfs_worker_data.pkl)
     MODEL_KEY       (default: worker/eta_pipeline.pkl)
     FEED_KEY        (default: feed/trip_updates.pb)
+    STATUS_KEY      (default: feed/status.json)
     GTFS_RT_URL     upstream vehicle-position feed
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pickle
 import subprocess
@@ -80,16 +82,40 @@ REQUEST_TIMEOUT = 20
 # last feed we successfully decoded — but only while it's still recent, so we
 # never publish ETAs computed off badly stale positions.
 #
+# 90 s rather than the consumer-side 3 min: what we publish are *predictions*
+# derived from these positions, and a vehicle's position error grows with the
+# age of the fix. A consumer serving a 3-min-old feed is showing arrivals it
+# already computed; we would be inventing new ones from positions that moved
+# minutes ago — and the two windows chain, since timetable-api caches our output
+# on top of this.
+#
 # This daemon is a single long-lived process (`python scripts/push_feed.py
 # --loop 10`), so a module-level cache lives for the whole run and is shared
 # across iterations — exactly what we want. (The Cloudflare Worker in
 # worker/worker.js can't rely on module state this way, since its isolates are
 # ephemeral — but it only reads a pre-computed blob from R2; the upstream fetch
 # that needs this fallback happens here, in the daemon.)
-STALE_MAX_AGE_MS = 3 * 60 * 1000
+STALE_MAX_AGE_MS = 90 * 1000
 
 # Last successfully fetched+decoded VP feed: {"vp_bytes": bytes, "at": int(ms)}.
 _vp_cache: dict | None = None
+
+# Small JSON sidecar published next to the feeds, so a consumer can check
+# freshness and upstream health with one cheap GET instead of decoding 170 KB of
+# protobuf just to read the header timestamp.
+STATUS_KEY = os.environ.get("STATUS_KEY", "feed/status.json")
+
+# Publishing a collapsed feed is worse than publishing nothing: consumers filter
+# out arrivals already in the past, so an empty feed empties every stop at once,
+# while the previous blob keeps working for the couple of minutes its
+# predictions stay in the future. When a pass produces far fewer trips than the
+# one before it, keep the old blob and report — an upstream hiccup then costs
+# freshness instead of the whole timetable.
+COLLAPSE_MIN_PREV_ENTITIES = 20  # below this the ratio is noise (night service)
+COLLAPSE_RATIO = 0.3
+
+# Entity count of the last feed actually published, for the collapse guard.
+_last_published_entities: int | None = None
 
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 
@@ -118,8 +144,9 @@ FEED_COMMIT = _git_commit()
 
 def __reset_cache() -> None:
     """Test seam: drop the cached last-good VP feed so cases stay isolated."""
-    global _vp_cache
+    global _vp_cache, _last_published_entities
     _vp_cache = None
+    _last_published_entities = None
 
 
 def _init_sentry() -> None:
@@ -223,7 +250,47 @@ def _get_vp_bytes() -> bytes:
         raise
 
 
+def _feed_stats(pb_bytes: bytes) -> tuple[int, int]:
+    """(header timestamp, entity count) of a serialized FeedMessage."""
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(pb_bytes)
+    return int(feed.header.timestamp), len(feed.entity)
+
+
+def _should_publish(prev_entities: int | None, new_entities: int) -> bool:
+    """Whether a pass producing *new_entities* trips is safe to publish.
+
+    Blocks only a *collapse* — a fraction of what the previous pass produced —
+    and only once the previous pass was big enough for the ratio to mean
+    anything. The first push of a run has nothing to compare against and always
+    publishes; so does any pass that grows the feed.
+    """
+    if prev_entities is None or prev_entities < COLLAPSE_MIN_PREV_ENTITIES:
+        return True
+    return new_entities >= prev_entities * COLLAPSE_RATIO
+
+
+def _put_status(client, payload: dict) -> None:
+    """Publish the JSON sidecar describing the currently served feed.
+
+    Never raises: the status object is diagnostic, and failing to write it must
+    not cost us the feed push it describes.
+    """
+    try:
+        client.put_object(
+            Bucket=R2_BUCKET,
+            Key=STATUS_KEY,
+            Body=json.dumps(payload).encode(),
+            ContentType="application/json",
+            CacheControl=FEED_CACHE_CONTROL,
+        )
+    except Exception as exc:  # noqa: BLE001 — diagnostics must not break the push
+        print(f"[warn] status.json write failed: {exc!r}", flush=True)
+
+
 def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> None:
+    global _last_published_entities
+
     t0 = time.monotonic()
     vp_bytes = _get_vp_bytes()
 
@@ -232,6 +299,31 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
         gtfs_data, model_data, trackers, vp_bytes,
         with_vehicle_positions=True, stats=stats,
     )
+
+    feed_ts, entities = _feed_stats(tu_result)
+    upstream = {
+        "vehicles_in": int(stats.get("vehicles_in", 0)),
+        "vehicles_stale": int(stats.get("vehicles_stale", 0)),
+        "feed_skew_sec": int(stats.get("feed_skew_sec", 0)),
+    }
+
+    if not _should_publish(_last_published_entities, entities):
+        msg = (
+            f"feed collapsed to {entities} trips from {_last_published_entities} "
+            f"({upstream['vehicles_stale']}/{upstream['vehicles_in']} vehicles "
+            f"stale upstream) — keeping the previous blob"
+        )
+        print(f"[warn] {msg}", flush=True)
+        sentry_sdk.capture_message(msg, level="warning")
+        _put_status(client, {
+            "feed_timestamp": feed_ts,
+            "entities": entities,
+            "commit": FEED_COMMIT,
+            "published": False,
+            "detail": msg,
+            **upstream,
+        })
+        return
 
     client.put_object(
         Bucket=R2_BUCKET,
@@ -260,6 +352,14 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
         CacheControl=FEED_CACHE_CONTROL,
         Metadata={"commit": FEED_COMMIT},
     )
+    _last_published_entities = entities
+    _put_status(client, {
+        "feed_timestamp": feed_ts,
+        "entities": entities,
+        "commit": FEED_COMMIT,
+        "published": True,
+        **upstream,
+    })
     elapsed = (time.monotonic() - t0) * 1000
     print(
         f"Pushed {len(tu_result):,} B → R2:{FEED_KEY}, "

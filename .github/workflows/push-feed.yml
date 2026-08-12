@@ -2,9 +2,9 @@ name: Push GTFS-RT feed
 
 on:
   schedule:
-    # Every 5 minutes (GitHub's minimum). The job runs an internal 10 s loop
-    # for ~4 min, so there is always a fresh process ready well before the
-    # next trigger fires.
+    # Every 5 minutes (GitHub's minimum). The job pushes for ~5.5 min — longer
+    # than the cron period on purpose, so the outgoing run is still publishing
+    # while the incoming one boots. See the guard below.
     - cron: '*/5 * * * *'
   workflow_dispatch:  # manual trigger, and the Cloudflare worker watchdog
     inputs:
@@ -27,18 +27,38 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
         run: |
-          SIX_MIN_S=360
+          # A run is ~45 s of boot (checkout, pip install, R2 load) followed by
+          # PUSH_SECONDS of publishing. With the old "any concurrent run blocks
+          # this one" rule, that boot cost was dead air: the previous run's last
+          # push landed ~75 s before the new run's first one, every cycle, and
+          # the served blob simply froze in between (measured 71-90 s).
+          #
+          # So a run that is already past OVERLAP_AFTER_S no longer blocks a new
+          # one — it is inside its final stretch and about to exit, and the two
+          # briefly publishing together is exactly what closes the gap. Whole
+          # blobs are written each push, last write wins, so an overlap is
+          # harmless; the only visible effect is that alternating writers carry
+          # slightly different tracker state for a few seconds.
+          #
+          # A younger run still blocks (that is a genuine duplicate — a retry or
+          # watchdog dispatch racing the cron), and one older than STUCK_AFTER_S
+          # is hung rather than finishing, so it gets cancelled. STUCK_AFTER_S
+          # must stay above boot + PUSH_SECONDS or healthy runs get killed.
+          OVERLAP_AFTER_S=240
+          STUCK_AFTER_S=480
           proceed=true
           now=$(date +%s)
           while IFS=$'\t' read -r id started_at; do
             [ "$id" = "$RUN_ID" ] && continue
             started_s=$(date -d "$started_at" +%s)
             age_s=$(( now - started_s ))
-            if [ "$age_s" -ge "$SIX_MIN_S" ]; then
-              echo "Cancelling stale run $id (${age_s}s old)"
+            if [ "$age_s" -ge "$STUCK_AFTER_S" ]; then
+              echo "Cancelling stuck run $id (${age_s}s old)"
               # The run can finish between the list above and this call; that is
               # the outcome we wanted anyway, so do not fail the guard on it.
               gh run cancel "$id" --repo "$REPO" || echo "  (already finished)"
+            elif [ "$age_s" -ge "$OVERLAP_AFTER_S" ]; then
+              echo "Overlapping run $id (${age_s}s old) is finishing — proceeding"
             else
               echo "Skipping: run $id already in progress (${age_s}s old)"
               proceed=false
@@ -64,12 +84,14 @@ jobs:
       - name: Install dependencies
         run: pip install -e .
 
-      # Load GTFS + model from R2 once, push 24 times at 10 s intervals (~4 min).
-      # The loop is drift-free (the interval includes inference time), so the
-      # job finishes before the next cron trigger. Resources stay in memory
+      # Load GTFS + model from R2 once, push 33 times at 10 s intervals (~5.5
+      # min). The loop is drift-free (the interval includes inference time), so
+      # the run overruns the 5-minute cron period by roughly its own boot cost —
+      # which is the point: the next run is already booting while this one still
+      # publishes, so the feed never goes unrefreshed. Resources stay in memory
       # across pushes; only one R2 load per job.
       - name: Push feed every 10 s
-        run: python scripts/push_feed.py --loop 10 --count 24
+        run: python scripts/push_feed.py --loop 10 --count 33
         env:
           R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}

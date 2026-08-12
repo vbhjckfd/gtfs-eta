@@ -39,9 +39,15 @@ def _predictions(trip_update):
         stu for stu in trip_update.stop_time_update
         if stu.schedule_relationship != _NO_DATA
     ]
-# Feed header timestamp must be fresh — upstream vehicle positions are
-# republished every few seconds; allow generous slack for clock skew / caching.
-MAX_FEED_AGE_SEC = 15 * 60
+# Our feed republishes every ~10 s; this mirrors the `stale` cutoff in
+# worker/worker.js so smoke fails exactly when /health would, with slack above
+# it for edge caching and clock skew.
+MAX_FEED_AGE_SEC = 180
+
+# The upstream operator feed is a different service on its own cadence, and has
+# been observed serving bodies hours stale. It is only ever a comparison
+# reference here, so it gets a far looser bound than our own feed.
+REFERENCE_MAX_AGE_SEC = 15 * 60
 
 # Stop sign-code 60 (Захисників України) → internal GTFS stop_id 4577.
 HEALTH_CHECK_STOP_ID = "4577"
@@ -538,7 +544,7 @@ def test_parity_with_reference(worker_feed, reference_feed):
     # yields zero overlap and reads as an ID-scheme bug when it's just upstream
     # being stale. Catch that distinctly before asserting overlap.
     ref_age = time.time() - reference_feed.header.timestamp
-    if ref_age > MAX_FEED_AGE_SEC:
+    if ref_age > REFERENCE_MAX_AGE_SEC:
         pytest.skip(
             f"reference feed is stale ({ref_age / 3600:.1f}h old) — "
             "nothing meaningful to compare against"

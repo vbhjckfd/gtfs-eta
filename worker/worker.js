@@ -60,13 +60,24 @@ const SENTRY_SERVICE_TAG = "gtfs-eta-worker";
 // /health is layered:
 //   1. The feed must be *fresh* — the push pipeline (Cloudflare cron → GitHub
 //      Actions → R2) republishes every ~10 s, 24/7.  A stale header timestamp
-//      means the pipeline stalled.  Allows one missed 5-min cron cycle + slack.
+//      means the pipeline stalled.
 //   2. During working hours, stop 60 (busiest in Lviv) must also have at least
 //      one predicted arrival — the real end-to-end signal that inference is
 //      producing predictions, not just that the pipeline is pushing.
 // Overnight, Lviv transit isn't running, so 0 arrivals is correct and healthy;
 // the arrivals check is therefore gated on working hours.
-const MAX_FEED_AGE_SEC = 10 * 60;
+//
+// Freshness is tiered rather than a single 10-minute cutoff, which was 60x the
+// republish cadence and reported `ok` on feeds whose every prediction had
+// already expired — the gap that hid a recurring ~75 s publish stall.
+//   age <= 60 s   ok       normal: republished every ~10 s, plus edge cache
+//   60-180 s      aging    a stalled or slow push cycle; still usable, since
+//                          predictions run minutes ahead.  HTTP 200 on purpose:
+//                          this is a signal to look, not a page.
+//   > 180 s       stale    consumers are now filtering out most arrivals as
+//                          already past — treat as down.
+const FEED_AGING_SEC = 60;
+const MAX_FEED_AGE_SEC = 180;
 
 // Stop sign-code 60 (Захисників України) → internal GTFS stop_id 4577.
 const HEALTH_CHECK_STOP_ID = "4577";
@@ -452,15 +463,25 @@ async function handleHealth(env) {
     }, 503);
   }
 
+  // Fresh enough to serve, but the pipeline is not republishing at its normal
+  // cadence — surfaced as its own status (and mirrored to New Relic) so a
+  // stalling push cycle is visible before it crosses into `stale`.
+  const aging = age > FEED_AGING_SEC;
+
   return jsonResponse({
-    status: "ok",
+    status: aging ? "aging" : "ok",
     feed_timestamp: timestamp,
     age_sec: age,
+    aging_after_sec: FEED_AGING_SEC,
+    max_age_sec: MAX_FEED_AGE_SEC,
     entities,
     stop_code: 60,
     stop_id: HEALTH_CHECK_STOP_ID,
     arrivals,
     working_hours: workingHours,
+    ...(aging
+      ? { detail: "feed older than the ~10 s republish cadence — push cycle may be stalling" }
+      : {}),
     ...upstream,
     ...versions,
   }, 200);
