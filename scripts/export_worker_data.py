@@ -15,6 +15,7 @@ sys.path.insert(0, ".")
 import io
 import os
 import pickle
+from datetime import date, timedelta
 from pathlib import Path
 
 import boto3
@@ -74,6 +75,37 @@ def _build_route_types(gtfs) -> dict[str, int]:
             rtype = _ROUTE_TYPE_TROLLEYBUS
         out[str(r.route_id)] = rtype
     return out
+
+
+def _day_after(day: str | None) -> str | None:
+    """``YYYY-MM-DD`` + 1 day, or None. Unparseable input is treated as absent
+    so a corrupt stamp reopens the window rather than freezing calibration."""
+    if not day:
+        return None
+    try:
+        return (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+    except ValueError:
+        return None
+
+
+def _accumulate_bias(previous: dict | None, residual: dict) -> dict:
+    """Fold a freshly measured residual into the bias correction already live.
+
+    The served prediction is ``raw - T``, so a report's bias is what is *left*
+    after T was applied, not the model's own bias. Replacing T with that
+    residual therefore only ever removes half the error: with ``T <- R`` and
+    ``R = B - T`` the loop settles at ``T = B/2``. Measured 2026-08-13 —
+    sa=1 served a +34s residual under a table of +18, i.e. a raw bias near +52
+    that the correction had been chasing for weeks without ever closing.
+
+    Accumulating (``T <- T + R``) puts the fixed point at ``R = 0`` instead.
+    Overshoot is self-correcting: the next day's residual simply flips sign.
+
+    Keys are horizons; ``previous`` may be missing any of them (treated as 0),
+    which is also what happens on the first calibration after a model change.
+    """
+    previous = previous or {}
+    return {h: int(round(previous.get(h, 0) + r)) for h, r in residual.items()}
 
 
 def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
@@ -292,11 +324,29 @@ def main():
     print("  done")
 
     # ── Model ──
+    # Date the serving trees were first published. The live bands below describe
+    # whatever model produced the residuals they are pooled from, so calibrating
+    # across a model change subtracts the previous model's correction from the
+    # new one — measured 2026-08-13, when live bias doubled to +28s the day after
+    # a retrain. Stamped when new trees are uploaded and read back on every
+    # band-only refresh, so the pool self-restricts to days this model served.
+    model_since: str | None = None
+    # What is already live, so the bias correction can build on it — see
+    # _accumulate_bias.
+    live_model: dict = {}
+    try:
+        live_model = pickle.loads(
+            client.get_object(Bucket=R2_BUCKET, Key=MODEL_KEY)["Body"].read()
+        )
+    except Exception:  # noqa: BLE001 — first ever export has nothing to read
+        live_model = {}
+
     model_path = Path(MODEL_PATH)
     if model_path.exists():
         import joblib
         pipeline = joblib.load(model_path)
         tree_data = _extract_trees(pipeline)
+        model_since = date.today().isoformat()
     else:
         # refresh-gtfs.yml (daily CI) checks out the repo only — it never has a
         # local models/eta_pipeline.joblib (gitignored, only produced by a real
@@ -308,15 +358,17 @@ def main():
         # last real retrain) and just refresh the bands, same fallback shape as
         # existing_priors above.
         try:
-            existing_model = pickle.loads(
-                client.get_object(Bucket=R2_BUCKET, Key=MODEL_KEY)["Body"].read()
-            )
+            existing_model = live_model or {}
             tree_data = {
                 k: existing_model[k]
                 for k in ("route_to_int", "baseline", "learning_rate", "trees")
             }
+            model_since = existing_model.get("model_since")
             print(f"  Model not found at {model_path} — reusing trees already live "
                   "on R2, refreshing live-calibrated bands only")
+            if model_since:
+                print(f"  Live bands will pool only days from {model_since} "
+                      "(when these trees went live)")
         except Exception as exc:  # noqa: BLE001 — no existing object, nothing to refresh
             print(f"  Model not found at {model_path} and no existing model on R2 "
                   f"({exc!r}) — skipping model upload")
@@ -331,7 +383,7 @@ def main():
     unc_table: dict | None = None
     try:
         from src.scoring import live_uncertainty_by_horizon
-        unc_table, dates_used = live_uncertainty_by_horizon(days=7)
+        unc_table, dates_used = live_uncertainty_by_horizon(days=7, since=model_since)
         if unc_table:
             span = f"{dates_used[0]}..{dates_used[-1]}" if dates_used else "?"
             print(f"  Uncertainty bands (live, {len(dates_used)} days {span}): {unc_table}")
@@ -352,18 +404,31 @@ def main():
     # (e.g. the flat ~-44s optimism found across every stops_ahead bucket on
     # 2026-07-25). No offline fallback — an unavailable live signal means no
     # correction, not a guessed/stale one baked in from a different model.
-    bias_table: dict | None = None
+    bias_table: dict | None = live_model.get("bias_by_horizon")
+    bias_through: str | None = live_model.get("bias_calibrated_through")
     try:
         from src.scoring import live_bias_by_horizon
-        bias_table, bias_dates = live_bias_by_horizon(days=7)
-        if bias_table:
+
+        # Only days this model served AND that the live table has not already
+        # absorbed — folding a day in twice would correct for it twice.
+        bias_floor = max([d for d in (model_since, _day_after(bias_through)) if d], default=None)
+        residual, bias_dates = live_bias_by_horizon(days=7, since=bias_floor)
+        if residual:
             span = f"{bias_dates[0]}..{bias_dates[-1]}" if bias_dates else "?"
-            print(f"  Bias correction (live, {len(bias_dates)} days {span}): {bias_table}")
+            bias_table = _accumulate_bias(bias_table, residual)
+            bias_through = bias_dates[-1] if bias_dates else bias_through
+            print(f"  Bias residual (live, {len(bias_dates)} days {span}): {residual}")
+            print(f"  Bias correction (accumulated): {bias_table}")
+        else:
+            print(f"  No unabsorbed bias residual since {bias_floor} — "
+                  f"keeping the live correction: {bias_table}")
     except Exception as exc:  # noqa: BLE001 — calibration must never block an export
         print(f"  WARNING: live bias calibration failed: {exc!r}")
 
     if bias_table:
         tree_data["bias_by_horizon"] = bias_table
+        if bias_through:
+            tree_data["bias_calibrated_through"] = bias_through
     else:
         print("  No live bias correction available — serving uncorrected predictions")
 
@@ -374,23 +439,48 @@ def main():
     # per-horizon support. Each bucket is merged over the flat table so a
     # horizon too thin on just-weekday or just-weekend data still gets the
     # blended correction rather than none.
+    bias_weekend_table: dict | None = live_model.get("bias_by_horizon_weekend")
     try:
         from src.scoring import live_bias_by_horizon_weekend
-        bias_weekend, bias_weekend_dates = live_bias_by_horizon_weekend(days=14)
+        bias_weekend, bias_weekend_dates = live_bias_by_horizon_weekend(
+            days=14, since=bias_floor
+        )
         if bias_weekend and (bias_weekend.get("weekday") or bias_weekend.get("weekend")):
             span = (
                 f"{bias_weekend_dates[0]}..{bias_weekend_dates[-1]}"
                 if bias_weekend_dates else "?"
             )
-            print(f"  Bias correction (weekday/weekend, {len(bias_weekend_dates)} days {span}): "
+            print(f"  Bias residual (weekday/weekend, {len(bias_weekend_dates)} days {span}): "
                   f"{bias_weekend}")
+            # These buckets take precedence over the flat table in
+            # src/inference.run_inference, so they must accumulate too —
+            # publishing a raw residual here would quietly override the
+            # accumulated correction on whichever bucket it covers.
+            live_weekend = live_model.get("bias_by_horizon_weekend") or {}
             merged = {
-                bucket: {**(bias_table or {}), **(bias_weekend.get(bucket) or {})}
+                bucket: {
+                    **(bias_table or {}),
+                    **_accumulate_bias(
+                        live_weekend.get(bucket), bias_weekend.get(bucket) or {}
+                    ),
+                }
                 for bucket in ("weekday", "weekend")
             }
-            tree_data["bias_by_horizon_weekend"] = merged
+            print(f"  Bias correction (weekday/weekend, accumulated): {merged}")
+            bias_weekend_table = merged
     except Exception as exc:  # noqa: BLE001 — calibration must never block an export
         print(f"  WARNING: live weekday/weekend bias calibration failed: {exc!r}")
+
+    # Carry the split forward when this run folded in nothing new — otherwise a
+    # refresh with no unabsorbed residual would drop the key and silently demote
+    # every prediction to the flat table.
+    if bias_weekend_table:
+        tree_data["bias_by_horizon_weekend"] = bias_weekend_table
+
+    # Carry the serving date forward so the next band-only refresh knows which
+    # scored days this model actually produced (see model_since above).
+    if model_since:
+        tree_data["model_since"] = model_since
 
     # Measured per-route-type stop dwell (scripts/measure_dwell.py), published
     # as the gap between StopTimeEvent arrival and departure. Static — it comes

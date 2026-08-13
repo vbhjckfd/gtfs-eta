@@ -17,6 +17,8 @@ import json
 import os
 import sys
 import time
+
+import pytest
 from pathlib import Path
 
 for _k in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
@@ -87,7 +89,8 @@ def test_save_round_trips_through_load():
     now = time.time()
     saved = FakeR2()
     trackers = {
-        "v1": {"status": "on_route", "off": 0, "on": 0, "still": (now, 42.0, "trip-a")},
+        "v1": {"status": "on_route", "off": 0, "on": 0,
+               "still": (now, 42.0, "trip-a"), "pos": (now, 42.0, "trip-a")},
         # No anchor yet (never seen twice) — nothing to persist for this one.
         "v2": {"status": "on_route", "off": 0, "on": 0},
     }
@@ -97,6 +100,23 @@ def test_save_round_trips_through_load():
     reloaded = push_feed._load_tracker_state(FakeR2(json.loads(saved.put["Body"])))
     assert sorted(reloaded) == ["v1"]
     assert reloaded["v1"]["still"] == (now, 42.0, "trip-a")
+    assert reloaded["v1"]["pos"] == (now, 42.0, "trip-a")
+
+
+def test_carried_position_lets_speed_measure_on_the_first_push():
+    """Without pos, every restart served one feed with SPEED_UNKNOWN throughout."""
+    from src.inference import SPEED_UNKNOWN, progress_speed
+
+    now = time.time()
+    client = FakeR2({"pos": {"v1": [now, 100.0, "trip-a"]}})
+    trackers = push_feed._load_tracker_state(client)
+
+    speed = progress_speed(trackers, "v1", "trip-a", 250.0, now + 15.0)
+    assert speed == pytest.approx(10.0)
+
+    # A pos left by a long-dead run is still rejected by the existing gap guard.
+    stale = push_feed._load_tracker_state(FakeR2({"pos": {"v1": [now - 600, 100.0, "trip-a"]}}))
+    assert progress_speed(stale, "v1", "trip-a", 250.0, now) == SPEED_UNKNOWN
 
 
 def test_save_failure_is_tolerated():

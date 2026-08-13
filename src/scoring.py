@@ -615,11 +615,21 @@ def _aggregate_stops_ahead_mae(reports: list[dict], min_n: int = 200) -> dict:
     return out
 
 
-def _recent_quality_reports(days: int, client=None) -> list[dict]:
+def _recent_quality_reports(days: int, client=None, since: str | None = None) -> list[dict]:
     """The most recent *days* scored quality/<date>.json reports from R2.
 
     Shared by the live uncertainty and bias calibrators — both pool
     per-stops-ahead stats across the same recent-day window.
+
+    *since* (a ``YYYY-MM-DD`` string) drops reports from before it. Both bands
+    describe the behaviour of whichever model produced them, so a window that
+    straddles a model change calibrates the correction against a model that is
+    no longer serving — measured 2026-08-13: the day after a retrain, live bias
+    doubled to +28s because a table pooled from the previous model's residuals
+    was still being subtracted. A day of the current model is ~75k rows per
+    horizon, far above ``min_n``, so one clean day is ample support; callers
+    fall back to the unrestricted window when the filter leaves nothing, since
+    a stale correction still beats none.
     """
     client = client or _make_client()
     paginator = client.get_paginator("list_objects_v2")
@@ -630,6 +640,8 @@ def _recent_quality_reports(days: int, client=None) -> list[dict]:
             # Only immutable per-day files: quality/YYYY-MM-DD.json (15 chars).
             # Excludes latest.json / latest.md.
             if len(base) == 15 and base.endswith(".json") and base[:10].count("-") == 2:
+                if since is not None and base[:10] < since:
+                    continue
                 keys.append(o["Key"])
     keys.sort(reverse=True)
 
@@ -645,7 +657,7 @@ def _recent_quality_reports(days: int, client=None) -> list[dict]:
 
 
 def live_uncertainty_by_horizon(
-    days: int = 7, client=None, min_n: int = 200
+    days: int = 7, client=None, min_n: int = 200, since: str | None = None
 ) -> tuple[dict, list[str]]:
     """Per-horizon uncertainty (seconds) calibrated from the live quality archive.
 
@@ -654,10 +666,18 @@ def live_uncertainty_by_horizon(
     real serving error, which runs ~2x the training-test split the bands were
     originally derived from. Returns ``({horizon:int -> sec:int}, dates_used)``;
     an empty dict when no usable scored history exists (caller should fall back).
+
+    *since* restricts the pool to days the current model served — a band pooled
+    across a model change describes neither model. Falls back to the
+    unrestricted window when the restriction leaves nothing usable.
     """
-    reports = _recent_quality_reports(days, client)
+    reports = _recent_quality_reports(days, client, since=since)
+    table = _aggregate_stops_ahead_mae(reports, min_n=min_n)
+    if not table and since is not None:
+        reports = _recent_quality_reports(days, client)
+        table = _aggregate_stops_ahead_mae(reports, min_n=min_n)
     dates_used = sorted(rep.get("date") for rep in reports)
-    return _aggregate_stops_ahead_mae(reports, min_n=min_n), dates_used
+    return table, dates_used
 
 
 def _pool_bias(bsa_dicts: list[dict], min_n: int = 200) -> dict:
@@ -708,7 +728,7 @@ def _aggregate_stops_ahead_bias_weekend(reports: list[dict], min_n: int = 200) -
 
 
 def live_bias_by_horizon(
-    days: int = 7, client=None, min_n: int = 200
+    days: int = 7, client=None, min_n: int = 200, since: str | None = None
 ) -> tuple[dict, list[str]]:
     """Per-horizon signed bias (seconds) calibrated from the live quality archive.
 
@@ -718,14 +738,22 @@ def live_bias_by_horizon(
     model or waiting for a retrain. Returns ``({horizon:int -> signed sec}, dates_used)``;
     an empty dict when no usable scored history exists (caller should fall back
     to no correction, not a stale/guessed one).
+
+    *since* restricts the pool to days the current model actually served — see
+    ``_recent_quality_reports``. Strict, unlike the uncertainty band: an empty
+    result means "no residual has been measured that this table has not already
+    absorbed", and the caller must then keep the correction it has rather than
+    recomputing one from days it already folded in (see
+    ``export_worker_data._accumulate_bias``). Silently widening the window here
+    would double-count those days.
     """
-    reports = _recent_quality_reports(days, client)
+    reports = _recent_quality_reports(days, client, since=since)
     dates_used = sorted(rep.get("date") for rep in reports)
     return _aggregate_stops_ahead_bias(reports, min_n=min_n), dates_used
 
 
 def live_bias_by_horizon_weekend(
-    days: int = 14, client=None, min_n: int = 200
+    days: int = 14, client=None, min_n: int = 200, since: str | None = None
 ) -> tuple[dict, list[str]]:
     """Per-horizon signed bias (seconds), split by weekday vs weekend.
 
@@ -737,10 +765,17 @@ def live_bias_by_horizon_weekend(
     independently come back empty (insufficient support) — caller should fall
     back to the unsplit ``live_bias_by_horizon`` table for that bucket, not
     leave predictions uncorrected.
+
+    *since* restricts the pool to days the current model served, with the same
+    fall back to the unrestricted window as ``live_bias_by_horizon``.
     """
-    reports = _recent_quality_reports(days, client)
+    reports = _recent_quality_reports(days, client, since=since)
+    table = _aggregate_stops_ahead_bias_weekend(reports, min_n=min_n)
+    if not any(table.values()) and since is not None:
+        reports = _recent_quality_reports(days, client)
+        table = _aggregate_stops_ahead_bias_weekend(reports, min_n=min_n)
     dates_used = sorted(rep.get("date") for rep in reports)
-    return _aggregate_stops_ahead_bias_weekend(reports, min_n=min_n), dates_used
+    return table, dates_used
 
 
 def score_date(date_str: str, gtfs=None, client=None) -> dict:

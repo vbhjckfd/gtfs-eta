@@ -326,16 +326,33 @@ def _load_tracker_state(client) -> dict:
 
     now = time.time()
     trackers: dict = {}
-    for vid, entry in (stored.get("still") or {}).items():
-        try:
-            ts, dist, trip_id = float(entry[0]), float(entry[1]), str(entry[2])
-        except (TypeError, ValueError, IndexError):
-            continue
-        if now - ts > TRACKER_STATE_MAX_AGE_SEC:
-            continue
-        trackers[vid] = {"status": "on_route", "off": 0, "on": 0,
-                         "still": (ts, dist, trip_id)}
-    print(f"[info] carried over {len(trackers)} stationary anchors", flush=True)
+
+    def _entries(field: str):
+        for vid, entry in (stored.get(field) or {}).items():
+            try:
+                yield vid, (float(entry[0]), float(entry[1]), str(entry[2]))
+            except (TypeError, ValueError, IndexError):
+                continue
+
+    for vid, anchor in _entries("still"):
+        if now - anchor[0] <= TRACKER_STATE_MAX_AGE_SEC:
+            trackers.setdefault(
+                vid, {"status": "on_route", "off": 0, "on": 0}
+            )["still"] = anchor
+
+    # Last projection too, so progress_speed has a previous position on the very
+    # first push. Without it every restart published one feed with SPEED_UNKNOWN
+    # for every vehicle — the model falling back to route×hour priors for ~3% of
+    # served feeds, at a restart every ~5.5 min. Nothing needs to guard staleness
+    # here: progress_speed already rejects gaps over _SPEED_MAX_GAP_SEC, so a pos
+    # left by a run that died long ago degrades to UNKNOWN exactly as before.
+    n_pos = 0
+    for vid, pos in _entries("pos"):
+        trackers.setdefault(vid, {"status": "on_route", "off": 0, "on": 0})["pos"] = pos
+        n_pos += 1
+
+    print(f"[info] carried over {len(trackers)} vehicles "
+          f"({n_pos} with a previous position)", flush=True)
     return trackers
 
 
@@ -343,15 +360,17 @@ def _save_tracker_state(client, trackers: dict) -> None:
     """Persist stationary anchors for the next run. Never raises — losing them
     costs accuracy on stopped vehicles, not the feed."""
     try:
-        still = {
-            vid: [state["still"][0], state["still"][1], state["still"][2]]
-            for vid, state in trackers.items()
-            if isinstance(state.get("still"), tuple)
-        }
+        def _field(name: str) -> dict:
+            return {
+                vid: [state[name][0], state[name][1], state[name][2]]
+                for vid, state in trackers.items()
+                if isinstance(state.get(name), tuple)
+            }
+
         client.put_object(
             Bucket=R2_BUCKET,
             Key=TRACKER_STATE_KEY,
-            Body=json.dumps({"still": still}).encode(),
+            Body=json.dumps({"still": _field("still"), "pos": _field("pos")}).encode(),
             ContentType="application/json",
             CacheControl="no-store",
         )

@@ -282,3 +282,62 @@ def test_to_epoch_seconds_is_resolution_independent():
         ts = pd.Series(pd.to_datetime([expected], unit="s", utc=True)).astype(f"datetime64[{unit}, UTC]")
         out = scoring._to_epoch_seconds(ts)
         assert int(out.iloc[0]) == expected, f"unit={unit} → {out.iloc[0]}"
+
+
+# ── Bias-correction accumulation ────────────────────────────────────────────
+
+class TestBiasAccumulation:
+    """The correction must build on itself, not restart from the residual.
+
+    A report's bias is what survived the correction that was live while it was
+    measured, so assigning it back as the new correction converges on removing
+    only half the error (T <- R with R = B - T settles at T = B/2).
+    """
+
+    def _mod(self):
+        import importlib.util, os, sys
+        from pathlib import Path
+        for k in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
+            os.environ.setdefault(k, "test")
+        root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root))
+        spec = importlib.util.spec_from_file_location(
+            "export_worker_data", root / "scripts" / "export_worker_data.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_residual_is_added_to_the_live_table(self):
+        acc = self._mod()._accumulate_bias
+        # The real 2026-08-13 numbers: +18 live, +34 still measured on top.
+        assert acc({1: 18, 2: 14}, {1: 34.2, 2: 31.3})[1] == 52
+
+    def test_missing_horizon_starts_from_zero(self):
+        acc = self._mod()._accumulate_bias
+        assert acc({1: 18}, {2: 31.0}) == {2: 31}
+        assert acc(None, {1: 34.2}) == {1: 34}
+
+    def test_accumulation_converges_where_replacement_stalls(self):
+        """Simulated loop against a constant raw bias B."""
+        acc = self._mod()._accumulate_bias
+        B = 52.0
+
+        replace_T = 0.0
+        for _ in range(30):
+            replace_T = B - replace_T          # the old behaviour: T <- R
+        assert abs(B - replace_T) > 20         # stuck removing about half
+
+        table: dict = {}
+        for _ in range(30):
+            residual = {1: B - table.get(1, 0)}
+            table = acc(table, residual)
+        assert abs(B - table[1]) <= 1          # closed
+
+    def test_day_after(self):
+        day_after = self._mod()._day_after
+        assert day_after("2026-08-13") == "2026-08-14"
+        assert day_after("2026-08-31") == "2026-09-01"
+        # A missing or corrupt stamp must reopen the window, not freeze it.
+        assert day_after(None) is None
+        assert day_after("not-a-date") is None
