@@ -1,5 +1,6 @@
 .PHONY: install pipeline pipeline-date train learn export deploy \
-        sanity validate-off-route validate-horizon check-gtfs check-snapshots \
+        sanity validate-off-route validate-horizon compare-models \
+        check-gtfs check-snapshots \
         push-feed serve-feed smoke score route-mae review-quality diagnose \
         measure-dwell help
 
@@ -41,6 +42,12 @@ measure-dwell:
 ## Report held-out bias + MAE per stops_ahead (curve should stay flat, near zero)
 validate-horizon:
 	python scripts/validate_horizon_bias.py
+
+## Score the production model against a segment-additive challenger on one
+## identical split: make compare-models [DAYS=30] [KEEP_PCT=2]
+compare-models:
+	python scripts/compare_models.py --days $(or $(DAYS),30) \
+		--keep-pct $(or $(KEEP_PCT),2) --out compare_models.json
 
 # ── Cloudflare Worker ──────────────────────────────────────────────────────
 
@@ -114,6 +121,7 @@ help:
 	@echo "  train                Build features + train model"
 	@echo "  learn                pipeline + train in one step"
 	@echo "  validate-horizon     Held-out bias + MAE per stops_ahead (post-retrain check)"
+	@echo "  compare-models       Production model vs segment-additive challenger, one split"
 	@echo ""
 	@echo "  export               Upload GTFS + model to R2"
 	@echo "  deploy               Deploy Cloudflare Worker"
