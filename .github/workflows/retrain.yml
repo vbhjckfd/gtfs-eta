@@ -48,13 +48,32 @@ jobs:
           restore-keys: |
             training-data-
 
+      # --parallel 1, deliberately: two workers each hold a whole day of
+      # snapshots (raw rows -> DataFrame -> inference -> labeling), and on
+      # 2026-08-17 both retrain attempts were reaped by the runner mid-step
+      # ("the hosted runner lost communication with the server ... starves it
+      # for CPU/Memory"). One day at a time fits; the days keep growing, so
+      # buy headroom rather than wall-clock here.
+      # PYTHONUNBUFFERED so the per-day progress lines stream instead of
+      # arriving in one block at step end — a run killed mid-step otherwise
+      # shows no trace of which day it died on.
       - name: Regenerate training data for new days
-        run: python scripts/run_pipeline.py --all --parallel 2
+        run: python scripts/run_pipeline.py --all --parallel 1
         env:
+          PYTHONUNBUFFERED:     '1'
           R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET:            gtfs-lviv
+
+      # run_pipeline skips days it has already labeled, so a column added
+      # after those parquets were written (stationary_sec) would stay absent
+      # from the whole cached archive and train as an all-zero feature.
+      # No-op once every file carries it.
+      - name: Backfill features missing from cached days
+        run: python scripts/backfill_stationary.py data/training/
+        env:
+          PYTHONUNBUFFERED: '1'
 
       - name: Train model
         run: python -m src.train data/training/
