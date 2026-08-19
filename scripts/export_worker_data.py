@@ -12,6 +12,7 @@ Usage:
 import sys
 sys.path.insert(0, ".")
 
+import hashlib
 import io
 import os
 import pickle
@@ -88,7 +89,22 @@ def _day_after(day: str | None) -> str | None:
         return None
 
 
-def _accumulate_bias(previous: dict | None, residual: dict) -> dict:
+# Fraction of a freshly measured residual folded in per calibration. A full
+# step would be exact if the residual described the table now live, but it
+# never does: a day is scored only after it has been served, so what gets
+# folded in was measured against an older table. Under that one-cycle lag
+# ``T <- T + R`` puts both poles on the unit circle (z^2 - z + 1 = 0) — the
+# loop swings around the true bias forever without losing amplitude. Which is
+# what live bias did over 2026-08-15..18, the first four days under full
+# accumulation: -21.7s, +1.7s, -26.6s, -23.9s, sign flipping daily while
+# arriving-now calibration fell 87% -> 65%. A half step moves the poles to
+# |z| = 0.707, so the same loop decays instead of ringing, and one
+# unrepresentative day drags the served correction half as far.
+_BIAS_GAIN = 0.5
+
+
+def _accumulate_bias(previous: dict | None, residual: dict,
+                     gain: float = _BIAS_GAIN) -> dict:
     """Fold a freshly measured residual into the bias correction already live.
 
     The served prediction is ``raw - T``, so a report's bias is what is *left*
@@ -98,14 +114,27 @@ def _accumulate_bias(previous: dict | None, residual: dict) -> dict:
     sa=1 served a +34s residual under a table of +18, i.e. a raw bias near +52
     that the correction had been chasing for weeks without ever closing.
 
-    Accumulating (``T <- T + R``) puts the fixed point at ``R = 0`` instead.
-    Overshoot is self-correcting: the next day's residual simply flips sign.
+    Accumulating (``T <- T + gain*R``) puts the fixed point at ``R = 0``
+    instead. The residual being measured against whatever T was live is also
+    what makes this survive a model change: the inherited T is wrong for the
+    new trees, but it is still the baseline the next residual is relative to,
+    so the loop re-converges rather than needing to be reset (zeroing T would
+    throw away the only measurement of the raw bias).
 
     Keys are horizons; ``previous`` may be missing any of them (treated as 0),
     which is also what happens on the first calibration after a model change.
     """
     previous = previous or {}
-    return {h: int(round(previous.get(h, 0) + r)) for h, r in residual.items()}
+    return {h: int(round(previous.get(h, 0) + gain * r)) for h, r in residual.items()}
+
+
+def _model_fingerprint(tree_data: dict) -> str:
+    """Stable digest of the serving trees, to tell a real retrain from a re-export."""
+    payload = pickle.dumps(
+        (tree_data.get("baseline"), tree_data.get("learning_rate"), tree_data.get("trees")),
+        protocol=4,
+    )
+    return hashlib.sha256(payload).hexdigest()
 
 
 def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
@@ -346,7 +375,16 @@ def main():
         import joblib
         pipeline = joblib.load(model_path)
         tree_data = _extract_trees(pipeline)
-        model_since = date.today().isoformat()
+        fingerprint = _model_fingerprint(tree_data)
+        if fingerprint and fingerprint == live_model.get("model_fingerprint"):
+            # Same trees as those already live: a hand `make export`, or a band
+            # refresh from a machine that happens to hold the pkl. Stamping
+            # today here would restrict every live pool below to a model change
+            # that never happened, starving the bands of history — and the bias
+            # loop of the days it still has to absorb.
+            model_since = live_model.get("model_since")
+        else:
+            model_since = date.today().isoformat()
     else:
         # refresh-gtfs.yml (daily CI) checks out the repo only — it never has a
         # local models/eta_pipeline.joblib (gitignored, only produced by a real
@@ -364,6 +402,7 @@ def main():
                 for k in ("route_to_int", "baseline", "learning_rate", "trees")
             }
             model_since = existing_model.get("model_since")
+            fingerprint = existing_model.get("model_fingerprint") or _model_fingerprint(tree_data)
             print(f"  Model not found at {model_path} — reusing trees already live "
                   "on R2, refreshing live-calibrated bands only")
             if model_since:
@@ -478,9 +517,12 @@ def main():
         tree_data["bias_by_horizon_weekend"] = bias_weekend_table
 
     # Carry the serving date forward so the next band-only refresh knows which
-    # scored days this model actually produced (see model_since above).
+    # scored days this model actually produced (see model_since above), and the
+    # digest that says whether the next export is looking at the same trees.
     if model_since:
         tree_data["model_since"] = model_since
+    if fingerprint:
+        tree_data["model_fingerprint"] = fingerprint
 
     # Measured per-route-type stop dwell (scripts/measure_dwell.py), published
     # as the gap between StopTimeEvent arrival and departure. Static — it comes

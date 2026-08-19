@@ -311,12 +311,43 @@ class TestBiasAccumulation:
     def test_residual_is_added_to_the_live_table(self):
         acc = self._mod()._accumulate_bias
         # The real 2026-08-13 numbers: +18 live, +34 still measured on top.
-        assert acc({1: 18, 2: 14}, {1: 34.2, 2: 31.3})[1] == 52
+        # Half a step, so the table moves toward +52 without landing past it.
+        assert acc({1: 18, 2: 14}, {1: 34.2, 2: 31.3})[1] == 35
+        assert acc({1: 18}, {1: 34.2}, gain=1.0)[1] == 52
 
     def test_missing_horizon_starts_from_zero(self):
         acc = self._mod()._accumulate_bias
-        assert acc({1: 18}, {2: 31.0}) == {2: 31}
-        assert acc(None, {1: 34.2}) == {1: 34}
+        assert acc({1: 18}, {2: 30.0}) == {2: 15}
+        assert acc(None, {1: 34.2}) == {1: 17}
+
+    def test_damped_accumulation_does_not_ring(self):
+        """Under measurement lag a full step oscillates forever; half a step decays.
+
+        A day's residual reaches the exporter only after that day has been
+        served and scored, so the correction being folded in is always relative
+        to an older table, not the one now live. With ``T <- T + R`` that lag
+        puts the loop's poles exactly on the unit circle — it swings around B
+        without ever losing amplitude, which is what live bias did over
+        2026-08-15..18: -21.7, +1.7, -26.6, -23.9.
+        """
+        acc = self._mod()._accumulate_bias
+        B = 52.0
+
+        def run(gain, steps=9, lag=1):
+            table, seen = {}, []
+            history = [0]
+            for _ in range(steps):
+                residual = B - history[max(0, len(history) - 1 - lag)]
+                seen.append(residual)
+                table = acc(table, {1: residual}, gain=gain)
+                history.append(table[1])
+            return seen
+
+        full = run(1.0)
+        assert max(map(abs, full[-3:])) >= max(map(abs, full[:3]))   # never decays
+
+        damped = run(0.5)
+        assert max(map(abs, damped[-3:])) < 0.5 * max(map(abs, damped[:3]))
 
     def test_accumulation_converges_where_replacement_stalls(self):
         """Simulated loop against a constant raw bias B."""
@@ -332,7 +363,14 @@ class TestBiasAccumulation:
         for _ in range(30):
             residual = {1: B - table.get(1, 0)}
             table = acc(table, residual)
-        assert abs(B - table[1]) <= 1          # closed
+        assert abs(B - table[1]) <= 1          # closed, damping only slows it
+
+    def test_fingerprint_tracks_the_trees_only(self):
+        fp = self._mod()._model_fingerprint
+        a = {"baseline": 1.0, "learning_rate": 0.1, "trees": [{"v": [1, 2]}]}
+        b = {"baseline": 1.0, "learning_rate": 0.1, "trees": [{"v": [1, 3]}]}
+        assert fp(a) == fp(dict(a, bias_by_horizon={1: 84}))   # bands are not the model
+        assert fp(a) != fp(b)
 
     def test_day_after(self):
         day_after = self._mod()._day_after
