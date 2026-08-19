@@ -128,6 +128,21 @@ def _accumulate_bias(previous: dict | None, residual: dict,
     return {h: int(round(previous.get(h, 0) + gain * r)) for h, r in residual.items()}
 
 
+def _merge_weekend_bias(flat: dict | None, live: dict | None, residual: dict | None) -> dict:
+    """Accumulate a weekday/weekend residual over what is already live.
+
+    Layered lowest-first: the flat table covers horizons a bucket has no split
+    support for, the live bucket keeps everything it has already accumulated,
+    and the residual moves only the horizons actually measured this round.
+    That middle layer matters — a bucket whose residual is empty (weekend
+    support is thin under a ``since`` floor, and thinner still right after a
+    model change) would otherwise be demoted to the flat table, throwing away
+    weeks of accumulation on the strength of one under-supported window.
+    """
+    live = live or {}
+    return {**(flat or {}), **live, **_accumulate_bias(live, residual or {})}
+
+
 def _model_fingerprint(tree_data: dict) -> str:
     """Stable digest of the serving trees, to tell a real retrain from a re-export."""
     payload = pickle.dumps(
@@ -497,12 +512,9 @@ def main():
             # accumulated correction on whichever bucket it covers.
             live_weekend = live_model.get("bias_by_horizon_weekend") or {}
             merged = {
-                bucket: {
-                    **(bias_table or {}),
-                    **_accumulate_bias(
-                        live_weekend.get(bucket), bias_weekend.get(bucket) or {}
-                    ),
-                }
+                bucket: _merge_weekend_bias(
+                    bias_table, live_weekend.get(bucket), bias_weekend.get(bucket)
+                )
                 for bucket in ("weekday", "weekend")
             }
             print(f"  Bias correction (weekday/weekend, accumulated): {merged}")

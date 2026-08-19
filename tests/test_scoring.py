@@ -286,6 +286,43 @@ def test_to_epoch_seconds_is_resolution_independent():
 
 # ── Bias-correction accumulation ────────────────────────────────────────────
 
+class TestWeekendBiasWindow:
+    """The weekday/weekend residual must never widen past its `since` floor.
+
+    It feeds an accumulating correction that takes precedence over the flat
+    table in serving, so re-pooling days already folded in pushes the served
+    correction further out on every export.
+    """
+
+    def test_since_restriction_is_not_widened_when_empty(self, monkeypatch):
+        import src.scoring as sc
+
+        calls = []
+
+        def fake_reports(days, client=None, since=None):
+            calls.append(since)
+            return [] if since else [{"date": "2026-08-05", "by_stops_ahead_weekend": {
+                "weekday": {"1": {"n": 5000, "bias_sec": 12.0}}}}]
+
+        monkeypatch.setattr(sc, "_recent_quality_reports", fake_reports)
+        table, dates = sc.live_bias_by_horizon_weekend(days=14, since="2026-08-19")
+
+        assert calls == ["2026-08-19"]          # asked once, never re-asked unrestricted
+        assert not any(table.values())
+        assert dates == []
+
+    def test_unrestricted_call_still_pools(self, monkeypatch):
+        import src.scoring as sc
+
+        monkeypatch.setattr(sc, "_recent_quality_reports", lambda days, client=None, since=None: [
+            {"date": "2026-08-05",
+             "by_stops_ahead_weekend": {"weekday": {"1": {"n": 5000, "bias_sec": 12.0}}}}
+        ])
+        table, dates = sc.live_bias_by_horizon_weekend(days=14)
+        assert table["weekday"] == {1: 12}
+        assert dates == ["2026-08-05"]
+
+
 class TestBiasAccumulation:
     """The correction must build on itself, not restart from the residual.
 
@@ -371,6 +408,21 @@ class TestBiasAccumulation:
         b = {"baseline": 1.0, "learning_rate": 0.1, "trees": [{"v": [1, 3]}]}
         assert fp(a) == fp(dict(a, bias_by_horizon={1: 84}))   # bands are not the model
         assert fp(a) != fp(b)
+
+    def test_weekend_merge_keeps_what_a_thin_bucket_already_accumulated(self):
+        merge = self._mod()._merge_weekend_bias
+        flat = {1: 10, 2: 10}
+        live = {1: 40, 2: 38}
+
+        # Bucket measured this round: moves by half the residual, off the live value.
+        assert merge(flat, live, {1: 12.0})[1] == 46
+
+        # Bucket with no residual at all keeps its accumulation, not the flat table.
+        assert merge(flat, live, {}) == live
+        assert merge(flat, None, {}) == flat
+
+        # Horizons the split has no support for still fall back to the flat table.
+        assert merge({3: 7}, live, {})[3] == 7
 
     def test_day_after(self):
         day_after = self._mod()._day_after

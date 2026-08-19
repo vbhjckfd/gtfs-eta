@@ -766,14 +766,23 @@ def live_bias_by_horizon_weekend(
     back to the unsplit ``live_bias_by_horizon`` table for that bucket, not
     leave predictions uncorrected.
 
-    *since* restricts the pool to days the current model served, with the same
-    fall back to the unrestricted window as ``live_bias_by_horizon``.
+    *since* restricts the pool to days the current model served, and — as in
+    ``live_bias_by_horizon`` — an empty result under that restriction means
+    "nothing measured that the live table has not already absorbed", never
+    "recompute from the full window".
+
+    This used to widen back to the unrestricted window whenever the restricted
+    pool came back empty, which quietly re-fed the same days into an
+    accumulating correction on every export. Since these buckets take
+    precedence over the flat table in ``src.inference.run_inference``, the
+    daily refresh was folding a full 14-day residual into the served weekday
+    table again and again: measured 2026-08-19, the flat branch correctly
+    reported nothing unabsorbed since 2026-08-19 while this one pooled
+    2026-08-05..18 and pushed the correction further out. The caller keeps the
+    live split when this returns empty, so no fallback is needed here.
     """
     reports = _recent_quality_reports(days, client, since=since)
     table = _aggregate_stops_ahead_bias_weekend(reports, min_n=min_n)
-    if not any(table.values()) and since is not None:
-        reports = _recent_quality_reports(days, client)
-        table = _aggregate_stops_ahead_bias_weekend(reports, min_n=min_n)
     dates_used = sorted(rep.get("date") for rep in reports)
     return table, dates_used
 
