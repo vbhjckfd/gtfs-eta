@@ -218,6 +218,39 @@ export function parseFeedStats(buf, targetStopId) {
 }
 
 /**
+ * Read just the FeedHeader timestamp, skipping the entities entirely.
+ *
+ * archiveFeed only needs the header timestamp to build its key, but used to
+ * take it from parseFeedStats — which walks every entity, trip update and
+ * stop_time_update and UTF-8-decodes every stop id on the way.  That walk
+ * scales with the feed, so once the morning peak pushed it past Cloudflare's
+ * CPU limit the 5-minute cron died *before* dispatchWorkflow, stalling the
+ * publish pipeline with nothing in Sentry: the isolate is killed outright, so
+ * the handler's own error reporting never runs.
+ *
+ * Field 1 is the header and protobuf writers emit fields in order, so this
+ * normally returns after ~10 bytes.  A feed with the header elsewhere still
+ * only costs one non-recursive skip per preceding field.
+ */
+export function parseFeedTimestamp(buf) {
+  const msg = new Reader(buf);
+  while (!msg.done()) {
+    const [field, wireType] = msg.key();
+    if (field === 1 && wireType === 2) {
+      const header = msg.sub();
+      while (!header.done()) {
+        const [hField, hWire] = header.key();
+        if (hField === 3 && hWire === 0) return header.varint();
+        header.skip(hWire);
+      }
+      return 0;
+    }
+    msg.skip(wireType);
+  }
+  return 0;
+}
+
+/**
  * POST a single event to Sentry's envelope API.  No-op without SENTRY_DSN.
  * Reporting must never break the worker, so all errors here are swallowed.
  */
@@ -309,7 +342,7 @@ async function archiveFeed(env) {
   }
 
   const data = new Uint8Array(await obj.arrayBuffer());
-  const { timestamp } = parseFeedStats(data, "");
+  const timestamp = parseFeedTimestamp(data);
   if (timestamp === 0) {
     console.warn("[archive] feed has no header timestamp — skipping");
     return;
@@ -563,9 +596,21 @@ export default {
       return;
     }
 
-    // Snapshot the feed that consumers saw over the last cycle before we kick a
-    // refresh, so quality scoring measures the *served* predictions.  Isolated
-    // from the dispatch below: a failed archive must never stall the pipeline.
+    // Dispatch first, archive second — the order matters for failure, not for
+    // speed.  A try/catch only isolates the archive from *thrown* errors; when
+    // the isolate is killed outright (CPU limit) nothing downstream runs at
+    // all, so with the archive first an over-budget cron silently skipped the
+    // dispatch and stalled publishing for hours.  Kicking the refresh first
+    // makes the critical path survive any archive-side blowup.
+    //
+    // This still samples the feed consumers saw over the last cycle: dispatch
+    // only *queues* the workflow, and the runner needs tens of seconds to boot
+    // before it pushes anything, so the blob is unchanged milliseconds later.
+    // Should it ever race, archiveFeed keys by the feed's own header timestamp,
+    // so the sample lands under the instant it actually represents.
+    const workflow = env.GITHUB_WORKFLOW ?? "push-feed.yml";
+    const dispatched = await dispatchWorkflow(env, workflow);
+
     let archived = true;
     try {
       await archiveFeed(env);
@@ -574,9 +619,6 @@ export default {
       console.error(`[scheduled] feed archive raised: ${exc}`);
       await reportException(env, exc, "scheduled.archive");
     }
-
-    const workflow = env.GITHUB_WORKFLOW ?? "push-feed.yml";
-    const dispatched = await dispatchWorkflow(env, workflow);
 
     // Awaited rather than waitUntil'd: nothing is waiting on a cron run, and
     // this is the only record that the 5-minute pipeline actually fired.
