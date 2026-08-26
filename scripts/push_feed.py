@@ -35,6 +35,7 @@ import pickle
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 sys.path.insert(0, ".")
 
@@ -136,7 +137,17 @@ TRACKER_STATE_MAX_AGE_SEC = 6 * 3600
 COLLAPSE_MIN_PREV_ENTITIES = 20  # below this the ratio is noise (night service)
 COLLAPSE_RATIO = 0.3
 
+# How stale the served feed may be and still seed the collapse guard at startup
+# (see _load_prev_entities). This bounds both sides of one tradeoff: a longer
+# window protects a longer upstream outage, and is also the longest a wrongly
+# held baseline can keep blocking publishes. Every restart re-seeds from the
+# same unchanged blob, so a block persists until the blob ages past this window
+# rather than clearing at the next restart.
+COLLAPSE_SEED_MAX_AGE_SEC = 900
+
 # Entity count of the last feed actually published, for the collapse guard.
+# Seeded from the served feed at startup, because this process is replaced every
+# ~5.5 min and a None baseline publishes anything (see _should_publish).
 _last_published_entities: int | None = None
 
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
@@ -292,6 +303,63 @@ def _should_publish(prev_entities: int | None, new_entities: int) -> bool:
     return new_entities >= prev_entities * COLLAPSE_RATIO
 
 
+def _load_prev_entities(client) -> int | None:
+    """Seed the collapse guard with the entity count of the feed being served.
+
+    _should_publish only blocks a collapse when it knows what the previous pass
+    produced, and that baseline lived in process memory — but this process is
+    replaced every ~5.5 min (`--loop 10 --count 33`). An upstream outage
+    outlasting one cycle therefore beat the guard entirely: the fresh process
+    started with no baseline and published the empty feed straight over the good
+    one, which is how /health went 503 on 2026-08-26 while the guard had held
+    correctly for the preceding four minutes.
+
+    The served blob is the right baseline because it is exactly what a publish
+    would overwrite, and its `entities` metadata is written only on a real
+    publish — unlike status.json, which also records blocked passes and would
+    seed 0 after the first one.
+
+    Ignores a blob older than COLLAPSE_SEED_MAX_AGE_SEC: past that the daemon
+    itself was likely down (a runner gap), real service may legitimately have
+    wound down since, and a baseline from another part of the day would block
+    every publish instead of protecting one. Never raises — an unreadable or
+    unstamped object just means the guard starts cold, the previous behaviour.
+    """
+    try:
+        head = client.head_object(Bucket=R2_BUCKET, Key=FEED_KEY)
+    except Exception as exc:  # noqa: BLE001 — a cold guard is an acceptable outcome
+        print(f"[warn] no collapse baseline carried over: {exc!r}", flush=True)
+        return None
+
+    last_modified = head.get("LastModified")
+    if last_modified is None:
+        return None
+    age = (datetime.now(timezone.utc) - last_modified).total_seconds()
+    if age > COLLAPSE_SEED_MAX_AGE_SEC:
+        print(
+            f"[warn] served feed is {round(age)}s old — starting the collapse "
+            f"guard cold rather than trusting a stale baseline",
+            flush=True,
+        )
+        return None
+
+    raw = (head.get("Metadata") or {}).get("entities")
+    if raw is None:
+        return None
+    try:
+        entities = int(raw)
+    except ValueError:
+        print(f"[warn] unusable entities metadata {raw!r} on the served feed", flush=True)
+        return None
+
+    print(
+        f"Collapse guard seeded with {entities} trips from the served feed "
+        f"({round(age)}s old).",
+        flush=True,
+    )
+    return entities
+
+
 def _put_status(client, payload: dict) -> None:
     """Publish the JSON sidecar describing the currently served feed.
 
@@ -427,6 +495,11 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
         # to go on. R2 metadata values must be strings.
         Metadata={
             "commit": FEED_COMMIT,
+            # Read back by _load_prev_entities at the next process start: the
+            # collapse guard needs the served feed's trip count to survive the
+            # ~5.5 min restart, and a HEAD on this key is the cheapest way to
+            # get it (no 200 KB body, no protobuf decode).
+            "entities": str(entities),
             "vehicles_in": str(stats.get("vehicles_in", 0)),
             "vehicles_stale": str(stats.get("vehicles_stale", 0)),
             "feed_skew_sec": str(stats.get("feed_skew_sec", 0)),
@@ -477,6 +550,11 @@ def main() -> None:
     client = _make_client()
     gtfs_data, model_data = _load_resources(client)
     trackers: dict = _load_tracker_state(client)
+
+    # Carry the collapse guard's baseline across the restart, so an upstream
+    # outage cannot slip an empty feed through on this process's first pass.
+    global _last_published_entities
+    _last_published_entities = _load_prev_entities(client)
 
     if args.loop:
         n = 0

@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -164,3 +165,79 @@ def test_status_write_failure_does_not_break_the_push(monkeypatch):
     client = _StatusFails()
     _run_push(monkeypatch, client, 500)
     assert push_feed.FEED_KEY in client.keys()
+
+
+# ── _load_prev_entities ──────────────────────────────────────────────────────
+#
+# The guard's baseline used to die with the process, and this process is
+# replaced every ~5.5 min. An upstream outage lasting longer than one cycle
+# therefore beat the guard outright — the fresh process had no baseline and
+# published the empty feed over the good one. These cover the seed that carries
+# the baseline across the restart.
+
+class _FakeHead(_FakeClient):
+    """A fake R2 that answers HEAD on FEED_KEY with a stamped, aged object."""
+
+    def __init__(self, metadata: dict | None = None, age_sec: float = 5.0, exc=None):
+        super().__init__()
+        self._metadata = metadata
+        self._age_sec = age_sec
+        self._exc = exc
+
+    def head_object(self, **kwargs):
+        assert kwargs["Key"] == push_feed.FEED_KEY
+        if self._exc is not None:
+            raise self._exc
+        return {
+            "LastModified": datetime.now(timezone.utc) - timedelta(seconds=self._age_sec),
+            "Metadata": self._metadata,
+        }
+
+
+def test_seeds_the_baseline_from_the_served_feed():
+    client = _FakeHead({"entities": "530", "commit": "abc1234"}, age_sec=20)
+    assert push_feed._load_prev_entities(client) == 530
+
+
+def test_stale_served_feed_does_not_seed():
+    # Past the window the daemon itself was likely down (a runner gap) and real
+    # service may have wound down since — a baseline from another part of the
+    # day would block every publish instead of protecting one.
+    client = _FakeHead(
+        {"entities": "530"}, age_sec=push_feed.COLLAPSE_SEED_MAX_AGE_SEC + 1
+    )
+    assert push_feed._load_prev_entities(client) is None
+
+
+def test_missing_or_unreadable_feed_starts_the_guard_cold():
+    assert push_feed._load_prev_entities(_FakeHead(exc=RuntimeError("no such key"))) is None
+    # Written by a daemon predating the metadata stamp.
+    assert push_feed._load_prev_entities(_FakeHead({"commit": "abc1234"})) is None
+    assert push_feed._load_prev_entities(_FakeHead(None)) is None
+    assert push_feed._load_prev_entities(_FakeHead({"entities": "not-a-number"})) is None
+
+
+def test_published_feed_carries_its_entity_count(monkeypatch):
+    # The seed reads this back with a HEAD, so the stamp must be on the object.
+    client = _FakeClient()
+    _run_push(monkeypatch, client, 500)
+
+    feed_put = next(p for p in client.puts if p["Key"] == push_feed.FEED_KEY)
+    assert feed_put["Metadata"]["entities"] == "500"
+
+
+def test_seeded_baseline_blocks_an_empty_first_push(monkeypatch):
+    # The 2026-08-26 regression: upstream returned no vehicles for ~12 min, the
+    # guard held for the first process's whole lifetime, then the restart
+    # published the empty feed and /health went 503.
+    push_feed._last_published_entities = push_feed._load_prev_entities(
+        _FakeHead({"entities": "530"}, age_sec=230)
+    )
+
+    restarted = _FakeClient()
+    _run_push(monkeypatch, restarted, 0, {"vehicles_in": 0, "vehicles_stale": 0})
+
+    assert push_feed.FEED_KEY not in restarted.keys()
+    status = json.loads(restarted.body(push_feed.STATUS_KEY))
+    assert status["published"] is False
+    assert "collapsed to 0 trips from 530" in status["detail"]
