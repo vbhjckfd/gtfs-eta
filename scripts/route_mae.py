@@ -41,9 +41,36 @@ load_dotenv()
 # their MAE swings on a handful of trips and reads as noise in the table.
 MIN_N = 30
 
+# A day that actually closed has predictions spread across the whole service
+# day (by_hour typically has ~19 keys, 05:00-23:00 feed TZ). A day scored a
+# few hours after midnight -- because --date's date.today() default trusted a
+# `schedule:` cron that drifted past midnight UTC -- has only the first one or
+# two. See _day_looks_complete.
+MIN_HOURS_COVERED = 10
+
 
 def _issue_title(date_str: str) -> str:
     return f"📊 Route MAE — {date_str}"
+
+
+def _day_looks_complete(report: dict) -> bool:
+    """Whether `report` covers enough of the service day to trust and publish.
+
+    --date defaults to date.today() computed at run time, on the assumption
+    the cron fires at 22:00 UTC as scheduled -- but GitHub's own `schedule:`
+    trigger is unreliable on low-activity repos (see score-quality.yml's
+    comment) and has drifted past midnight UTC more than once. When that
+    happens "today" silently becomes the day that just *started* rather than
+    the one that closed, and publishing under quality/<date>.json makes
+    score-quality.yml's 02:15 UTC run skip that date forever via the
+    idempotency guard both jobs share -- locking in a few hours of data as if
+    it were the whole day.
+
+    score-quality.yml's worker-dispatched run isn't subject to this drift --
+    it always fires well after midnight -- so refusing to publish here just
+    means that job scores the day correctly on its own instead.
+    """
+    return len(report.get("by_hour") or {}) >= MIN_HOURS_COVERED
 
 
 def _delta(cur: float, prev: float | None) -> str:
@@ -247,6 +274,20 @@ def main() -> int:
         f"coverage {report['coverage_frac']:.0%}",
         flush=True,
     )
+
+    # Guard against scoring a day that hasn't happened yet -- see
+    # _day_looks_complete. Only bites when actually publishing; --no-publish
+    # dry runs can still inspect a partial day.
+    if not args.no_publish and not _day_looks_complete(report):
+        hours_covered = len(report.get("by_hour") or {})
+        print(
+            f"  only {hours_covered} hour(s) of data for {args.date} -- this run "
+            f"fired before the day closed (GitHub schedule drift past midnight "
+            f"UTC). Refusing to publish; score-quality.yml's 02:15 UTC run will "
+            f"score {args.date} correctly.",
+            flush=True,
+        )
+        return 1
 
     if not args.no_publish:
         publish(report)
