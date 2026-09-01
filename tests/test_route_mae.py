@@ -1,15 +1,22 @@
-"""Unit tests for the day-completeness guard in scripts/route_mae.py.
+"""Unit tests for the two wrong-day guards in scripts/route_mae.py.
 
 route-mae.yml's `schedule:` cron is meant to fire at 22:00 UTC, once Lviv's
-service day has closed, and --date defaults to date.today() on that
+service day has closed, and --date defaults to today's UTC date on that
 assumption. GitHub's own schedule trigger is unreliable on low-activity
-repos and has drifted past midnight UTC -- when that happens "today" quietly
-becomes the day that just *started*, and publishing it under
-quality/<date>.json would lock a few hours of data in as the whole day (see
-score-quality.yml's shared idempotency guard). _day_looks_complete is the
-predicate that catches this before anything gets published.
+repos and has drifted past midnight UTC three times in one week -- when
+that happens "today" quietly becomes the day that just *started*, and
+publishing it under quality/<date>.json would lock a few hours of data in
+as the whole day (see score-quality.yml's shared idempotency guard).
 
-Hermetic: no R2/GitHub credentials or network involved -- the guard is pure.
+_default_date_is_safe is the primary guard: a wall-clock check made before
+score_date is even called, since a too-early run can come back
+status="no_predictions"/"no_matches"/"no_actuals" just as easily as a thin
+"ok" report, and every one of those still gets published deliberately.
+_day_looks_complete is the second-line defense against an explicit --date
+that still comes back thin for some other reason.
+
+Hermetic: no R2/GitHub credentials or network involved -- both guards are
+pure.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 for _k in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
@@ -65,3 +73,27 @@ def test_one_hour_short_of_the_floor_does_not():
 
 def test_a_missing_by_hour_key_does_not_crash():
     assert not route_mae._day_looks_complete({"status": "ok"})
+
+
+def _at(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 8, 31, hour, minute, tzinfo=timezone.utc)
+
+
+def test_the_intended_fire_time_is_safe():
+    assert route_mae._default_date_is_safe(_at(22, 0))
+
+
+def test_a_bit_early_is_still_safe():
+    assert route_mae._default_date_is_safe(_at(21, 0))
+
+
+def test_just_before_the_floor_is_not_safe():
+    assert not route_mae._default_date_is_safe(_at(20, 59))
+
+
+def test_a_run_just_past_midnight_is_not_safe():
+    # This is exactly what happened three times in one week: the cron fired
+    # at 02:59, 05:59 and 00:15 UTC, and each time "today" was the wrong day.
+    assert not route_mae._default_date_is_safe(_at(2, 59))
+    assert not route_mae._default_date_is_safe(_at(5, 59))
+    assert not route_mae._default_date_is_safe(_at(0, 15))

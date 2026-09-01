@@ -43,32 +43,51 @@ MIN_N = 30
 
 # A day that actually closed has predictions spread across the whole service
 # day (by_hour typically has ~19 keys, 05:00-23:00 feed TZ). A day scored a
-# few hours after midnight -- because --date's date.today() default trusted a
-# `schedule:` cron that drifted past midnight UTC -- has only the first one or
-# two. See _day_looks_complete.
+# few hours after midnight -- because --date's default trusted a `schedule:`
+# cron that drifted past midnight UTC -- has only the first one or two. See
+# _day_looks_complete.
 MIN_HOURS_COVERED = 10
+
+# Earliest UTC hour at which the *default* --date (today, per the cron's own
+# 22:00 UTC design) is safe to trust. See _default_date_is_safe.
+EARLIEST_SAFE_DEFAULT_HOUR_UTC = 21
 
 
 def _issue_title(date_str: str) -> str:
     return f"📊 Route MAE — {date_str}"
 
 
+def _default_date_is_safe(now: datetime) -> bool:
+    """Whether trusting today's UTC date as "the day that just closed" is safe.
+
+    --date defaults to date.today(), on the assumption the cron fires at
+    22:00 UTC as scheduled -- but GitHub's own `schedule:` trigger is
+    unreliable on low-activity repos (see score-quality.yml's comment) and
+    has drifted past midnight UTC three times in one week. When that
+    happens "today" silently becomes the day that just *started*, not the
+    one that closed.
+
+    That miss isn't limited to a thin report: scoring a day a few minutes old
+    can come back status="no_predictions"/"no_matches"/"no_actuals" just as
+    easily as a sparse "ok" one, and every one of those still gets published
+    (deliberately -- a day that's genuinely empty needs a record too). Only a
+    wall-clock check, made *before* scoring, catches both shapes: this job's
+    whole premise is that it runs late enough for the service day to have
+    closed, so if it hasn't reached that hour yet the default is never a day
+    it can trust, regardless of what score_date returns.
+
+    Only gates the *default* -- an explicit --date is trusted outright, same
+    as --force overriding the separate already-published guard.
+    """
+    return now.hour >= EARLIEST_SAFE_DEFAULT_HOUR_UTC
+
+
 def _day_looks_complete(report: dict) -> bool:
     """Whether `report` covers enough of the service day to trust and publish.
 
-    --date defaults to date.today() computed at run time, on the assumption
-    the cron fires at 22:00 UTC as scheduled -- but GitHub's own `schedule:`
-    trigger is unreliable on low-activity repos (see score-quality.yml's
-    comment) and has drifted past midnight UTC more than once. When that
-    happens "today" silently becomes the day that just *started* rather than
-    the one that closed, and publishing under quality/<date>.json makes
-    score-quality.yml's 02:15 UTC run skip that date forever via the
-    idempotency guard both jobs share -- locking in a few hours of data as if
-    it were the whole day.
-
-    score-quality.yml's worker-dispatched run isn't subject to this drift --
-    it always fires well after midnight -- so refusing to publish here just
-    means that job scores the day correctly on its own instead.
+    Second-line defense alongside _default_date_is_safe, for an explicit
+    --date that still comes back thin (e.g. handed a day that hasn't
+    happened yet, or one where the archive itself is unexpectedly sparse).
     """
     return len(report.get("by_hour") or {}) >= MIN_HOURS_COVERED
 
@@ -235,9 +254,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Score a day and post its per-route MAE issue.")
     parser.add_argument(
         "--date",
-        # At 22:00 UTC the *current* UTC date is the Kyiv day that just ended —
-        # not "yesterday" as in the 02:15 UTC jobs.
-        default=datetime.now(timezone.utc).date().isoformat(),
+        # None means "not given" -- resolved below, distinct from an explicit
+        # --date, so the wall-clock check in _default_date_is_safe only ever
+        # gates the default (see its docstring).
+        default=None,
         help="UTC day YYYY-MM-DD (default: the day that just closed)",
     )
     parser.add_argument(
@@ -251,6 +271,24 @@ def main() -> int:
         "--no-issue", action="store_true", help="print the digest instead of posting it"
     )
     args = parser.parse_args()
+
+    if args.date is None:
+        # At 22:00 UTC the *current* UTC date is the Kyiv day that just ended —
+        # not "yesterday" as in the 02:15 UTC jobs. But only trust that when
+        # it's actually late enough in the UTC day for the premise to hold --
+        # see _default_date_is_safe.
+        now = datetime.now(timezone.utc)
+        if not _default_date_is_safe(now):
+            print(
+                f"  fired at {now.strftime('%H:%M')} UTC — too early to trust "
+                f"today ({now.date().isoformat()}) as the day that just closed "
+                f"(expects ~22:00 UTC; GitHub's schedule trigger has drifted "
+                f"past midnight before). Refusing to guess; score-quality.yml's "
+                f"02:15 UTC run will score the correct day on its own.",
+                flush=True,
+            )
+            return 1
+        args.date = now.date().isoformat()
 
     # Same guard score_quality.py uses: if the day is already published, some other
     # run owned it — don't re-score and don't post a second issue.
