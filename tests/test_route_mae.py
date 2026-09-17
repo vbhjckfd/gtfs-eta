@@ -3,13 +3,13 @@
 route-mae.yml's `schedule:` cron is meant to fire at 22:00 UTC, once Lviv's
 service day has closed, and --date defaults to today's UTC date on that
 assumption. GitHub's own schedule trigger is unreliable on low-activity
-repos and has drifted past midnight UTC three times in one week -- when
-that happens "today" quietly becomes the day that just *started*, and
-publishing it under quality/<date>.json would lock a few hours of data in
-as the whole day (see score-quality.yml's shared idempotency guard).
+repos and routinely drifts past midnight UTC -- when that happens "today"
+is the day that just *started*, and publishing it under quality/<date>.json
+would lock a few hours of data in as the whole day (see score-quality.yml's
+shared idempotency guard).
 
-_default_date_is_safe is the primary guard: a wall-clock check made before
-score_date is even called, since a too-early run can come back
+_default_date is the primary guard: a wall-clock rule applied before
+score_date is even called (before 21:00 UTC, the closed day is yesterday), since a too-early run can come back
 status="no_predictions"/"no_matches"/"no_actuals" just as easily as a thin
 "ok" report, and every one of those still gets published deliberately.
 _day_looks_complete is the second-line defense against an explicit --date
@@ -79,21 +79,25 @@ def _at(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 8, 31, hour, minute, tzinfo=timezone.utc)
 
 
-def test_the_intended_fire_time_is_safe():
-    assert route_mae._default_date_is_safe(_at(22, 0))
+def test_the_intended_fire_time_scores_today():
+    assert route_mae._default_date(_at(22, 0)) == "2026-08-31"
 
 
-def test_a_bit_early_is_still_safe():
-    assert route_mae._default_date_is_safe(_at(21, 0))
+def test_a_bit_early_still_scores_today():
+    assert route_mae._default_date(_at(21, 0)) == "2026-08-31"
 
 
-def test_just_before_the_floor_is_not_safe():
-    assert not route_mae._default_date_is_safe(_at(20, 59))
+def test_just_before_the_floor_scores_yesterday():
+    assert route_mae._default_date(_at(20, 59)) == "2026-08-30"
 
 
-def test_a_run_just_past_midnight_is_not_safe():
-    # This is exactly what happened three times in one week: the cron fired
-    # at 02:59, 05:59 and 00:15 UTC, and each time "today" was the wrong day.
-    assert not route_mae._default_date_is_safe(_at(2, 59))
-    assert not route_mae._default_date_is_safe(_at(5, 59))
-    assert not route_mae._default_date_is_safe(_at(0, 15))
+def test_a_run_past_midnight_scores_the_day_that_closed():
+    # The cron has fired at 00:01, 00:11, 00:15, 00:22, 02:59 and 05:59 UTC;
+    # each time "today" was the wrong day and yesterday was the right one.
+    for hour, minute in [(0, 1), (0, 15), (2, 59), (5, 59)]:
+        assert route_mae._default_date(_at(hour, minute)) == "2026-08-30"
+
+
+def test_crosses_a_month_boundary():
+    first = datetime(2026, 9, 1, 0, 11, tzinfo=timezone.utc)
+    assert route_mae._default_date(first) == "2026-08-31"
