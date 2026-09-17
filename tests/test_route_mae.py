@@ -101,3 +101,19 @@ def test_a_run_past_midnight_scores_the_day_that_closed():
 def test_crosses_a_month_boundary():
     first = datetime(2026, 9, 1, 0, 11, tzinfo=timezone.utc)
     assert route_mae._default_date(first) == "2026-08-31"
+
+
+def test_dropped_joins_section_renders_counts():
+    report = {
+        "past_crossing_dropped": {"n": 47713, "frac": 0.0733, "tolerance_sec": 60},
+        "implausible_dropped": {"n": 13835, "frac": 0.0213, "threshold_sec": 3600},
+    }
+    text = "\n".join(route_mae._dropped_joins_section(report))
+    assert "## Dropped joins" in text
+    assert "| 47,713 | 7.3% |" in text
+    assert "> 3600s" in text
+    assert "trip not running" not in text  # absent key → no row
+
+
+def test_dropped_joins_section_absent_on_old_reports():
+    assert route_mae._dropped_joins_section({"overall": {}}) == []

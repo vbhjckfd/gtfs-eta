@@ -122,6 +122,35 @@ def test_join_drops_past_and_implausible():
     assert joined.empty
 
 
+def test_join_drops_crossings_before_the_prediction():
+    # A later run's prediction joined to the earlier run's crossing of the same
+    # (vehicle, trip, stop, seq) -- live matcher reused the trip_id. The
+    # residual is well under MAX_PLAUSIBLE_ERROR_SEC, so only this filter
+    # catches it.
+    preds = _predictions_df([
+        {"feed_ts": 10_000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "1",
+         "stop_id": "1", "stop_sequence": 1, "stops_ahead": 1, "predicted_arrival": 10_120},
+        # crossing inside the tolerance (snapshot granularity) → kept
+        {"feed_ts": 10_000, "vehicle_id": "v2", "trip_id": "t2", "route_id": "1",
+         "stop_id": "2", "stop_sequence": 1, "stops_ahead": 1, "predicted_arrival": 10_030},
+    ])
+    actuals = pd.DataFrame([
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "1", "stop_id": "1",
+         "stop_sequence": 1, "actual_arrival_ts": 10_000 - 1_500},
+        {"vehicle_id": "v2", "trip_id": "t2", "route_id": "1", "stop_id": "2",
+         "stop_sequence": 1,
+         "actual_arrival_ts": 10_000 - scoring.PAST_CROSSING_TOLERANCE_SEC},
+    ])
+    joined = scoring.join_predictions_actuals(preds, actuals)
+    assert list(joined["vehicle_id"]) == ["v2"]
+    assert joined.attrs["n_past_crossing_dropped"] == 1
+
+    report = scoring.score_report(joined, actuals, "2026-09-16")
+    assert report["past_crossing_dropped"] == {
+        "n": 1, "frac": 0.5, "tolerance_sec": scoring.PAST_CROSSING_TOLERANCE_SEC,
+    }
+
+
 def test_score_report_metrics_and_coverage():
     # Two stops actually arrived; only one was predicted → coverage 0.5.
     preds = _predictions_df([

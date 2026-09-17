@@ -157,7 +157,7 @@ def render_issue(report: dict, prev: dict | None) -> str:
 
     lines += _horizon_section(report)
     lines += _worst_routes_horizon_section(report)
-    lines += _worst_predictions_section(report)
+    lines += _dropped_joins_section(report)
 
     lines += [
         "",
@@ -202,20 +202,35 @@ def _worst_routes_horizon_section(report: dict) -> list[str]:
     return lines
 
 
-def _worst_predictions_section(report: dict) -> list[str]:
-    """The single worst individual predictions of the day — outlier exemplars
-    a per-route MAE average can hide."""
-    worst = report.get("worst_predictions") or []
-    if not worst:
+def _dropped_joins_section(report: dict) -> list[str]:
+    """How many forward predictions scoring threw away as bad joins, and why.
+
+    Replaces the old worst-5-predictions table: the plausibility cap keeps
+    |error| <= MAX_PLAUSIBLE_ERROR_SEC, so that table was always five rows
+    pinned at exactly +/-3600s and said nothing. The drop counts do -- a jump
+    in any of them means the join (or live trip matching), not the model,
+    moved the day's MAE.
+    """
+    rows = [
+        ("past_crossing_dropped", "crossing before the prediction was made",
+         lambda d: f"> {d.get('tolerance_sec', 0)}s before"),
+        ("implausible_dropped", "implausible residual",
+         lambda d: f"\\|error\\| > {d.get('threshold_sec', 0)}s"),
+        ("schedule_window_dropped", "trip not running at prediction time",
+         lambda d: f"± {d.get('margin_sec', 0) // 3600}h margin"),
+    ]
+    present = [(k, label, rule) for k, label, rule in rows if report.get(k)]
+    if not present:
         return []
-    lines = ["", "## Worst individual predictions", "",
-             "| route | stop | stops_ahead | lead | error |",
-             "|---|---|---:|---:|---:|"]
-    for p in worst:
-        lines.append(
-            f"| {p['route_id']} | {p['stop_id']} | {p['stops_ahead']} | "
-            f"{p['lead_sec'] / 60:.0f}m | {p['error_sec']:+.0f}s |"
-        )
+    lines = ["", "## Dropped joins", "",
+             "Forward predictions excluded from every metric above as bad joins "
+             "(live trip label disagreeing with the actual run), not bad predictions.",
+             "",
+             "| reason | rule | n | share |",
+             "|---|---|---:|---:|"]
+    for k, label, rule in present:
+        d = report[k]
+        lines.append(f"| {label} | {rule(d)} | {d.get('n', 0):,} | {d.get('frac', 0):.1%} |")
     return lines
 
 

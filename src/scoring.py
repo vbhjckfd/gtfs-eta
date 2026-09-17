@@ -56,6 +56,19 @@ ARRIVING_NOW_SEC = 60
 # bad join, not a bad prediction, and would swamp the means.
 MAX_PLAUSIBLE_ERROR_SEC = 3600
 
+# A prediction joined to a crossing that happened *before* the prediction was
+# generated can't be a real pairing -- it's an ETA for a stop the vehicle had
+# already passed. It happens when live serving's trip matcher reuses an earlier
+# run's trip_id on the same vehicle's later run (no schedule-time check, see
+# SCHEDULE_WINDOW_MARGIN_SEC): the join then pairs the later run's prediction
+# with the earlier run's crossing, typically ~77 min earlier. Measured
+# 2026-09-16: 47.7k of 650k forward predictions (7.3%); 36.8k were already
+# caught by MAX_PLAUSIBLE_ERROR_SEC, but 10.9k slipped under it with a mean
+# error of +1310s, inflating published MAE 150s -> 171s and hiding a -25s
+# optimistic bias. The tolerance allows for snapshot granularity: a crossing
+# detected a few seconds before the snapshot that still listed the stop ahead.
+PAST_CROSSING_TOLERANCE_SEC = 60
+
 # A prediction is only scored if it was generated while its matched trip_id
 # could plausibly have been running — this many seconds either side of that
 # trip's own scheduled [first_departure, last_arrival]. Live serving's trip
@@ -263,6 +276,9 @@ def join_predictions_actuals(
     # drop implausible residuals that signal a bad join, not a bad model.
     joined = joined[joined["lead_sec"] > 0]
     n_forward = len(joined)
+    past_crossing = joined["actual_arrival_ts"] < joined["feed_ts"] - PAST_CROSSING_TOLERANCE_SEC
+    n_past_crossing = int(past_crossing.sum())
+    joined = joined[~past_crossing]
     implausible = joined["abs_error_sec"] > MAX_PLAUSIBLE_ERROR_SEC
     n_dropped = int(implausible.sum())
     joined = joined[~implausible]
@@ -270,6 +286,7 @@ def join_predictions_actuals(
     # join that's silently discarding a large share of residuals (which would
     # make the published MAE look better than it is).
     joined.attrs["n_implausible_dropped"] = n_dropped
+    joined.attrs["n_past_crossing_dropped"] = n_past_crossing
     joined.attrs["n_forward"] = n_forward
 
     # Drop joins where the prediction was generated while its matched trip_id
@@ -428,6 +445,15 @@ def score_report(
                 4,
             ),
             "threshold_sec": MAX_PLAUSIBLE_ERROR_SEC,
+        },
+        "past_crossing_dropped": {
+            "n": int(joined.attrs.get("n_past_crossing_dropped", 0)),
+            "frac": round(
+                joined.attrs.get("n_past_crossing_dropped", 0)
+                / max(joined.attrs.get("n_forward", 0), 1),
+                4,
+            ),
+            "tolerance_sec": PAST_CROSSING_TOLERANCE_SEC,
         },
         "schedule_window_dropped": {
             "n": int(joined.attrs.get("n_schedule_dropped", 0)),
