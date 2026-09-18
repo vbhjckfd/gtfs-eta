@@ -40,18 +40,23 @@ _MAX_VEHICLE_SPEED_MPS = 40.0
 # against the first run's crossings (measured 2026-09-16: ~44k predictions,
 # 6.8% of the day, all verified accurate against raw GPS). A drop in
 # dist_along of more than this share of the shape, below the furthest point
-# the current run reached, can only be the vehicle starting over.
+# the current run reached, can only be the vehicle starting over -- once it
+# holds for _RUN_RESET_CONSEC snapshots in a row, so a single misprojection on
+# a self-intersecting shape can't split a run.
 _RUN_RESET_FRAC = 0.5
+_RUN_RESET_CONSEC = 3
 
 
 def _split_runs(traj: pd.DataFrame, dist_col: str, shape_len: float) -> list[pd.DataFrame]:
     """Split a timestamp-sorted trajectory into separate runs of the trip.
 
-    A new run starts where dist_along falls more than ``_RUN_RESET_FRAC`` of
-    the shape length below the furthest distance the current run reached.
-    Projection jitter and the speed-rejected jumps _project_vehicle_positions
-    already filters are far smaller, so an ordinary single run is returned
-    unchanged as a one-element list.
+    A new run starts at the first of ``_RUN_RESET_CONSEC`` consecutive
+    snapshots that all sit more than ``_RUN_RESET_FRAC`` of the shape length
+    below the furthest distance the current run reached. Must be given the
+    *raw* projection: the constrained one _project_vehicle_positions applies
+    to ambiguous shapes never moves backwards, so a second run on such a
+    shape would stay frozen at the first run's furthest point and never
+    split. An ordinary single run comes back as a one-element list.
     """
     dists = traj[dist_col].to_numpy(dtype=float)
     if len(dists) == 0:
@@ -59,14 +64,42 @@ def _split_runs(traj: pd.DataFrame, dist_col: str, shape_len: float) -> list[pd.
     threshold = _RUN_RESET_FRAC * max(shape_len, 1.0)
     starts = [0]
     furthest = dists[0]
+    streak_start = None
     for i in range(1, len(dists)):
         if dists[i] < furthest - threshold:
-            starts.append(i)
-            furthest = dists[i]
+            if streak_start is None:
+                streak_start = i
+            if i - streak_start + 1 >= _RUN_RESET_CONSEC:
+                starts.append(streak_start)
+                furthest = float(np.max(dists[streak_start:i + 1]))
+                streak_start = None
         else:
+            streak_start = None
             furthest = max(furthest, dists[i])
     bounds = starts + [len(dists)]
     return [traj.iloc[bounds[k]:bounds[k + 1]] for k in range(len(starts))]
+
+
+def _project_runs(traj: pd.DataFrame, shape, constrain: bool) -> list[pd.DataFrame]:
+    """Timestamp-sorted runs of *traj*, each with its own ``dist_along``.
+
+    Runs are found on the raw projection (see _split_runs), and only then is
+    the constrained projection applied, per run, where *constrain* asks for
+    it -- so its no-going-backwards clamp works within a run and never
+    across the restart between two.
+    """
+    traj = traj.sort_values("timestamp").copy()
+    traj["dist_along"] = _project_vehicle_positions(traj, shape, constrain=False)
+    traj = traj.dropna(subset=["dist_along"])
+    runs = []
+    for run in _split_runs(traj, "dist_along", shape.length):
+        run = run.copy()
+        if constrain:
+            run["dist_along"] = _project_vehicle_positions(run, shape, constrain=True)
+            run = run.dropna(subset=["dist_along"])
+        if not run.empty:
+            runs.append(run)
+    return runs
 
 
 def _project_vehicle_positions(
@@ -155,6 +188,16 @@ def _project_vehicle_positions(
     return pd.Series(out, index=traj.index)
 
 
+# A trajectory often *starts* mid-route: the vehicle's first fix of the day,
+# or the first fix after trip labeling switched it onto this trip_id. Every
+# stop behind that first position was never seen being crossed, but taking
+# "the first index where dist >= stop dist" stamped all of them with the
+# first fix's timestamp -- measured 2026-09-16: 22% of all actual arrivals
+# were these same-second pileups (median 25 stops at once). A stop only counts
+# as crossed at the first fix if the vehicle was already at it.
+_FIRST_FIX_STOP_TOL_M = 50.0
+
+
 def _detect_stop_crossings(
     traj: pd.DataFrame,
     dist_col: str,
@@ -162,7 +205,9 @@ def _detect_stop_crossings(
 ) -> list[dict]:
     """
     For each stop, find the first timestamp where the vehicle's dist_along
-    crosses (reaches or passes) the stop's dist_along.
+    crosses (reaches or passes) the stop's dist_along. A stop the vehicle was
+    already past at its first fix (by more than _FIRST_FIX_STOP_TOL_M) was
+    never observed being crossed and gets None.
 
     Returns a list of dicts with keys:
         stop_id, stop_sequence, actual_arrival (UTC datetime or None)
@@ -194,10 +239,12 @@ def _detect_stop_crossings(
                     actual = datetime.fromtimestamp(
                         pd.Timestamp(vehicle_times[i]).timestamp(), tz=timezone.utc
                     )
-            else:
+            elif vehicle_dists[0] - stop_dist <= _FIRST_FIX_STOP_TOL_M:
                 actual = datetime.fromtimestamp(
                     pd.Timestamp(vehicle_times[i]).timestamp(), tz=timezone.utc
                 )
+            else:
+                actual = None
 
         results.append({
             "stop_id": stop_id,
@@ -242,9 +289,7 @@ def label_trajectory(
         if traj.empty:
             return None
 
-    traj["dist_along"] = _project_vehicle_positions(
-        traj, shape, constrain=gtfs.is_ambiguous_shape(trip.shape_id)
-    )
+    runs = _project_runs(traj, shape, constrain=gtfs.is_ambiguous_shape(trip.shape_id))
 
     # Collect stop distances
     stop_dists: list[tuple[str, int, float]] = []
@@ -258,9 +303,8 @@ def label_trajectory(
                 continue
         stop_dists.append((st.stop_id, st.stop_sequence, d))
 
-    traj = traj.dropna(subset=["dist_along"]).sort_values("timestamp")
     rows = []
-    for run, run_traj in enumerate(_split_runs(traj, "dist_along", shape.length)):
+    for run, run_traj in enumerate(runs):
         run_date = run_traj["timestamp"].iloc[0].date()
         crossings = _detect_stop_crossings(run_traj, "dist_along", stop_dists)
         for crossing, st in zip(crossings, trip.stop_times):
@@ -381,11 +425,8 @@ def training_rows_for_trajectory(
         if traj.empty:
             return None
 
-    traj["dist_along"] = _project_vehicle_positions(
-        traj, shape, constrain=gtfs.is_ambiguous_shape(trip.shape_id)
-    )
-    traj = traj.dropna(subset=["dist_along"]).sort_values("timestamp")
-    if traj.empty:
+    runs = _project_runs(traj, shape, constrain=gtfs.is_ambiguous_shape(trip.shape_id))
+    if not runs:
         return None
 
     # Stop distances along the shape
@@ -406,7 +447,7 @@ def training_rows_for_trajectory(
     # One pass per run: speeds, stationary time and "upcoming stop" all have
     # to be measured within a single run, never across the reset between two
     # runs that share a trip_id (see _split_runs).
-    for traj in _split_runs(traj, "dist_along", shape.length):
+    for traj in runs:
         crossings = _detect_stop_crossings(traj, "dist_along", stop_dists)
         if not crossings:
             continue

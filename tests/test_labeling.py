@@ -39,18 +39,29 @@ def test_jitter_backwards_does_not_split():
 
 
 def test_back_to_back_runs_split_at_the_reset():
-    assert _run_dists(_traj([100, 500, 950, 1000, 20, 400, 900])) == [
-        [100, 500, 950, 1000], [20, 400, 900],
+    assert _run_dists(_traj([100, 500, 950, 1000, 20, 120, 300, 900])) == [
+        [100, 500, 950, 1000], [20, 120, 300, 900],
     ]
 
 
 def test_three_runs():
-    assert len(_run_dists(_traj([0, 900, 10, 950, 5, 600]))) == 3
+    assert len(_run_dists(_traj([0, 900, 10, 50, 90, 950, 5, 40, 60, 600]))) == 3
 
 
 def test_split_is_measured_from_the_furthest_point_reached():
     # Slow drift down from the peak still adds up to a reset.
-    assert len(_run_dists(_traj([0, 900, 700, 450, 300]))) == 2
+    assert len(_run_dists(_traj([0, 900, 700, 450, 300, 250, 200]))) == 2
+
+
+def test_a_short_backward_blip_does_not_split():
+    # One or two misprojections onto another occurrence of a self-intersecting
+    # shape, then back on track: the same run.
+    assert len(_run_dists(_traj([0, 400, 800, 50, 60, 850, 950]))) == 1
+
+
+def test_the_split_starts_at_the_first_snapshot_of_the_reset():
+    runs = _run_dists(_traj([0, 950, 10, 30, 60, 200]))
+    assert runs == [[0, 950], [10, 30, 60, 200]]
 
 
 def test_empty_trajectory():
