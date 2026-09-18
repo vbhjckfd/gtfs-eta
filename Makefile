@@ -5,8 +5,9 @@
         measure-dwell help
 
 # Days processed concurrently by `make pipeline` / `make learn`.
-# Each worker peaks at ~2 GB — keep ≤ 4-5 on a 16 GB machine.
-PARALLEL ?= 4
+# Each worker peaks at ~3-5 GB on current (July+) days — 4 workers pushed a
+# 16 GB machine ~12 GB into swap (measured 2026-09-18) — so keep ≤ 3 there.
+PARALLEL ?= 3
 
 # ── Setup ──────────────────────────────────────────────────────────────────
 
