@@ -143,6 +143,26 @@ def _merge_weekend_bias(flat: dict | None, live: dict | None, residual: dict | N
     return {**(flat or {}), **live, **_accumulate_bias(live, residual or {})}
 
 
+def _starting_bias(live_model: dict, new_trees: bool) -> tuple[dict | None, str | None, dict | None]:
+    """``(flat table, calibrated-through date, weekday/weekend tables)`` to build on.
+
+    A correction is only valid for the trees it was measured on. Carrying the
+    old model's accumulated tables onto new trees stacks a stale correction on
+    a model that no longer has that bias: replaying 2026-09-16, the old
+    weekday table (+101 s at ten stops ahead) turned a new model that was
+    -40 s there into +61 s, and cost 12 s of MAE overall -- the same shape as
+    the doubled live bias after the 2026-08-13 retrain. New trees start
+    uncorrected; the live bias loop rebuilds tables from the days they serve.
+    """
+    if new_trees:
+        return None, None, None
+    return (
+        live_model.get("bias_by_horizon"),
+        live_model.get("bias_calibrated_through"),
+        live_model.get("bias_by_horizon_weekend"),
+    )
+
+
 def _model_fingerprint(tree_data: dict) -> str:
     """Stable digest of the serving trees, to tell a real retrain from a re-export."""
     payload = pickle.dumps(
@@ -375,6 +395,9 @@ def main():
     # a retrain. Stamped when new trees are uploaded and read back on every
     # band-only refresh, so the pool self-restricts to days this model served.
     model_since: str | None = None
+    # Set when this export publishes different trees than those live: the live
+    # bias tables were accumulated for the *old* trees and must not carry over.
+    new_trees = False
     # What is already live, so the bias correction can build on it — see
     # _accumulate_bias.
     live_model: dict = {}
@@ -400,6 +423,7 @@ def main():
             model_since = live_model.get("model_since")
         else:
             model_since = date.today().isoformat()
+            new_trees = True
     else:
         # refresh-gtfs.yml (daily CI) checks out the repo only — it never has a
         # local models/eta_pipeline.joblib (gitignored, only produced by a real
@@ -458,8 +482,9 @@ def main():
     # (e.g. the flat ~-44s optimism found across every stops_ahead bucket on
     # 2026-07-25). No offline fallback — an unavailable live signal means no
     # correction, not a guessed/stale one baked in from a different model.
-    bias_table: dict | None = live_model.get("bias_by_horizon")
-    bias_through: str | None = live_model.get("bias_calibrated_through")
+    bias_table, bias_through, live_weekend_start = _starting_bias(live_model, new_trees)
+    if new_trees:
+        print("  New trees — starting without the previous model's bias correction")
     try:
         from src.scoring import live_bias_by_horizon
 
@@ -493,7 +518,7 @@ def main():
     # per-horizon support. Each bucket is merged over the flat table so a
     # horizon too thin on just-weekday or just-weekend data still gets the
     # blended correction rather than none.
-    bias_weekend_table: dict | None = live_model.get("bias_by_horizon_weekend")
+    bias_weekend_table: dict | None = live_weekend_start
     try:
         from src.scoring import live_bias_by_horizon_weekend
         bias_weekend, bias_weekend_dates = live_bias_by_horizon_weekend(
@@ -510,7 +535,7 @@ def main():
             # src/inference.run_inference, so they must accumulate too —
             # publishing a raw residual here would quietly override the
             # accumulated correction on whichever bucket it covers.
-            live_weekend = live_model.get("bias_by_horizon_weekend") or {}
+            live_weekend = live_weekend_start or {}
             merged = {
                 bucket: _merge_weekend_bias(
                     bias_table, live_weekend.get(bucket), bias_weekend.get(bucket)

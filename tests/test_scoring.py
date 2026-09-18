@@ -456,6 +456,18 @@ class TestBiasAccumulation:
             table = acc(table, residual)
         assert abs(B - table[1]) <= 1          # closed, damping only slows it
 
+    def test_new_trees_start_without_the_old_models_correction(self):
+        start = self._mod()._starting_bias
+        live = {
+            "bias_by_horizon": {10: -127},
+            "bias_calibrated_through": "2026-09-17",
+            "bias_by_horizon_weekend": {"weekday": {10: -101}},
+        }
+        assert start(live, new_trees=True) == (None, None, None)
+        assert start(live, new_trees=False) == (
+            {10: -127}, "2026-09-17", {"weekday": {10: -101}},
+        )
+
     def test_fingerprint_tracks_the_trees_only(self):
         fp = self._mod()._model_fingerprint
         a = {"baseline": 1.0, "learning_rate": 0.1, "trees": [{"v": [1, 2]}]}
