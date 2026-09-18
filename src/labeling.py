@@ -32,6 +32,42 @@ from src.gtfs_static import GTFSStatic, _parse_gtfs_time_utc, _project_xy
 # then reads as an impossibly fast arrival.
 _MAX_VEHICLE_SPEED_MPS = 40.0
 
+# A (vehicle, trip_id) group can hold more than one run: the operator feed
+# sometimes keeps reporting the same trip_id on a vehicle's next run, and
+# infer_trips' fast path trusts it. Treated as one trajectory, every stop's
+# "first crossing" came from the first run only -- the second run got no
+# actual arrivals and no training rows, and its live predictions were scored
+# against the first run's crossings (measured 2026-09-16: ~44k predictions,
+# 6.8% of the day, all verified accurate against raw GPS). A drop in
+# dist_along of more than this share of the shape, below the furthest point
+# the current run reached, can only be the vehicle starting over.
+_RUN_RESET_FRAC = 0.5
+
+
+def _split_runs(traj: pd.DataFrame, dist_col: str, shape_len: float) -> list[pd.DataFrame]:
+    """Split a timestamp-sorted trajectory into separate runs of the trip.
+
+    A new run starts where dist_along falls more than ``_RUN_RESET_FRAC`` of
+    the shape length below the furthest distance the current run reached.
+    Projection jitter and the speed-rejected jumps _project_vehicle_positions
+    already filters are far smaller, so an ordinary single run is returned
+    unchanged as a one-element list.
+    """
+    dists = traj[dist_col].to_numpy(dtype=float)
+    if len(dists) == 0:
+        return []
+    threshold = _RUN_RESET_FRAC * max(shape_len, 1.0)
+    starts = [0]
+    furthest = dists[0]
+    for i in range(1, len(dists)):
+        if dists[i] < furthest - threshold:
+            starts.append(i)
+            furthest = dists[i]
+        else:
+            furthest = max(furthest, dists[i])
+    bounds = starts + [len(dists)]
+    return [traj.iloc[bounds[k]:bounds[k + 1]] for k in range(len(starts))]
+
 
 def _project_vehicle_positions(
     traj: pd.DataFrame,
@@ -212,7 +248,6 @@ def label_trajectory(
 
     # Collect stop distances
     stop_dists: list[tuple[str, int, float]] = []
-    base_date = traj["timestamp"].iloc[0].date()
     for st in trip.stop_times:
         d = gtfs.get_stop_distance_along_shape(trip.shape_id, st.stop_id)
         if d is None:
@@ -223,34 +258,35 @@ def label_trajectory(
                 continue
         stop_dists.append((st.stop_id, st.stop_sequence, d))
 
-    crossings = _detect_stop_crossings(traj, "dist_along", stop_dists)
-    if not crossings:
-        return None
-
+    traj = traj.dropna(subset=["dist_along"]).sort_values("timestamp")
     rows = []
-    for crossing, st in zip(crossings, trip.stop_times):
-        sched_utc = _parse_gtfs_time_utc(
-            st.arrival_time or st.departure_time, base_date, gtfs.feed_tz
-        )
-        actual = crossing["actual_arrival"]
-        if actual is None:
-            continue
+    for run, run_traj in enumerate(_split_runs(traj, "dist_along", shape.length)):
+        run_date = run_traj["timestamp"].iloc[0].date()
+        crossings = _detect_stop_crossings(run_traj, "dist_along", stop_dists)
+        for crossing, st in zip(crossings, trip.stop_times):
+            sched_utc = _parse_gtfs_time_utc(
+                st.arrival_time or st.departure_time, run_date, gtfs.feed_tz
+            )
+            actual = crossing["actual_arrival"]
+            if actual is None:
+                continue
 
-        delay_sec = (actual - sched_utc).total_seconds() if sched_utc is not None else None
+            delay_sec = (actual - sched_utc).total_seconds() if sched_utc is not None else None
 
-        rows.append({
-            "vehicle_id": vehicle_id,
-            "trip_id": trip_id,
-            "route_id": trip.route_id,
-            "stop_id": st.stop_id,
-            "stop_sequence": st.stop_sequence,
-            "scheduled_arrival": sched_utc,
-            "actual_arrival": actual,
-            "delay_sec": delay_sec,
-            "date": base_date,
-            "hour": actual.astimezone(gtfs.feed_tz).hour,
-            "day_of_week": actual.weekday(),
-        })
+            rows.append({
+                "vehicle_id": vehicle_id,
+                "trip_id": trip_id,
+                "route_id": trip.route_id,
+                "stop_id": st.stop_id,
+                "stop_sequence": st.stop_sequence,
+                "scheduled_arrival": sched_utc,
+                "actual_arrival": actual,
+                "delay_sec": delay_sec,
+                "date": run_date,
+                "hour": actual.astimezone(gtfs.feed_tz).hour,
+                "day_of_week": actual.weekday(),
+                "run": run,
+            })
 
     if not rows:
         return None
@@ -354,7 +390,6 @@ def training_rows_for_trajectory(
 
     # Stop distances along the shape
     stop_dists: list[tuple[str, int, float]] = []
-    base_date = traj["timestamp"].iloc[0].date()
     for st in trip.stop_times:
         d = gtfs.get_stop_distance_along_shape(trip.shape_id, st.stop_id)
         if d is None:
@@ -364,63 +399,68 @@ def training_rows_for_trajectory(
             d = shape.project(Point(stop_info.x, stop_info.y))
         stop_dists.append((st.stop_id, st.stop_sequence, d))
 
-    crossings = _detect_stop_crossings(traj, "dist_along", stop_dists)
-    if not crossings:
-        return None
-
-    # Stops that were actually reached, ordered by distance along the shape
-    arrived = [
-        (sd[0], sd[1], sd[2], c["actual_arrival"])
-        for sd, c in zip(stop_dists, crossings)
-        if c["actual_arrival"] is not None
-    ]
-    arrived.sort(key=lambda t: t[2])
-    if not arrived:
-        return None
-
     n_stops_total = len(trip.stop_times)
     seq_to_index = {st.stop_sequence: i for i, st in enumerate(trip.stop_times)}
 
-    dists = traj["dist_along"].to_numpy(dtype=float)
-    times = traj["timestamp"].to_numpy()
-    times_sec = np.array([pd.Timestamp(t).timestamp() for t in times])
-    speeds = _progress_speeds(dists, times_sec)
-    stationary = _stationary_seconds(dists, times_sec)
-    arr_dists = np.array([a[2] for a in arrived])
-
     rows = []
-    for i in range(len(traj)):
-        d_vehicle = dists[i]
-        t_vehicle = times_sec[i]
-        # Upcoming = stops strictly ahead of the vehicle's projected position
-        start = int(np.searchsorted(arr_dists, d_vehicle, side="right"))
-        emitted = 0
-        for stop_id, stop_seq, stop_dist, arrival in arrived[start:]:
-            if emitted >= max_stops_ahead:
-                break
-            seconds_to_arrival = arrival.timestamp() - t_vehicle
-            if seconds_to_arrival < 0:
-                continue  # already passed in time despite distance jitter
-            if seconds_to_arrival > MAX_HORIZON_SEC:
-                break
-            emitted += 1
-            rows.append({
-                "vehicle_id": vehicle_id,
-                "trip_id": trip_id,
-                "route_id": trip.route_id,
-                "date": base_date,
-                "snapshot_ts": datetime.fromtimestamp(t_vehicle, tz=timezone.utc),
-                "dist_along_m": d_vehicle,
-                "progress_speed_mps": speeds[i],
-                "stationary_sec": stationary[i],
-                "stop_id": stop_id,
-                "stop_sequence": stop_seq,
-                "stop_dist_along_m": stop_dist,
-                "stops_ahead": emitted,
-                "stops_remaining": n_stops_total - 1 - seq_to_index.get(stop_seq, 0),
-                "actual_arrival": arrival,
-                "seconds_to_arrival": seconds_to_arrival,
-            })
+    # One pass per run: speeds, stationary time and "upcoming stop" all have
+    # to be measured within a single run, never across the reset between two
+    # runs that share a trip_id (see _split_runs).
+    for traj in _split_runs(traj, "dist_along", shape.length):
+        crossings = _detect_stop_crossings(traj, "dist_along", stop_dists)
+        if not crossings:
+            continue
+
+        # Stops that were actually reached, ordered by distance along the shape
+        arrived = [
+            (sd[0], sd[1], sd[2], c["actual_arrival"])
+            for sd, c in zip(stop_dists, crossings)
+            if c["actual_arrival"] is not None
+        ]
+        arrived.sort(key=lambda t: t[2])
+        if not arrived:
+            continue
+
+        run_date = traj["timestamp"].iloc[0].date()
+        dists = traj["dist_along"].to_numpy(dtype=float)
+        times = traj["timestamp"].to_numpy()
+        times_sec = np.array([pd.Timestamp(t).timestamp() for t in times])
+        speeds = _progress_speeds(dists, times_sec)
+        stationary = _stationary_seconds(dists, times_sec)
+        arr_dists = np.array([a[2] for a in arrived])
+
+        for i in range(len(traj)):
+            d_vehicle = dists[i]
+            t_vehicle = times_sec[i]
+            # Upcoming = stops strictly ahead of the vehicle's projected position
+            start = int(np.searchsorted(arr_dists, d_vehicle, side="right"))
+            emitted = 0
+            for stop_id, stop_seq, stop_dist, arrival in arrived[start:]:
+                if emitted >= max_stops_ahead:
+                    break
+                seconds_to_arrival = arrival.timestamp() - t_vehicle
+                if seconds_to_arrival < 0:
+                    continue  # already passed in time despite distance jitter
+                if seconds_to_arrival > MAX_HORIZON_SEC:
+                    break
+                emitted += 1
+                rows.append({
+                    "vehicle_id": vehicle_id,
+                    "trip_id": trip_id,
+                    "route_id": trip.route_id,
+                    "date": run_date,
+                    "snapshot_ts": datetime.fromtimestamp(t_vehicle, tz=timezone.utc),
+                    "dist_along_m": d_vehicle,
+                    "progress_speed_mps": speeds[i],
+                    "stationary_sec": stationary[i],
+                    "stop_id": stop_id,
+                    "stop_sequence": stop_seq,
+                    "stop_dist_along_m": stop_dist,
+                    "stops_ahead": emitted,
+                    "stops_remaining": n_stops_total - 1 - seq_to_index.get(stop_seq, 0),
+                    "actual_arrival": arrival,
+                    "seconds_to_arrival": seconds_to_arrival,
+                })
 
     if not rows:
         return None

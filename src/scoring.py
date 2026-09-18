@@ -262,11 +262,28 @@ def join_predictions_actuals(
         return pd.DataFrame()
 
     keys = ["vehicle_id", "trip_id", "stop_id", "stop_sequence"]
-    actual_one = actuals.drop_duplicates(subset=keys)[keys + ["actual_arrival_ts"]]
+    # A key can carry one crossing per run: labeling splits a vehicle's
+    # back-to-back runs under the same trip_id (src/labeling.py _split_runs).
+    actual_runs = actuals.drop_duplicates(subset=keys + ["actual_arrival_ts"])[
+        keys + ["actual_arrival_ts"]
+    ]
 
-    joined = predictions.merge(actual_one, on=keys, how="inner")
+    joined = predictions.reset_index(drop=True).rename_axis("_pred").reset_index()
+    joined = joined.merge(actual_runs, on=keys, how="inner")
     if joined.empty:
-        return joined
+        return joined.drop(columns="_pred")
+    # Pair each prediction with its own run's crossing: the earliest one not
+    # already behind it (see PAST_CROSSING_TOLERANCE_SEC), else the latest --
+    # which the past-crossing filter below then drops.
+    ahead = joined["actual_arrival_ts"] >= joined["feed_ts"] - PAST_CROSSING_TOLERANCE_SEC
+    joined["_rank"] = np.where(ahead, joined["actual_arrival_ts"], -joined["actual_arrival_ts"])
+    joined["_behind"] = ~ahead
+    joined = (
+        joined.sort_values(["_pred", "_behind", "_rank"])
+        .drop_duplicates("_pred")
+        .drop(columns=["_pred", "_rank", "_behind"])
+        .reset_index(drop=True)
+    )
 
     joined["error_sec"] = joined["predicted_arrival"] - joined["actual_arrival_ts"]
     joined["abs_error_sec"] = joined["error_sec"].abs()
@@ -352,7 +369,7 @@ def physical_stop_coverage(predictions: pd.DataFrame, actuals: pd.DataFrame) -> 
         return {"coverage_frac": None}
 
     key = ["vehicle_id", "trip_id", "stop_id", "stop_sequence"]
-    A = actuals.drop_duplicates(key).copy()
+    A = actuals.drop_duplicates(key + ["actual_arrival_ts"]).copy()
     A["vehicle_id"] = A["vehicle_id"].astype(str)
     A["stop_id"] = A["stop_id"].astype(str)
     P = predictions[["vehicle_id", "stop_id", "predicted_arrival"]].copy()
@@ -413,12 +430,11 @@ def score_report(
         return out
 
     # Coverage: of the actual arrivals observed, how many got *any* prediction.
-    pred_keys = set(
-        map(tuple, joined[["vehicle_id", "trip_id", "stop_id", "stop_sequence"]].values)
-    )
-    actual_keys = set(
-        map(tuple, actuals[["vehicle_id", "trip_id", "stop_id", "stop_sequence"]].values)
-    )
+    # actual_arrival_ts is part of the key: one (vehicle, trip, stop, seq) can
+    # recur once per run (see join_predictions_actuals).
+    cov_cols = ["vehicle_id", "trip_id", "stop_id", "stop_sequence", "actual_arrival_ts"]
+    pred_keys = set(map(tuple, joined[cov_cols].values))
+    actual_keys = set(map(tuple, actuals[cov_cols].values))
     coverage = len(pred_keys & actual_keys) / len(actual_keys) if actual_keys else 0.0
 
     # Arriving-now calibration: of predictions promising arrival within
@@ -515,8 +531,10 @@ def _coverage_gap_breakdown(
                        already been passed when the vehicle entered the feed.
     """
     tz = feed_tz or timezone.utc
-    key_cols = ["vehicle_id", "trip_id", "stop_id", "stop_sequence"]
-    df = actuals[key_cols + ["route_id", "actual_arrival_ts"]].copy()
+    # Same key as score_report's pred_keys: actual_arrival_ts included, since a
+    # (vehicle, trip, stop, seq) recurs once per run.
+    key_cols = ["vehicle_id", "trip_id", "stop_id", "stop_sequence", "actual_arrival_ts"]
+    df = actuals[key_cols + ["route_id"]].copy()
     df["covered"] = [tuple(row) in pred_keys for row in df[key_cols].values]
     df["hour"] = (
         pd.to_datetime(df["actual_arrival_ts"], unit="s", utc=True)

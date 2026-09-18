@@ -151,6 +151,31 @@ def test_join_drops_crossings_before_the_prediction():
     }
 
 
+def test_join_pairs_each_run_with_its_own_crossing():
+    # Same vehicle, same trip_id, two runs: the key recurs once per run in the
+    # actuals. A prediction made during run 2 must pair with run 2's crossing,
+    # not be thrown away against run 1's.
+    preds = _predictions_df([
+        {"feed_ts": 1_000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "1",
+         "stop_id": "1", "stop_sequence": 1, "stops_ahead": 1, "predicted_arrival": 1_100},
+        {"feed_ts": 6_000, "vehicle_id": "v1", "trip_id": "t1", "route_id": "1",
+         "stop_id": "1", "stop_sequence": 1, "stops_ahead": 1, "predicted_arrival": 6_120},
+    ])
+    actuals = pd.DataFrame([
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "1", "stop_id": "1",
+         "stop_sequence": 1, "actual_arrival_ts": 1_090},   # run 1
+        {"vehicle_id": "v1", "trip_id": "t1", "route_id": "1", "stop_id": "1",
+         "stop_sequence": 1, "actual_arrival_ts": 6_100},   # run 2
+    ])
+    joined = scoring.join_predictions_actuals(preds, actuals)
+    assert sorted(joined["error_sec"].tolist()) == [10, 20]
+    assert joined.attrs["n_past_crossing_dropped"] == 0
+
+    report = scoring.score_report(joined, actuals, "2026-09-16")
+    assert report["n_actual_arrivals"] == 2
+    assert report["coverage_frac"] == 1.0
+
+
 def test_score_report_metrics_and_coverage():
     # Two stops actually arrived; only one was predicted → coverage 0.5.
     preds = _predictions_df([
