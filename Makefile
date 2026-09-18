@@ -9,6 +9,12 @@
 # 16 GB machine ~12 GB into swap (measured 2026-09-18) — so keep ≤ 3 there.
 PARALLEL ?= 3
 
+# Long-running targets hold off idle sleep for as long as they run: a laptop
+# that dozed on battery froze a training-data regeneration for 75 min
+# (2026-09-18). macOS only; elsewhere this is empty and the commands run as-is.
+# Closing the lid still sleeps the machine on battery.
+KEEP_AWAKE := $(shell command -v caffeinate >/dev/null 2>&1 && echo caffeinate -i)
+
 # ── Setup ──────────────────────────────────────────────────────────────────
 
 install:
@@ -18,17 +24,17 @@ install:
 
 ## Run the full pipeline for all available days (skips already-done days)
 pipeline:
-	python scripts/run_pipeline.py --all --parallel $(PARALLEL)
+	$(KEEP_AWAKE) python scripts/run_pipeline.py --all --parallel $(PARALLEL)
 
 ## Run the pipeline for a single date: make pipeline-date DATE=2026-06-01
 pipeline-date:
-	python scripts/run_pipeline.py --date $(DATE)
+	$(KEEP_AWAKE) python scripts/run_pipeline.py --date $(DATE)
 
 # ── Model ──────────────────────────────────────────────────────────────────
 
 ## Build features from data/training/ and train the sklearn model
 train:
-	python -m src.train data/training/
+	$(KEEP_AWAKE) python -m src.train data/training/
 
 ## Full learning cycle: regenerate training data (parallel) + train the model
 learn: pipeline train
@@ -38,7 +44,7 @@ learn: pipeline train
 ## as the gap between each stop's arrival and departure. Static — rerun only
 ## after a large batch of new training days.
 measure-dwell:
-	python scripts/measure_dwell.py --days 14 --out models/dwell.joblib
+	$(KEEP_AWAKE) python scripts/measure_dwell.py --days 14 --out models/dwell.joblib
 
 ## Report held-out bias + MAE per stops_ahead (curve should stay flat, near zero)
 validate-horizon:
@@ -47,7 +53,7 @@ validate-horizon:
 ## Score the production model against a segment-additive challenger on one
 ## identical split: make compare-models [DAYS=30] [KEEP_PCT=2]
 compare-models:
-	python scripts/compare_models.py --days $(or $(DAYS),30) \
+	$(KEEP_AWAKE) python scripts/compare_models.py --days $(or $(DAYS),30) \
 		--keep-pct $(or $(KEEP_PCT),2) --out compare_models.json
 
 # ── Cloudflare Worker ──────────────────────────────────────────────────────
@@ -72,7 +78,7 @@ push-feed:
 
 ## Push to R2 continuously every 10 s (keeps the live feed fresh)
 serve-feed:
-	python scripts/push_feed.py --loop 10
+	$(KEEP_AWAKE) python scripts/push_feed.py --loop 10
 
 ## Smoke-test the live worker as a drop-in TripUpdates feed.
 ## Override target with SMOKE_URL=... (e.g. a preview deploy or local dev).
@@ -81,11 +87,11 @@ smoke:
 
 ## Score live ETA quality for a day: make score DATE=2026-06-15 [OUT=report.json]
 score:
-	python -m src.scoring --date $(or $(DATE),$(shell date -u +%F)) $(if $(OUT),--out $(OUT),)
+	$(KEEP_AWAKE) python -m src.scoring --date $(or $(DATE),$(shell date -u +%F)) $(if $(OUT),--out $(OUT),)
 
 ## Score a day and print its per-route MAE digest (default: the day that just closed)
 route-mae:
-	python scripts/route_mae.py $(if $(DATE),--date $(DATE),) --no-publish --no-issue
+	$(KEEP_AWAKE) python scripts/route_mae.py $(if $(DATE),--date $(DATE),) --no-publish --no-issue
 
 ## Gather a day's quality report + issue notes for review (default: yesterday)
 review-quality:
