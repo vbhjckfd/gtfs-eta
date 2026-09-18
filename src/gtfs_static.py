@@ -25,6 +25,9 @@ load_dotenv()
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "gtfs_static"
 CACHE_FILE = DATA_DIR / "_cache.pkl"
+# Bump whenever _parse's derived output changes, so an on-disk cache built by
+# older code is rebuilt instead of silently served (1: shape loop cleaning).
+_CACHE_VERSION = 1
 GTFS_STATIC_URL = os.environ.get(
     "GTFS_STATIC_URL", "https://track.ua-gis.com/gtfs/lviv/static.zip"
 )
@@ -66,6 +69,7 @@ class GTFSStatic:
         self._shape_lengths: dict[str, float] = {}
         self._stop_distances: dict[tuple[str, str], float] = {}  # (shape_id, stop_id) → dist along
         self._ambiguous_shapes: set[str] = set()  # shapes where naive nearest-point projection is unreliable
+        self._cleaned_shapes: dict[str, tuple[float, float]] = {}  # shape_id → (raw m, cleaned m)
         self._calendar: pd.DataFrame | None = None
         self._calendar_dates: pd.DataFrame | None = None
         self._calendar_parsed: pd.DataFrame | None = None   # pre-parsed dates
@@ -88,9 +92,8 @@ class GTFSStatic:
         if force_download or not zip_path.exists():
             _download(GTFS_STATIC_URL, zip_path)
 
-        if not force_rebuild and CACHE_FILE.exists():
-            self._load_cache()
-        else:
+        cached = not force_rebuild and CACHE_FILE.exists() and self._load_cache()
+        if not cached:
             self._extract(zip_path)
             self._parse()
             self._save_cache()
@@ -206,6 +209,7 @@ class GTFSStatic:
         self._build_stops(stops_raw)
         self._build_shapes(shapes_raw)
         self._build_trip_index()
+        self._clean_shapes()
         self._build_stop_distances()
         self._build_route_trips()
 
@@ -278,6 +282,103 @@ class GTFSStatic:
     # A naive vs. sequence-constrained projection disagreeing by more than
     # this is treated as a real ambiguity (shape self-proximity), not GPS/
     # projection jitter.
+    # Loop cleaning (see _clean_shapes).
+    _LOOP_STEP_M = 10.0         # densification step used to find returns
+    _LOOP_RETURN_TOL_M = 20.0   # "back at the same place" radius
+    _LOOP_MIN_LEN_M = 500.0     # shortest stretch treated as a retraced loop
+    _LOOP_STOP_RADIUS_M = 40.0  # a shape point this close to a stop serves it...
+    _LOOP_STOP_SLACK_M = 10.0   # ...if it's also within this of the stop's best pass
+
+    def _clean_shapes(self) -> None:
+        """Cut retraced loops out of operator shapes that buses don't drive.
+
+        Some static shapes run back and forth over the same streets: shape
+        38045 (route 126) is 44.1 km while its buses drive 14.6 km first stop
+        to last, and 14 of 127 shapes measured on 2026-09-16 GPS were >1.3x
+        their driven length -- essentially the chronic worst-MAE routes. Stops
+        then snap onto a later pass (_build_stop_distances takes the nearest
+        point on the remaining shape; stop 4977 lost to a pass 2.3 km on by
+        0.2 m), and remaining-distance features carry kilometres that don't
+        exist, so ETAs run 10-30 min late.
+
+        Walking the shape, a stretch that leaves a point and comes back within
+        _LOOP_RETURN_TOL_M of it at least _LOOP_MIN_LEN_M later is cut --
+        unless that would remove the *only* pass of some stop served on this
+        shape (by any trip), so a genuine out-and-back spur into stops only it
+        serves (route 122's village) is kept. The longest safe return wins.
+        Measured against GPS: flagged shapes land at 1.01-1.09x of driven
+        length, and none of 127 shapes is cut below 0.96x. Shapes with nothing
+        to cut keep their original geometry exactly.
+        """
+        stops_by_shape: dict[str, set[str]] = {}
+        for info in self._trip_index.values():
+            stops_by_shape.setdefault(info.shape_id, set()).update(
+                st.stop_id for st in info.stop_times
+            )
+
+        for shape_id, stop_ids in stops_by_shape.items():
+            shape = self._shapes.get(shape_id)
+            if shape is None or shape.length < 2 * self._LOOP_MIN_LEN_M:
+                continue
+            keep = self._loop_free_intervals(shape, stop_ids)
+            if keep is None:
+                continue
+            coords: list = []
+            for a, b in keep:
+                piece = list(substring(shape, a, b).coords)
+                coords.extend(piece[1:] if coords else piece)
+            if len(coords) < 2:
+                continue
+            cleaned = LineString(coords)
+            self._cleaned_shapes[shape_id] = (shape.length, cleaned.length)
+            self._shapes[shape_id] = cleaned
+            self._shape_lengths[shape_id] = cleaned.length
+
+    def _loop_free_intervals(self, shape: LineString, stop_ids: set[str]):
+        """``[(start_m, end_m), ...]`` of *shape* to keep, or None if no cut."""
+        dists = np.arange(0.0, shape.length, self._LOOP_STEP_M)
+        pts = np.array([shape.interpolate(d).coords[0] for d in dists])
+        n = len(pts)
+        gap = int(self._LOOP_MIN_LEN_M / self._LOOP_STEP_M)
+
+        # For each stop, the shape points that serve it: within the radius and
+        # about as close as its best pass -- so a cut can't leave a stop
+        # "served" only by a point short of it on the way up a spur.
+        at_stop = []
+        for sid in stop_ids:
+            stop = self._stops.get(sid)
+            if stop is None:
+                continue
+            d = np.hypot(pts[:, 0] - stop.x, pts[:, 1] - stop.y)
+            best = d.min()
+            if best >= self._LOOP_STOP_RADIUS_M:
+                continue
+            at_stop.append(np.flatnonzero(
+                (d < self._LOOP_STOP_RADIUS_M) & (d <= best + self._LOOP_STOP_SLACK_M)
+            ))
+
+        cuts = []
+        i = 0
+        while i < n - gap:
+            back = np.hypot(pts[i + gap:, 0] - pts[i, 0], pts[i + gap:, 1] - pts[i, 1])
+            returns = np.flatnonzero(back < self._LOOP_RETURN_TOL_M) + i + gap
+            for j in returns[::-1]:
+                if all(np.any((near <= i) | (near >= j)) for near in at_stop):
+                    cuts.append((dists[i], dists[j]))
+                    i = j
+                    break
+            else:
+                i += 1
+
+        if not cuts:
+            return None
+        keep, start = [], 0.0
+        for a, b in cuts:
+            keep.append((start, a))
+            start = b
+        keep.append((start, shape.length))
+        return [(a, b) for a, b in keep if b > a]
+
     _AMBIGUITY_THRESHOLD_M = 50.0
 
     def _build_stop_distances(self) -> None:
@@ -382,6 +483,8 @@ class GTFSStatic:
                     "shape_lengths": self._shape_lengths,
                     "stop_distances": self._stop_distances,
                     "ambiguous_shapes": self._ambiguous_shapes,
+                    "cleaned_shapes": self._cleaned_shapes,
+                    "cache_version": _CACHE_VERSION,
                     "calendar": self._calendar,
                     "calendar_parsed": self._calendar_parsed,
                     "calendar_dates": self._calendar_dates,
@@ -392,9 +495,12 @@ class GTFSStatic:
                 f,
             )
 
-    def _load_cache(self) -> None:
+    def _load_cache(self) -> bool:
+        """Load the on-disk cache; False (nothing loaded) if it predates _CACHE_VERSION."""
         with open(CACHE_FILE, "rb") as f:
             d = pickle.load(f)
+        if d.get("cache_version") != _CACHE_VERSION:
+            return False
         self._routes = d["routes"]
         self._trips = d["trips"]
         self._stops = d["stops"]
@@ -403,6 +509,7 @@ class GTFSStatic:
         self._shape_lengths = d["shape_lengths"]
         self._stop_distances = d["stop_distances"]
         self._ambiguous_shapes = d.get("ambiguous_shapes", set())
+        self._cleaned_shapes = d.get("cleaned_shapes", {})
         self._calendar = d["calendar"]
         self._calendar_parsed = d.get("calendar_parsed", pd.DataFrame())
         self._calendar_dates = d["calendar_dates"]
@@ -410,6 +517,7 @@ class GTFSStatic:
         self._route_trips = d["route_trips"]
         self.feed_tz = d.get("feed_tz", ZoneInfo("Europe/Kiev"))
         self._active_services_cache = {}
+        return True
 
 
 # ------------------------------------------------------------------
