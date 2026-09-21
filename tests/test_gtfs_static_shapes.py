@@ -73,3 +73,58 @@ def test_stops_after_a_cut_loop_no_longer_snap_to_a_later_pass():
     g = _gtfs(coords, {"A": (0, 0), "B": (1000, 0), "C": (2000, 0)})
     assert g._stop_distances[("s", "B")] < 1100
     assert g._stop_distances[("s", "C")] < 2100
+
+
+# ── Stop placement (GTFSStatic._build_stop_distances) ─────────────────────────
+
+def _placed(coords, stops: dict[str, tuple[float, float]]) -> dict[str, float]:
+    g = GTFSStatic()
+    g._shapes = {"s": LineString(coords)}
+    g._shape_lengths = {"s": g._shapes["s"].length}
+    g._stops = {sid: StopInfo(sid, sid, 0.0, 0.0, x, y) for sid, (x, y) in stops.items()}
+    g._trip_index = {
+        "t": TripInfo("t", "R", "svc", "s", 0, [
+            StopTime(sid, i + 1, "08:00:00", "08:00:00", None)
+            for i, sid in enumerate(stops)
+        ]),
+    }
+    g._build_stop_distances()
+    return {sid: g._stop_distances[("s", sid)] for sid in stops}
+
+
+def test_stops_in_order_are_placed_where_they_are():
+    d = _placed([(0, 0), (3000, 0)], {"A": (0, 0), "B": (1000, 0), "C": (2000, 0), "D": (3000, 0)})
+    assert [round(d[k]) for k in "ABCD"] == [0, 1000, 2000, 3000]
+
+
+def test_one_stop_listed_out_of_order_does_not_strand_the_rest():
+    # Route 137's failure: X is listed second but sits near the end. The
+    # greedy cursor placed X at 2900 m and clamped B, C, D behind it to 2900.
+    d = _placed(
+        [(0, 0), (3000, 0)],
+        {"A": (0, 0), "X": (2900, 0), "B": (1000, 0), "C": (2000, 0), "D": (3000, 0)},
+    )
+    assert round(d["X"]) == 2900
+    assert [round(d[k]) for k in "ABCD"] == [0, 1000, 2000, 3000]
+
+
+def test_of_equally_close_passes_the_earliest_in_order_wins():
+    # Out and back along the same street: B is passed at 1000 m and 3000 m.
+    # Its arrival is the first pass; C, beyond the turn, still fits after it.
+    d = _placed(
+        [(0, 0), (2000, 0), (0, 0)],
+        {"A": (0, 0), "B": (1000, 0), "C": (2000, 0)},
+    )
+    assert round(d["B"]) == 1000
+    assert round(d["C"]) == 2000
+
+
+def test_a_stop_passed_twice_takes_the_pass_that_keeps_order():
+    # B is listed after C, and C is beyond the turn: only B's return pass
+    # (3000 m) keeps the order, so that is the one it gets.
+    d = _placed(
+        [(0, 0), (2000, 0), (0, 0)],
+        {"A": (0, 0), "C": (2000, 0), "B": (1000, 0)},
+    )
+    assert round(d["C"]) == 2000
+    assert round(d["B"]) == 3000

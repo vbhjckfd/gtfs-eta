@@ -26,8 +26,9 @@ load_dotenv()
 DATA_DIR = Path(__file__).parent.parent / "data" / "gtfs_static"
 CACHE_FILE = DATA_DIR / "_cache.pkl"
 # Bump whenever _parse's derived output changes, so an on-disk cache built by
-# older code is rebuilt instead of silently served (1: shape loop cleaning).
-_CACHE_VERSION = 1
+# older code is rebuilt instead of silently served (1: shape loop cleaning;
+# 2: order-tolerant stop placement).
+_CACHE_VERSION = 2
 GTFS_STATIC_URL = os.environ.get(
     "GTFS_STATIC_URL", "https://track.ua-gis.com/gtfs/lviv/static.zip"
 )
@@ -381,46 +382,119 @@ class GTFSStatic:
 
     _AMBIGUITY_THRESHOLD_M = 50.0
 
+    # Stop placement (see _build_stop_distances).
+    _PLACE_STEP_M = 5.0      # densification step used to find a stop's passes
+    _PLACE_RADIUS_M = 80.0   # a shape point this close to a stop is a candidate pass
+    _PLACE_SLACK_M = 10.0    # passes within this of the stop's best are equally good
+    _PLACE_SKIP_COST = 500.0  # cost of treating a stop as listed out of order
+
     def _build_stop_distances(self) -> None:
         """For every (shape_id, stop_id) pair referenced by a trip, compute distance along shape.
 
-        Stops are projected in stop_sequence order behind a monotonic cursor:
-        each stop is only searched for on the remainder of the shape past the
-        previous stop's resolved distance. An unconstrained nearest-point
-        search (plain shape.project) is ambiguous whenever a shape loops or
-        doubles back near itself — common on out-and-back suburban routes and
-        tram turnarounds — and can silently snap a stop to a distant, wrong
-        occurrence, corrupting stops_ahead and the training label.
+        Each stop's candidate positions are its distinct *passes*: stretches of
+        the shape within _PLACE_RADIUS_M of it. Stops are then placed so that
+        positions never decrease in stop_sequence order, preferring the
+        earliest of equally close passes -- an unconstrained nearest-point
+        search is ambiguous whenever a shape loops or doubles back near itself
+        and silently snaps a stop to a distant, wrong occurrence.
 
-        Shapes where the naive and constrained projections disagree get
-        flagged in _ambiguous_shapes: callers use that to scope the (costlier,
-        and occasionally lossy on ordinary shapes) continuity-aware vehicle
+        A stop that cannot be placed in order is treated as listed out of
+        order: it takes its own best pass and the chain carries on without it.
+        The previous greedy cursor instead stranded every following stop
+        behind it -- on route 137 (shape 38100) stop 2562641 is listed 16th
+        but sits beside the 22nd, and the six stops between were all clamped
+        to one distance, scrambling features and labels for half the route.
+        Across the feed that was 37 clamped stops on 17 shapes (routes 137,
+        114, 122, 2302, 109, 97, 1594, 118, 1014, 133); 8 remain, mostly stops
+        that genuinely share coordinates.
+
+        Shapes where the naive and placed positions disagree get flagged in
+        _ambiguous_shapes: callers use that to scope the (costlier, and
+        occasionally lossy on ordinary shapes) continuity-aware vehicle
         projection to only the shapes that actually need it.
         """
-        for trip_id, info in self._trip_index.items():
+        placed_patterns: dict[tuple, list[float | None]] = {}
+        dense_cache: dict[str, tuple] = {}
+        for info in self._trip_index.values():
             shape = self._shapes.get(info.shape_id)
             if shape is None:
                 continue
-            cursor = 0.0
-            for st in info.stop_times:
+            pattern = (info.shape_id, tuple(st.stop_id for st in info.stop_times))
+            if pattern not in placed_patterns:
+                placed_patterns[pattern] = self._place_stops(shape, info, dense_cache)
+            for st, dist in zip(info.stop_times, placed_patterns[pattern]):
                 key = (info.shape_id, st.stop_id)
-                if key in self._stop_distances:
-                    cursor = max(cursor, self._stop_distances[key])
+                if dist is None or key in self._stop_distances:
                     continue
-                stop = self._stops.get(st.stop_id)
-                if stop is None:
-                    continue
-                pt = Point(stop.x, stop.y)
-                cursor = min(cursor, shape.length)
-                remainder = substring(shape, cursor, shape.length)
-                local = remainder.project(pt) if remainder.length > 0 else 0.0
-                dist = cursor + local
                 self._stop_distances[key] = dist
-                cursor = dist
-
-                naive = shape.project(pt)
+                stop = self._stops[st.stop_id]
+                naive = shape.project(Point(stop.x, stop.y))
                 if abs(naive - dist) > self._AMBIGUITY_THRESHOLD_M:
                     self._ambiguous_shapes.add(info.shape_id)
+
+    def _place_stops(self, shape: LineString, info: TripInfo, dense_cache: dict) -> list[float | None]:
+        """Distance along *shape* for each of the trip's stops (None if unknown)."""
+        sid = info.shape_id
+        if sid not in dense_cache:
+            ds = np.append(np.arange(0.0, shape.length, self._PLACE_STEP_M), shape.length)
+            pts = np.array([shape.interpolate(d).coords[0] for d in ds])
+            dense_cache[sid] = (ds, pts)
+        ds, pts = dense_cache[sid]
+
+        # Candidate passes per stop: (position, cost). Within a pass keep its
+        # closest point; cost is 0 for passes about as close as the best one.
+        cands: list[list[tuple[float, float]] | None] = []
+        for st in info.stop_times:
+            stop = self._stops.get(st.stop_id)
+            if stop is None:
+                cands.append(None)
+                continue
+            off = np.hypot(pts[:, 0] - stop.x, pts[:, 1] - stop.y)
+            best = float(off.min())
+            passes: list[list[float]] = []
+            for j in np.flatnonzero(off <= max(self._PLACE_RADIUS_M, best)):
+                if passes and ds[j] - passes[-1][0] <= 10 * self._PLACE_STEP_M:
+                    if off[j] < passes[-1][1]:
+                        passes[-1] = [ds[j], off[j]]
+                else:
+                    passes.append([ds[j], off[j]])
+            cands.append([
+                (p, 0.0 if o <= best + self._PLACE_SLACK_M else o - best) for p, o in passes
+            ])
+
+        # Monotone chain with skips. State: (cost, last chain position, positions).
+        states: list[tuple[float, float, list]] = [(0.0, -1.0, [])]
+        for c in cands:
+            if c is None:
+                states = [(cost, last, pos + [None]) for cost, last, pos in states]
+                continue
+            own_best = min(c, key=lambda pc: pc[1])[0]
+            nxt = []
+            for cost, last, pos in states:
+                in_order = [(cost + pc, p, pos + [p]) for p, pc in c if p >= last]
+                if in_order:
+                    nxt.append(min(in_order, key=lambda s: (s[0], s[1])))
+                nxt.append((cost + self._PLACE_SKIP_COST, last, pos + [own_best]))
+            # Keep the cheapest state per chain position, and a bounded frontier.
+            by_last: dict[float, tuple] = {}
+            for st_ in nxt:
+                k = round(st_[1], 1)
+                if k not in by_last or (st_[0], st_[1]) < (by_last[k][0], by_last[k][1]):
+                    by_last[k] = st_
+            states = sorted(by_last.values(), key=lambda s: (s[0], s[1]))[:64]
+        coarse = min(states, key=lambda s: (s[0], s[1]))[2]
+
+        # Refine each chosen pass to an exact projection within its neighbourhood.
+        out: list[float | None] = []
+        for st, p in zip(info.stop_times, coarse):
+            if p is None:
+                out.append(None)
+                continue
+            stop = self._stops[st.stop_id]
+            lo, hi = max(p - 2 * self._PLACE_STEP_M, 0.0), min(p + 2 * self._PLACE_STEP_M, shape.length)
+            piece = substring(shape, lo, hi)
+            out.append(lo + (piece.project(Point(stop.x, stop.y)) if piece.length > 0 else 0.0))
+        return out
 
     def is_ambiguous_shape(self, shape_id: str) -> bool:
         """Whether this shape's geometry makes nearest-point projection unreliable."""
