@@ -81,3 +81,13 @@ def log_target(tr, te, seed=42):
 @arm
 def big_leaves(tr, te, seed=42):
     return _fit_predict(tr, te, FEATURE_COLS, seed, max_leaf_nodes=255, min_samples_leaf=50)
+
+
+@arm
+def live_all_s(tr, te, seed=42):
+    """live_all with NaN -> -1 sentinel: exported trees (src/inference.py)
+    carry no missing-value direction, so NaN must never reach them."""
+    tr, te = tr.copy(), te.copy()
+    for d in (tr, te):
+        d[LIVE_COLS] = d[LIVE_COLS].fillna(-1.0)
+    return _fit_predict(tr, te, FEATURE_COLS + LIVE_COLS, seed)
