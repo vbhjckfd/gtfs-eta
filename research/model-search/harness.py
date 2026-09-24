@@ -113,9 +113,17 @@ def prep_day(day: str, keep_pct: float, client=None) -> Path:
     return out
 
 
+PREP_PCT = 3.0   # every day is prepped once at this rate; runs subsample it
+
+
 def load_days(days: list[str], keep_pct: float) -> pd.DataFrame:
-    return pd.concat([pd.read_parquet(feat_path(d, keep_pct)) for d in days],
-                     ignore_index=True)
+    df = pd.concat([pd.read_parquet(feat_path(d, PREP_PCT)) for d in days],
+                   ignore_index=True)
+    if keep_pct < PREP_PCT:
+        key = pd.util.hash_pandas_object(
+            df[["vehicle_id", "snapshot_ts"]].astype(str), index=False).to_numpy()
+        df = df[(key % 7919) < 7919 * keep_pct / PREP_PCT].reset_index(drop=True)
+    return df
 
 
 # --------------------------------------------------------------------------
@@ -206,13 +214,13 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("prep")
     p.add_argument("--days", required=True)
-    p.add_argument("--keep-pct", type=float, default=10)
+    p.add_argument("--keep-pct", type=float, default=3)
     r = sub.add_parser("run")
     r.add_argument("--arm", required=True)
     r.add_argument("--train", required=True)
     r.add_argument("--test", required=True)
-    r.add_argument("--keep-pct", type=float, default=10)
-    r.add_argument("--test-keep-pct", type=float, default=10)
+    r.add_argument("--keep-pct", type=float, default=1)
+    r.add_argument("--test-keep-pct", type=float, default=3)
     r.add_argument("--seed", type=int, default=42)
     r.add_argument("--tag", default="")
     args = ap.parse_args()
