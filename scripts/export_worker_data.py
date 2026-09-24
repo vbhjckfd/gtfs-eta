@@ -102,6 +102,14 @@ def _day_after(day: str | None) -> str | None:
 # unrepresentative day drags the served correction half as far.
 _BIAS_GAIN = 0.5
 
+# Whether the export publishes the live bias tables at all. Off since
+# 2026-09-24: the loop does zero mean bias, but the error is spread rather
+# than offset, so shifting every prediction costs MAE. Re-scoring served
+# predictions with the correction undone: 2026-09-23 141.2 -> 135.0 s (median
+# 82 -> 71 s), 2026-09-21 128.8 -> 128.0 s, 2026-09-16 156.6 -> 152.8 s. The
+# residual is still measured and logged below, so the raw bias stays visible.
+SERVE_BIAS_CORRECTION = False
+
 
 def _accumulate_bias(previous: dict | None, residual: dict,
                      gain: float = _BIAS_GAIN) -> dict:
@@ -504,6 +512,9 @@ def main():
     except Exception as exc:  # noqa: BLE001 — calibration must never block an export
         print(f"  WARNING: live bias calibration failed: {exc!r}")
 
+    if not SERVE_BIAS_CORRECTION:
+        print("  Bias correction disabled (SERVE_BIAS_CORRECTION) — serving raw predictions")
+        bias_table = None
     if bias_table:
         tree_data["bias_by_horizon"] = bias_table
         if bias_through:
@@ -550,7 +561,7 @@ def main():
     # Carry the split forward when this run folded in nothing new — otherwise a
     # refresh with no unabsorbed residual would drop the key and silently demote
     # every prediction to the flat table.
-    if bias_weekend_table:
+    if bias_weekend_table and SERVE_BIAS_CORRECTION:
         tree_data["bias_by_horizon_weekend"] = bias_weekend_table
 
     # Carry the serving date forward so the next band-only refresh knows which
