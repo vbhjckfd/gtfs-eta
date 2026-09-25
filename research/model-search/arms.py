@@ -186,3 +186,18 @@ def path_own_s_cold(tr, te, seed=42):
     """path_own_s (no dropout) evaluated cold."""
     tr, te = _sentinel(tr, te, _PO)
     return _fit_predict(tr, _cold(te, _PO), FEATURE_COLS + _PO, seed)
+
+
+@arm
+def path_own_s_linkcold(tr, te, seed=42):
+    """path_own_s evaluated with only the link store cold (5 min after a
+    restart: own-speed history is back, link store still empty)."""
+    tr, te = _sentinel(tr, te, _PO)
+    return _fit_predict(tr, _cold(te, _PATH), FEATURE_COLS + _PO, seed)
+
+
+@arm
+def path_own_s_big(tr, te, seed=42):
+    """path_own_s with 255 leaves / min 50 per leaf."""
+    tr, te = _sentinel(tr, te, _PO)
+    return _fit_predict(tr, te, FEATURE_COLS + _PO, seed, max_leaf_nodes=255, min_samples_leaf=50)
