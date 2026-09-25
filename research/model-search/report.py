@@ -38,6 +38,13 @@ SERVING = {
     "stack_fill": "as stack_hist",
     "stack_v3": "as stack_hist + last 7 traversals + EWMA per link",
     "stack_cold": "diagnostic (cold start)",
+    "stack_hist_dt": "as stack_hist + weekday/weekend link x hour table",
+    "stack_hist_r": "as stack_hist",
+    "stack_v4": "as stack_hist + day-type and p75 tables",
+    "stack_hist_l2": "as stack_hist",
+    "stack_hist_leaf100": "as stack_hist",
+    "stack_hist_catroute": "as stack_hist + categorical-split (bitset) support in export/inference, ~0.5-1 day",
+    "stack_hist_dt_cat": "as stack_hist_dt + categorical-split (bitset) support in export/inference; ~2 days total",
     "stack_hist_cold": "diagnostic (cold start, hist table kept)",
     "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
