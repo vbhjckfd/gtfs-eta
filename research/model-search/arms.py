@@ -256,3 +256,19 @@ def path_own_s_nocal(tr, te, seed=42):
     cols = [c for c in FEATURE_COLS if c not in ("month", "day_of_week", "stop_sequence")] + _PO
     tr, te = _sentinel(tr, te, _PO)
     return _fit_predict(tr, te, cols, seed)
+
+
+@arm
+def path_own_m35(tr, te, seed=42):
+    """path_own_m3 + median-of-5 link times (needs features v2)."""
+    cols = _PO + _M3 + ["live_path_sec_m5"]
+    tr, te = _sentinel(tr, te, cols)
+    return _fit_predict(tr, te, FEATURE_COLS + cols, seed)
+
+
+@arm
+def path_own_m3_big(tr, te, seed=42):
+    """path_own_m3 with 255 leaves / min 50 per leaf."""
+    cols = _PO + _M3
+    tr, te = _sentinel(tr, te, cols)
+    return _fit_predict(tr, te, FEATURE_COLS + cols, seed, max_leaf_nodes=255, min_samples_leaf=50)
