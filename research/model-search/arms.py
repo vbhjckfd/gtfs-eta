@@ -357,3 +357,43 @@ def stack_cold(tr, te, seed=42):
     """stack evaluated with the live store cold (reference for stack_hist_cold)."""
     tr, te = _sentinel(tr, te, _STACK)
     return _fit_predict(tr, _cold(te, _STACK), _NOCAL + _STACK, seed)
+
+
+# ---- run 5 (features v4: MS_FEAT_DIR=ms_features_v4, history from 08-31) ---
+
+@arm
+def stack_hist_dt(tr, te, seed=42):
+    """stack_hist + weekday/weekend-specific historical path."""
+    return _stack_plus(tr, te, seed, _HIST + ["hist_path_sec_dt"])
+
+
+@arm
+def stack_hist_r(tr, te, seed=42):
+    """stack_hist + live/historical ratio on links observed by both."""
+    return _stack_plus(tr, te, seed, _HIST + ["live_hist_ratio"])
+
+
+@arm
+def stack_v4(tr, te, seed=42):
+    """stack_hist + every run-5 column."""
+    return _stack_plus(tr, te, seed, _HIST + ["hist_path_sec_dt", "live_hist_ratio",
+                                              "hist_path_p75"])
+
+
+@arm
+def stack_hist_l2(tr, te, seed=42):
+    """stack_hist with l2_regularization 1.0."""
+    return _stack_plus(tr, te, seed, _HIST, l2_regularization=1.0)
+
+
+@arm
+def stack_hist_leaf100(tr, te, seed=42):
+    """stack_hist with min_samples_leaf 100."""
+    return _stack_plus(tr, te, seed, _HIST, min_samples_leaf=100)
+
+
+@arm
+def stack_hist_catroute(tr, te, seed=42):
+    """stack_hist with route_id as a native categorical (needs categorical-split
+    support in the exported trees)."""
+    return _stack_plus(tr, te, seed, _HIST, categorical_features=[0])

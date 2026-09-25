@@ -55,6 +55,9 @@ EXTRA_COLS = ["live_path_sec_m3", "live_path_n", "live_path_sec_m5"]
 V3_COLS = ["live_path_sec_m7", "live_path_sec_ewm", "hist_path_sec", "hist_path_cov",
            "fill_path_sec"]
 HIST_MIN_N = 3
+# run 5: day-type (weekday / weekend) historical table, live/historical ratio on
+# the links observed by both, and a historical upper-quartile path (spread).
+V4_COLS = ["hist_path_sec_dt", "live_hist_ratio", "hist_path_p75"]
 
 
 def _epoch(s: pd.Series) -> np.ndarray:
@@ -88,15 +91,34 @@ def local_hour(t: np.ndarray) -> np.ndarray:
             .dt.tz_convert("Europe/Kyiv").dt.hour.to_numpy())
 
 
-def hist_table(prior_links: list[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Median link time per (key, hour) and per key from prior days' links."""
+def local_weekend(t: np.ndarray) -> np.ndarray:
+    return (pd.to_datetime(pd.Series(t), unit="s", utc=True)
+            .dt.tz_convert("Europe/Kyiv").dt.dayofweek.to_numpy() >= 5).astype(np.int8)
+
+
+def hist_table_dt(prior_links: list[pd.DataFrame]) -> pd.DataFrame:
+    """Median link time per (key, weekend flag, hour) from prior days' links."""
     if not prior_links:
-        e = pd.DataFrame(columns=["key", "h", "hm"])
+        return pd.DataFrame({"key": pd.Series(dtype=object), "wk": pd.Series(dtype=np.int8),
+                             "h": pd.Series(dtype=np.int32), "hd": pd.Series(dtype=float)})
+    L = pd.concat(prior_links, ignore_index=True)
+    L["h"] = local_hour(L["t"].to_numpy())
+    L["wk"] = local_weekend(L["t"].to_numpy())
+    g = L.groupby(["key", "wk", "h"])["lt"].agg(["median", "size"]).reset_index()
+    return g[g["size"] >= HIST_MIN_N].rename(columns={"median": "hd"})[["key", "wk", "h", "hd"]]
+
+
+def hist_table(prior_links: list[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Median (+ p75) link time per (key, hour) and per key from prior days' links."""
+    if not prior_links:
+        e = pd.DataFrame(columns=["key", "h", "hm", "hq"])
         return e, pd.DataFrame(columns=["key", "hk"])
     L = pd.concat(prior_links, ignore_index=True)
     L["h"] = local_hour(L["t"].to_numpy())
-    g = L.groupby(["key", "h"])["lt"].agg(["median", "size"]).reset_index()
-    g = g[g["size"] >= HIST_MIN_N].rename(columns={"median": "hm"})[["key", "h", "hm"]]
+    gb = L.groupby(["key", "h"])["lt"]
+    g = gb.agg(["median", "size"]).reset_index()
+    g["hq"] = gb.quantile(0.75).to_numpy()
+    g = g[g["size"] >= HIST_MIN_N].rename(columns={"median": "hm"})[["key", "h", "hm", "hq"]]
     k = L.groupby("key")["lt"].agg(["median", "size"]).reset_index()
     k = k[k["size"] >= HIST_MIN_N].rename(columns={"median": "hk"})[["key", "hk"]]
     return g, k
@@ -189,6 +211,14 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     m = m.merge(hg, on=["key", "h"], how="left").merge(hk, on="key", how="left")
     hist = m["hm"].fillna(m["hk"])
     hf = hist.notna()
+    m["wk"] = local_weekend(m["t"].to_numpy())
+    m = m.merge(hist_table_dt(prior_links or []), on=["key", "wk", "h"], how="left")
+    histd = m["hd"].fillna(hist)
+    m["whd"] = np.where(hf, m["w"] * histd.fillna(0.0), 0.0)
+    m["whq"] = np.where(hf, m["w"] * m["hq"].fillna(hist).fillna(0.0), 0.0)
+    both = found.to_numpy() & hf.to_numpy()
+    m["wbl"] = np.where(both, m["w"] * m["lt5"].fillna(0.0), 0.0)
+    m["wbh"] = np.where(both, m["w"] * hist.fillna(0.0), 0.0)
     m["whl"] = np.where(hf, m["w"] * hist, 0.0)
     m["whf"] = np.where(hf, m["w"], 0.0)
     # live m5 where observed, else historical, else nothing
@@ -202,7 +232,9 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
                                age=("age", "mean"), wlt3=("wlt3", "sum"), wlt5=("wlt5", "sum"), nf=("nf", "sum"),
                                wlt7=("wlt7", "sum"), wltE=("wltE", "sum"),
                                whl=("whl", "sum"), whf=("whf", "sum"),
-                               wfl=("wfl", "sum"), wff=("wff", "sum"))
+                               wfl=("wfl", "sum"), wff=("wff", "sum"),
+                               whd=("whd", "sum"), whq=("whq", "sum"),
+                               wbl=("wbl", "sum"), wbh=("wbh", "sum"))
     out = pd.DataFrame(index=np.arange(n))
     cov = (agg["wf"] / agg["wt"].where(agg["wt"] > 0)).reindex(out.index)
     lps = (agg["wlt"] / agg["wf"].where(agg["wf"] > 0) * agg["wt"]).reindex(out.index)
@@ -217,6 +249,9 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     whf = agg["whf"].where(agg["whf"] > 0)
     out["hist_path_sec"] = (agg["whl"] / whf * agg["wt"]).reindex(out.index).to_numpy()
     out["hist_path_cov"] = (agg["whf"] / agg["wt"].where(agg["wt"] > 0)).reindex(out.index).fillna(0.0).to_numpy()
+    out["hist_path_sec_dt"] = (agg["whd"] / whf * agg["wt"]).reindex(out.index).to_numpy()
+    out["hist_path_p75"] = (agg["whq"] / whf * agg["wt"]).reindex(out.index).to_numpy()
+    out["live_hist_ratio"] = (agg["wbl"] / agg["wbh"].where(agg["wbh"] > 0)).reindex(out.index).to_numpy()
     wff = agg["wff"].where(agg["wff"] > 0)
     out["fill_path_sec"] = (agg["wfl"] / wff * agg["wt"]).reindex(out.index).to_numpy()
     out["live_path_n"] = agg["nf"].reindex(out.index).fillna(0.0).to_numpy()
@@ -251,4 +286,4 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         el = mm["t"] - mm["tp"]
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
-    return out[LIVE_COLS + EXTRA_COLS + V3_COLS].reset_index(drop=True)
+    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS].reset_index(drop=True)
