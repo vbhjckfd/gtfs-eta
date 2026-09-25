@@ -201,3 +201,58 @@ def path_own_s_big(tr, te, seed=42):
     """path_own_s with 255 leaves / min 50 per leaf."""
     tr, te = _sentinel(tr, te, _PO)
     return _fit_predict(tr, te, FEATURE_COLS + _PO, seed, max_leaf_nodes=255, min_samples_leaf=50)
+
+
+# ---- run 3 ----------------------------------------------------------------
+_M3 = ["live_path_sec_m3", "live_path_n"]
+
+
+@arm
+def path_own_m3(tr, te, seed=42):
+    """path_own_s + median-of-last-3 link times and #links observed."""
+    cols = _PO + _M3
+    tr, te = _sentinel(tr, te, cols)
+    return _fit_predict(tr, te, FEATURE_COLS + cols, seed)
+
+
+@arm
+def path_own_m3only(tr, te, seed=42):
+    """path_own_s with live_path_sec replaced by its median-of-3 version."""
+    cols = [c if c != "live_path_sec" else "live_path_sec_m3" for c in _PO]
+    tr, te = _sentinel(tr, te, cols)
+    return _fit_predict(tr, te, FEATURE_COLS + cols, seed)
+
+
+@arm
+def path_own_s_gate(tr, te, seed=42):
+    """Served mix: path_own_s where the link store has any coverage, else the
+    production (baseline) trees. info records MAE by coverage band."""
+    tr2, te2 = _sentinel(tr, te, _PO)
+    p_live, info = _fit_predict(tr2, te2, FEATURE_COLS + _PO, seed)
+    p_base, _ = _fit_predict(tr, te, FEATURE_COLS, seed)
+    y = te[TARGET_COL].to_numpy(dtype=float)
+    cov = te2["live_path_cov"].to_numpy()
+    bands = {}
+    for lo, hi in [(0, 1e-9), (1e-9, 0.5), (0.5, 0.9), (0.9, 1.01)]:
+        m = (cov >= lo) & (cov < hi)
+        if m.any():
+            bands[f"{lo:g}-{hi:g}"] = dict(n=int(m.sum()),
+                                          live=float(np.abs(p_live[m] - y[m]).mean()),
+                                          base=float(np.abs(p_base[m] - y[m]).mean()))
+    info["cov_bands"] = bands
+    return np.where(cov > 0, p_live, p_base), info
+
+
+@arm
+def path_own_s_nw(tr, te, seed=42):
+    """path_own_s without the hour sample weights."""
+    tr, te = _sentinel(tr, te, _PO)
+    return _fit_predict(tr, te, FEATURE_COLS + _PO, seed, weights=np.ones(len(tr)))
+
+
+@arm
+def path_own_s_nocal(tr, te, seed=42):
+    """path_own_s minus month / day_of_week / stop_sequence."""
+    cols = [c for c in FEATURE_COLS if c not in ("month", "day_of_week", "stop_sequence")] + _PO
+    tr, te = _sentinel(tr, te, _PO)
+    return _fit_predict(tr, te, cols, seed)

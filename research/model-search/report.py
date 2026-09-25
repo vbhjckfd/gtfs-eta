@@ -23,6 +23,11 @@ SERVING = {
     "path_own_s_cold": "diagnostic (cold start)",
     "path_own_s_drop_cold": "diagnostic (cold start)",
     "path_own_s_linkcold": "diagnostic (link store cold)",
+    "path_own_m3": "as path_own_s; store keeps last 3 traversals per link",
+    "path_own_m3only": "as path_own_s; store keeps last 3 traversals per link",
+    "path_own_s_gate": "as path_own_s; baseline trees also shipped for cov=0 rows",
+    "path_own_s_nw": "as path_own_s",
+    "path_own_s_nocal": "as path_own_s",
 }
 HEAD = """# Leaderboard
 

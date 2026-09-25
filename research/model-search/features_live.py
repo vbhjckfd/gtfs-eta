@@ -46,6 +46,9 @@ DETECT_LAG_SEC = int(os.environ.get("MS_DETECT_LAG", 30))
 LIVE_COLS = ["own_speed_60", "own_speed_180", "own_speed_300",
              "live_path_sec", "live_path_cov", "live_path_age", "live_speed_mps",
              "since_last_at_target"]
+# run 3: smoother link estimate — median of the last 3 traversals of each link
+# (the latest one alone is noisy: one bus stuck at a light sets the whole link).
+EXTRA_COLS = ["live_path_sec_m3", "live_path_n"]
 
 
 def _epoch(s: pd.Series) -> np.ndarray:
@@ -99,6 +102,9 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     ok = same & (cr["pidx"] == cr["pidx"].shift() + 1) & (dt > 0) & (dt < 1800)
     links = pd.DataFrame({"key": (prev_stop + ">" + cr["stop_id"])[ok].to_numpy(),
                           "t": cr["t"][ok].to_numpy(), "lt": dt[ok].to_numpy()})
+    links = links.sort_values(["key", "t"]).reset_index(drop=True)
+    links["lt3"] = (links.groupby("key")["lt"].rolling(3, min_periods=1).median()
+                    .reset_index(level=0, drop=True).to_numpy())
 
     # ---- explode sampled rows into the links on their path -----------------
     n = len(rows)
@@ -131,20 +137,25 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     allkeys = pd.Index(pd.unique(pd.concat([links["key"], ex["key"]])))
     links["k"] = allkeys.get_indexer(links["key"])
     ex["k"] = allkeys.get_indexer(ex["key"])
-    m = pd.merge_asof(ex.sort_values("tq"), links[["k", "t", "lt"]].sort_values("t")
+    m = pd.merge_asof(ex.sort_values("tq"), links[["k", "t", "lt", "lt3"]].sort_values("t")
                       .rename(columns={"t": "tl"}),
                       left_on="tq", right_on="tl", by="k", direction="backward",
                       tolerance=LINK_WINDOW_SEC)
     found = m["lt"].notna()
     m["wlt"] = np.where(found, m["w"] * m["lt"], 0.0)
     m["wf"] = np.where(found, m["w"], 0.0)
+    m["wlt3"] = np.where(found, m["w"] * m["lt3"], 0.0)
+    m["nf"] = found.astype(float)
     m["age"] = np.where(found, m["t"] - m["tl"], np.nan)
     agg = m.groupby("rid").agg(wlt=("wlt", "sum"), wf=("wf", "sum"), wt=("w", "sum"),
-                               age=("age", "mean"))
+                               age=("age", "mean"), wlt3=("wlt3", "sum"), nf=("nf", "sum"))
     out = pd.DataFrame(index=np.arange(n))
     cov = (agg["wf"] / agg["wt"].where(agg["wt"] > 0)).reindex(out.index)
     lps = (agg["wlt"] / agg["wf"].where(agg["wf"] > 0) * agg["wt"]).reindex(out.index)
     out["live_path_sec"] = lps.to_numpy()
+    lps3 = (agg["wlt3"] / agg["wf"].where(agg["wf"] > 0) * agg["wt"]).reindex(out.index)
+    out["live_path_sec_m3"] = lps3.to_numpy()
+    out["live_path_n"] = agg["nf"].reindex(out.index).fillna(0.0).to_numpy()
     out["live_path_cov"] = cov.fillna(0.0).to_numpy()
     out["live_path_age"] = agg["age"].reindex(out.index).to_numpy()
     out["live_speed_mps"] = plen / np.where(lps > 0, lps, np.nan)
@@ -176,4 +187,4 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         el = mm["t"] - mm["tp"]
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
-    return out[LIVE_COLS].reset_index(drop=True)
+    return out[LIVE_COLS + EXTRA_COLS].reset_index(drop=True)
