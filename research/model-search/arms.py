@@ -139,3 +139,50 @@ def live_all_s_cold(tr, te, seed=42):
     te[LIVE_COLS] = -1.0
     te["live_path_cov"] = 0.0
     return _fit_predict(tr, te, FEATURE_COLS + LIVE_COLS, seed)
+
+
+_PO = _PATH + _OWN
+DROP_FRAC = 0.15
+
+
+def _cold(d, cols, mask=None):
+    d = d.copy()
+    m = slice(None) if mask is None else mask
+    d.loc[m, cols] = -1.0
+    if "live_path_cov" in cols:
+        d.loc[m, "live_path_cov"] = 0.0
+    return d
+
+
+def _drop_mask(d, frac, seed):
+    key = pd.util.hash_pandas_object(
+        d[["vehicle_id", "snapshot_ts"]].astype(str), index=False).to_numpy()
+    return ((key + seed) % 10007) < 10007 * frac
+
+
+def _po_drop(tr, te, seed, cold_test):
+    tr, te = _sentinel(tr, te, _PO)
+    tr = _cold(tr, _PO, _drop_mask(tr, DROP_FRAC, seed))
+    if cold_test:
+        te = _cold(te, _PO)
+    return _fit_predict(tr, te, FEATURE_COLS + _PO, seed)
+
+
+@arm
+def path_own_s_drop(tr, te, seed=42):
+    """path_own_s trained with 15% of snapshots forced to cold-start values
+    (live-feature dropout) so a restarted daemon degrades gracefully."""
+    return _po_drop(tr, te, seed, cold_test=False)
+
+
+@arm
+def path_own_s_drop_cold(tr, te, seed=42):
+    """path_own_s_drop evaluated with every live feature cold."""
+    return _po_drop(tr, te, seed, cold_test=True)
+
+
+@arm
+def path_own_s_cold(tr, te, seed=42):
+    """path_own_s (no dropout) evaluated cold."""
+    tr, te = _sentinel(tr, te, _PO)
+    return _fit_predict(tr, _cold(te, _PO), FEATURE_COLS + _PO, seed)
