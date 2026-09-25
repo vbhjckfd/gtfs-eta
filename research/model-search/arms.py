@@ -397,3 +397,9 @@ def stack_hist_catroute(tr, te, seed=42):
     """stack_hist with route_id as a native categorical (needs categorical-split
     support in the exported trees)."""
     return _stack_plus(tr, te, seed, _HIST, categorical_features=[0])
+
+
+@arm
+def stack_hist_dt_cat(tr, te, seed=42):
+    """stack_hist_dt with route_id as a native categorical (run 6)."""
+    return _stack_plus(tr, te, seed, _HIST + ["hist_path_sec_dt"], categorical_features=[0])
