@@ -28,6 +28,9 @@ SERVING = {
     "path_own_s_gate": "as path_own_s; baseline trees also shipped for cov=0 rows",
     "path_own_s_nw": "as path_own_s",
     "path_own_s_nocal": "as path_own_s",
+    "path_own_m35": "as path_own_s; store keeps last 5 traversals per link",
+    "path_own_m3_big": "as path_own_m3; 255-leaf trees ~2x export size",
+    "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
 HEAD = """# Leaderboard
 

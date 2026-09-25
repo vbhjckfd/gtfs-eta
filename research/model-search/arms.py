@@ -272,3 +272,14 @@ def path_own_m3_big(tr, te, seed=42):
     cols = _PO + _M3
     tr, te = _sentinel(tr, te, cols)
     return _fit_predict(tr, te, FEATURE_COLS + cols, seed, max_leaf_nodes=255, min_samples_leaf=50)
+
+
+_NOCAL = [c for c in FEATURE_COLS if c not in ("month", "day_of_week", "stop_sequence")]
+
+
+@arm
+def m3_nocal(tr, te, seed=42):
+    """Run-3 stack: path_own with median-of-3 link times, minus calendar cols."""
+    cols = [c if c != "live_path_sec" else "live_path_sec_m3" for c in _PO]
+    tr, te = _sentinel(tr, te, cols)
+    return _fit_predict(tr, te, _NOCAL + cols, seed)
