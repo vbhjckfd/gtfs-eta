@@ -32,6 +32,13 @@ SERVING = {
     "path_own_m3_big": "as path_own_m3; 255-leaf trees ~2x export size",
     "stack": "link store (last 5 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
     "stack_big": "as stack; 255-leaf trees ~2x export size",
+    "stack_m7": "as stack; store keeps last 7 traversals per link",
+    "stack_ewm": "as stack; + per-link EWMA in the store",
+    "stack_hist": "as stack + static link x hour median table built at export (like priors)",
+    "stack_fill": "as stack_hist",
+    "stack_v3": "as stack_hist + last 7 traversals + EWMA per link",
+    "stack_cold": "diagnostic (cold start)",
+    "stack_hist_cold": "diagnostic (cold start, hist table kept)",
     "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
 HEAD = """# Leaderboard
@@ -40,7 +47,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1v2` / `ds1shiftv2` = same splits, features prepped with the run-3 median-of-5 column (MS_FEAT_DIR=ms_features_v2); baselines identical.
+Tags: `ds1v3` / `ds1shiftv3` = same splits, features v3 (MS_FEAT_DIR=ms_features_v3: + m7, EWMA, historical link table from prior days); baselines identical.
+`ds1v2` / `ds1shiftv2` = same splits, features prepped with the run-3 median-of-5 column (MS_FEAT_DIR=ms_features_v2); baselines identical.
 `ds1lag90w15` = ds1 with live features rebuilt at 90 s detection lag, 15-min link window.
 `ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
 `ds1shift` = train 09-07..09-17, test 09-18 (Fri), 09-19, 09-20. Train rows 1% of

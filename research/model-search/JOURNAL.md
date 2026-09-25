@@ -205,3 +205,68 @@ together (bump the model blob format).
 3. Live shadow check of crossing detection at 10 s cadence vs offline interpolated
    crossings (lag90 robustness already −7.8% for path_own_s).
 4. Second seed on ds1 for stack (both splits were run once each with distinct seeds).
+
+## 2026-09-25 — run 4 (historical link table, longer/decayed smoothing)
+
+Rebuilt DS1 (pipeline_lite `--parallel 4` ≈ 105 min this time, ~28 min/day/worker;
+prep ≈ 2.5 min/day, sequential because of the history lookup). Baseline 110.6 / 113.0
+and stack 96.9 / 96.7 reproduced exactly on the v3 features.
+
+### New features (`features_live.py` V3_COLS, `MS_FEAT_DIR=ms_features_v3`)
+- `live_path_sec_m7` — median of last 7 traversals per link.
+- `live_path_sec_ewm` — per-link EWMA (alpha 0.4 per traversal).
+- `hist_path_sec`, `hist_path_cov` — static historical table: median link time per
+  (stop-pair link, local hour) over the PRIOR 14 days (≥ 3 obs, fallback: link
+  all-hours median). Prep saves each day's link traversals to
+  `FEAT_DIR/links_<day>.parquet` and day D only reads days < D, so it is causal;
+  early train days have little/no history (09-07: none) — test days have 12+.
+  Serving: a table built at export time from the training window, like the
+  route/hour priors — no live state. Single-predictor MAE on 09-08 (1 prior day):
+  hist 122.1 vs live latest 131.1 / m5 118.8.
+- `fill_path_sec` — live m5 where observed, historical otherwise.
+
+### Results
+| arm | ds1v3 (s42) MAE | Δ vs base | p90 | ds1shiftv3 (s7) MAE | Δ | p90 |
+|---|---|---|---|---|---|---|
+| baseline | 110.6 | | 230.9 | 113.0 | | 241.1 |
+| stack (run-3 leader) | 96.9 | −12.4% | 196.1 | 96.7 | −14.5% | 196.9 |
+| stack_m7 | 96.4 | −12.8% | 194.7 | | | |
+| stack_ewm | 96.2 | −13.0% | 194.6 | | | |
+| **stack_hist** | **94.8** | **−14.2%** | **190.9** | **94.5** | **−16.4%** | **192.1** |
+| stack_fill | 94.6 | −14.5% | 190.5 | | | |
+| stack_v3 (all) | 94.5 | −14.6% | 190.1 | 94.3 | −16.5% | 191.6 |
+| stack_cold (diag) | 177.2 | +60.2% | 385.2 | | | |
+| stack_hist_cold (diag) | 154.8 | +40.0% | 324.4 | | | |
+
+stack_hist vs stack: −2.2% (ds1) / −2.3% (shift), p90 −2.7% / −2.4%, every
+stops_ahead bucket better on both (ds1 sa1 68.3→68.0, sa5 97.1→94.7, sa10 134.2→131.5;
+shift sa1 66.6→66.0, sa10 134.7→131.6). Per day ds1: Sat 91.8→90.3, Sun 95.3→94.0,
+Mon 101.6→98.7; shift Fri 101.0→97.8. Rows: train 2.18M / 1.98M, test 1.41M / 1.42M.
+Worst routes (stack_hist, ds1): 122 321, 133 223, 106 174, 125 168, 113 148, 94 147,
+131 146, 881 145, 878 143, 129 142.
+m7 / EWMA add only ~0.5 pt each and stack_v3 ≈ stack_hist + 0.3 pt → not worth the
+extra store state. The hist table also cuts the cold-start penalty (177 → 155) but
+cold is still far worse than baseline → still persist the live store.
+
+**Conclusion: `stack_hist` = new leader, WIN on both splits/seeds
+(ds1 110.6→94.8, −14.2%, p90 230.9→190.9; shift 113.0→94.5, −16.4%, p90 241.1→192.1).**
+Cols: `_NOCAL + _STACK + [hist_path_sec, hist_path_cov]` (sentinel −1).
+Cmds: `MS_FEAT_DIR=ms_features_v3 python research/model-search/harness.py prep --days 2026-09-07..2026-09-21`
+(must run days in ascending order);
+`MS_FEAT_DIR=ms_features_v3 sh research/model-search/queue.sh ds1v3 2026-09-07..2026-09-18 2026-09-19..2026-09-21 42 baseline stack stack_hist …`,
+`… ds1shiftv3 2026-09-07..2026-09-17 2026-09-18..2026-09-20 7 …`.
+
+### Serving estimate for `stack_hist`
+As `stack` (~1 day: link store of last 5 traversals + 5-min position ring persisted in
+tracker_state.json) plus: at export build the link×hour median table from the training
+days' crossings (a few k links × 24 h ≈ 100k floats, ship alongside the trees) and
+sum it along the path per row (same path walk as the live sum). +0.5 day.
+
+### Next steps
+1. Historical table with more history (train rows early in DS1 have little; production
+   would have ≥ 14 days for all rows) — extend pipeline to 08-31..09-06 for link tables
+   only, expect a bit more gain.
+2. Day-type split (weekday/weekend) in the hist table; ratio live/hist as explicit col.
+3. Route 122 still ~320 s — inspect.
+4. Hyper-params on stack_hist (lr 0.1 did nothing before; try l2_regularization,
+   min_samples_leaf 100).
