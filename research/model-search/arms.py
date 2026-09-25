@@ -283,3 +283,20 @@ def m3_nocal(tr, te, seed=42):
     cols = [c if c != "live_path_sec" else "live_path_sec_m3" for c in _PO]
     tr, te = _sentinel(tr, te, cols)
     return _fit_predict(tr, te, _NOCAL + cols, seed)
+
+
+_STACK = [c if c != "live_path_sec" else "live_path_sec_m3" for c in _PO] + ["live_path_sec_m5"]
+
+
+@arm
+def stack(tr, te, seed=42):
+    """Run-3 stack: median-of-3 and -of-5 link times + own speed, no calendar cols."""
+    tr, te = _sentinel(tr, te, _STACK)
+    return _fit_predict(tr, te, _NOCAL + _STACK, seed)
+
+
+@arm
+def stack_big(tr, te, seed=42):
+    """stack with 255 leaves / min 50 per leaf."""
+    tr, te = _sentinel(tr, te, _STACK)
+    return _fit_predict(tr, te, _NOCAL + _STACK, seed, max_leaf_nodes=255, min_samples_leaf=50)
