@@ -4,7 +4,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
+Tags: `ds1lag90w15` = ds1 with live features rebuilt at 90 s detection lag, 15-min link window.
+`ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
 `ds1shift` = train 09-07..09-17, test 09-18 (Fri), 09-19, 09-20. Train rows 1% of
 snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 
@@ -15,20 +16,22 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1 | headway | 42 | 2,178,139 | 1,414,363 | 110.0 | 55.5 | 229.9 | -29.2 | 72.5 | 153.4 | -0.5% | -0.4% | -0.1% | no | needs serving work (NaN routing + stop-arrival store) |
 | ds1 | live_all | 42 | 2,178,139 | 1,414,363 | 103.7 | 53.5 | 214.5 | -17.8 | 73.4 | 142.7 | -6.2% | -7.1% | +1.2% | **yes** | needs serving work (NaN routing + live link store) |
 | ds1 | live_all_s | 42 | 2,178,139 | 1,414,363 | 102.5 | 52.9 | 210.7 | -18.8 | 71.6 | 142.3 | -7.3% | -8.7% | -1.3% | **yes** | needs serving work (live link store, ~1-2 days) |
-| ds1 | live_all_s_cold | 42 | 2,178,139 | 1,414,363 | 163.5 | 104.0 | 344.8 | +18.4 | 102.0 | 220.5 | +47.8% | +49.4% | +59.7% | no | ? |
-| ds1 | live_all_s_lr10 | 42 | 2,178,139 | 1,414,363 | 102.7 | 53.0 | 213.4 | -16.5 | 73.0 | 141.0 | -7.1% | -7.6% | +0.6% | **yes** | ? |
+| ds1 | live_all_s_cold | 42 | 2,178,139 | 1,414,363 | 163.5 | 104.0 | 344.8 | +18.4 | 102.0 | 220.5 | +47.8% | +49.4% | +59.7% | no | diagnostic (cold start) |
+| ds1 | live_all_s_lr10 | 42 | 2,178,139 | 1,414,363 | 102.7 | 53.0 | 213.4 | -16.5 | 73.0 | 141.0 | -7.1% | -7.6% | +0.6% | **yes** | as live_all_s |
 | ds1 | live_path | 42 | 2,178,139 | 1,414,363 | 104.5 | 52.9 | 216.6 | -20.1 | 73.6 | 143.6 | -5.5% | -6.2% | +1.4% | **yes** | needs serving work (NaN routing + live link store) |
 | ds1 | own_speed | 42 | 2,178,139 | 1,414,363 | 110.0 | 56.6 | 229.5 | -24.6 | 72.9 | 153.7 | -0.6% | -0.6% | +0.4% | no | needs serving work (NaN routing + 5-min position buffer) |
-| ds1 | path_min_s | 42 | 2,178,139 | 1,414,363 | 103.2 | 52.3 | 211.7 | -22.1 | 70.6 | 142.9 | -6.7% | -8.3% | -2.7% | **yes** | ? |
-| ds1 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.4 | 51.8 | 208.3 | -20.7 | 70.0 | 141.1 | -8.3% | -9.8% | -3.5% | **yes** | ? |
-| ds1 | path_own_s_cold | 42 | 2,178,139 | 1,414,363 | 182.0 | 121.6 | 391.8 | +66.0 | 99.6 | 259.7 | +64.5% | +69.7% | +75.3% | no | ? |
-| ds1 | path_own_s_drop | 42 | 2,178,139 | 1,414,363 | 103.6 | 52.8 | 214.9 | -18.7 | 73.3 | 142.8 | -6.3% | -6.9% | +1.1% | **yes** | ? |
-| ds1 | path_own_s_drop_cold | 42 | 2,178,139 | 1,414,363 | 124.4 | 66.3 | 265.5 | -24.3 | 80.4 | 174.9 | +12.5% | +15.0% | +14.0% | no | ? |
-| ds1 | path_s | 42 | 2,178,139 | 1,414,363 | 104.8 | 53.1 | 218.8 | -19.1 | 73.9 | 143.8 | -5.2% | -5.2% | +1.8% | **yes** | ? |
+| ds1 | path_min_s | 42 | 2,178,139 | 1,414,363 | 103.2 | 52.3 | 211.7 | -22.1 | 70.6 | 142.9 | -6.7% | -8.3% | -2.7% | **yes** | needs serving work (link store, 2 cols) |
+| ds1 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.4 | 51.8 | 208.3 | -20.7 | 70.0 | 141.1 | -8.3% | -9.8% | -3.5% | **yes** | needs serving work (link store + 5-min position ring, ~1 day) + cold-start gate |
+| ds1 | path_own_s_big | 42 | 2,178,139 | 1,414,363 | 100.5 | 51.4 | 206.3 | -18.7 | 69.3 | 140.2 | -9.1% | -10.7% | -4.5% | **yes** | as path_own_s; 255-leaf trees ~2x export size |
+| ds1 | path_own_s_cold | 42 | 2,178,139 | 1,414,363 | 182.0 | 121.6 | 391.8 | +66.0 | 99.6 | 259.7 | +64.5% | +69.7% | +75.3% | no | diagnostic (cold start) |
+| ds1 | path_own_s_drop | 42 | 2,178,139 | 1,414,363 | 103.6 | 52.8 | 214.9 | -18.7 | 73.3 | 142.8 | -6.3% | -6.9% | +1.1% | **yes** | as path_own_s; degrades less when cold |
+| ds1 | path_own_s_drop_cold | 42 | 2,178,139 | 1,414,363 | 124.4 | 66.3 | 265.5 | -24.3 | 80.4 | 174.9 | +12.5% | +15.0% | +14.0% | no | diagnostic (cold start) |
+| ds1 | path_own_s_linkcold | 42 | 2,178,139 | 1,414,363 | 150.5 | 84.2 | 338.5 | -90.8 | 77.7 | 242.2 | +36.1% | +46.6% | +57.8% | no | diagnostic (link store cold) |
+| ds1 | path_s | 42 | 2,178,139 | 1,414,363 | 104.8 | 53.1 | 218.8 | -19.1 | 73.9 | 143.8 | -5.2% | -5.2% | +1.8% | **yes** | needs serving work (link store) |
 | ds1lag90w15 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
-| ds1lag90w15 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.9 | 52.2 | 209.6 | -21.1 | 70.4 | 141.5 | -7.8% | -9.2% | -3.0% | **yes** | ? |
+| ds1lag90w15 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.9 | 52.2 | 209.6 | -21.1 | 70.4 | 141.5 | -7.8% | -9.2% | -3.0% | **yes** | needs serving work (link store + 5-min position ring, ~1 day) + cold-start gate |
 | ds1shift | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
 | ds1shift | live_all | 7 | 1,978,242 | 1,424,485 | 103.0 | 54.1 | 212.4 | -14.7 | 69.9 | 144.0 | -8.9% | -11.9% | -1.9% | **yes** | needs serving work (NaN routing + live link store) |
 | ds1shift | live_all_s | 7 | 1,978,242 | 1,424,485 | 102.4 | 53.2 | 211.8 | -16.3 | 68.8 | 143.4 | -9.4% | -12.2% | -3.4% | **yes** | needs serving work (live link store, ~1-2 days) |
-| ds1shift | path_own_s | 7 | 1,978,242 | 1,424,485 | 102.8 | 53.6 | 214.2 | -14.8 | 69.6 | 144.0 | -9.0% | -11.2% | -2.2% | **yes** | ? |
-| ds1shift | path_own_s_drop | 7 | 1,978,242 | 1,424,485 | 104.2 | 54.5 | 216.4 | -13.7 | 71.4 | 144.9 | -7.8% | -10.3% | +0.2% | **yes** | ? |
+| ds1shift | path_own_s | 7 | 1,978,242 | 1,424,485 | 102.8 | 53.6 | 214.2 | -14.8 | 69.6 | 144.0 | -9.0% | -11.2% | -2.2% | **yes** | needs serving work (link store + 5-min position ring, ~1 day) + cold-start gate |
+| ds1shift | path_own_s_drop | 7 | 1,978,242 | 1,424,485 | 104.2 | 54.5 | 216.4 | -13.7 | 71.4 | 144.9 | -7.8% | -10.3% | +0.2% | **yes** | as path_own_s; degrades less when cold |

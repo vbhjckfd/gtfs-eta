@@ -13,6 +13,16 @@ SERVING = {
     "live_path": "needs serving work (NaN routing + live link store)",
     "own_speed": "needs serving work (NaN routing + 5-min position buffer)",
     "headway": "needs serving work (NaN routing + stop-arrival store)",
+    "path_s": "needs serving work (link store)",
+    "path_min_s": "needs serving work (link store, 2 cols)",
+    "path_own_s": "needs serving work (link store + 5-min position ring, ~1 day) + cold-start gate",
+    "path_own_s_drop": "as path_own_s; degrades less when cold",
+    "path_own_s_big": "as path_own_s; 255-leaf trees ~2x export size",
+    "live_all_s_lr10": "as live_all_s",
+    "live_all_s_cold": "diagnostic (cold start)",
+    "path_own_s_cold": "diagnostic (cold start)",
+    "path_own_s_drop_cold": "diagnostic (cold start)",
+    "path_own_s_linkcold": "diagnostic (link store cold)",
 }
 HEAD = """# Leaderboard
 
@@ -20,7 +30,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
+Tags: `ds1lag90w15` = ds1 with live features rebuilt at 90 s detection lag, 15-min link window.
+`ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
 `ds1shift` = train 09-07..09-17, test 09-18 (Fri), 09-19, 09-20. Train rows 1% of
 snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 

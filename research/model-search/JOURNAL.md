@@ -88,3 +88,47 @@ Sun 107.1→105.4 / 106.6→102.4 — the gain is live traffic, so mostly weekda
 2. Worst routes unchanged (122 ~350 s, 133 ~230 s): inspect route 122 (new in top list).
 3. Other ideas still open: hyper-params (lr/leaves, n_iter cap is binding),
    drop calendar features, log target, sample weights off.
+
+## 2026-09-25 — run 2 (ablation, cold start, robustness)
+
+Rebuilt DS1 from scratch (`pip install -e . tzdata`; `pipeline_lite.py --days 2026-09-07..2026-09-21 --parallel 4`
+≈ 75 min; `harness.py prep` ≈ 20 min). Baseline and live_all_s reproduced
+bit-for-bit (110.6 / 102.5), so run-1 numbers stay comparable.
+New: `queue.sh TAG TRAIN TEST SEED arm…`; env overrides `MS_DETECT_LAG`,
+`MS_LINK_WINDOW`, `MS_FEAT_DIR` for features_live / prep.
+
+### Ablation (ds1, seed 42; baseline 110.6 / p90 230.9)
+| arm | cols added | MAE | p90 | ΔMAE |
+|---|---|---|---|---|
+| path_min_s | live_path_sec, live_path_cov | 103.2 | 211.7 | −6.7% |
+| path_s | 4 path cols | 104.8 | 218.8 | −5.2% |
+| live_all_s | all 8 | 102.5 | 210.7 | −7.3% |
+| **path_own_s** | 4 path + 3 own_speed (no headway) | **101.4** | **208.3** | **−8.3%** |
+| path_own_s_big | same, 255 leaves / min_leaf 50 | 100.5 | 206.3 | −9.1% |
+| live_all_s_lr10 | lr 0.1 | 102.7 | 213.4 | −7.1% (no gain) |
+
+`path_own_s` confirmed on ds1shift (seed 7): 113.0 → 102.8 (−9.0%), p90 241.1 → 214.2,
+all buckets better. Robust to a 90 s detection lag + 15-min link window
+(ds1lag90w15: −7.8%, p90 −9.2%). → drop `since_last_at_target` (no stop-arrival
+store needed). path_s < path_min_s is odd (likely noise from age/speed cols).
+
+### Cold start — IMPORTANT for serving
+Model trained with live features, tested with all live features at their
+cold values (daemon just restarted):
+- live_all_s cold: 163.5 (+48%); path_own_s cold: 182.0 (+65%).
+- path_own_s link store cold, own_speed warm (5–30 min after restart): 150.5 (+36%).
+- Dropout (15% of training snapshots forced cold, `path_own_s_drop`): cold 124.4
+  (+12.5%) but warm only −6.3% / −7.8% (shift) instead of −8.3% / −9.0%.
+Cold rows are rare in training (they coincide with the start of service), so the
+trees extrapolate badly. Recommendation: serve the live model only when the link
+store is warm (e.g. ≥ 30 min uptime or path coverage > 0) and fall back to the
+current production trees otherwise — a gate, not dropout, keeps the full gain.
+Alternatively persist the link store (+ position ring) across restarts.
+
+### Next steps
+1. Confirm path_own_s_big on ds1shift; weigh ~2x tree size vs −0.8 pt.
+2. Gate evaluation: per-row fallback to baseline where `live_path_cov == 0`
+   (simulate on the cold test sets) — measure the served-mix MAE.
+3. Worst routes still 122 (~340 s), 133 (~230 s), 106, 125 — not helped by live
+   features; inspect route 122 labels/shape.
+4. Remaining ideas: drop calendar cols, sample-weight off, quantile/huber loss.
