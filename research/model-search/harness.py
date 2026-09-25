@@ -105,7 +105,14 @@ def prep_day(day: str, keep_pct: float, client=None) -> Path:
     from features_live import live_features
     cross = pd.read_parquet(TRAIN_DIR / f"{day}.cross.parquet")
     pos = pd.read_parquet(TRAIN_DIR / f"{day}.pos.parquet")
-    live = live_features(cross, pos, raw.iloc[idx].reset_index(drop=True), gtfs)
+    d0 = date.fromisoformat(day)
+    prior = [pd.read_parquet(fp) for k in range(1, HIST_DAYS + 1)
+             if (fp := FEAT_DIR / f"links_{(d0 - timedelta(days=k)).isoformat()}.parquet").exists()]
+    lo = []
+    live = live_features(cross, pos, raw.iloc[idx].reset_index(drop=True), gtfs,
+                         prior_links=prior, links_out=lo)
+    FEAT_DIR.mkdir(parents=True, exist_ok=True)
+    lo[0].to_parquet(FEAT_DIR / f"links_{day}.parquet", index=False)
     for c in live.columns:
         feats[c] = live[c].to_numpy()
     FEAT_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,6 +121,7 @@ def prep_day(day: str, keep_pct: float, client=None) -> Path:
     return out
 
 
+HIST_DAYS = 14   # historical link table looks back this many prior days
 PREP_PCT = 3.0   # every day is prepped once at this rate; runs subsample it
 
 

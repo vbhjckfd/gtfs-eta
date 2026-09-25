@@ -300,3 +300,60 @@ def stack_big(tr, te, seed=42):
     """stack with 255 leaves / min 50 per leaf."""
     tr, te = _sentinel(tr, te, _STACK)
     return _fit_predict(tr, te, _NOCAL + _STACK, seed, max_leaf_nodes=255, min_samples_leaf=50)
+
+
+# ---- run 4 (features v3: MS_FEAT_DIR=ms_features_v3) ----------------------
+_HIST = ["hist_path_sec", "hist_path_cov"]
+
+
+def _stack_plus(tr, te, seed, extra, **hp):
+    cols = _STACK + extra
+    tr, te = _sentinel(tr, te, cols)
+    return _fit_predict(tr, te, _NOCAL + cols, seed, **hp)
+
+
+@arm
+def stack_m7(tr, te, seed=42):
+    """stack + median-of-7 link times."""
+    return _stack_plus(tr, te, seed, ["live_path_sec_m7"])
+
+
+@arm
+def stack_ewm(tr, te, seed=42):
+    """stack + EWMA (alpha 0.4 per traversal) link times."""
+    return _stack_plus(tr, te, seed, ["live_path_sec_ewm"])
+
+
+@arm
+def stack_hist(tr, te, seed=42):
+    """stack + historical link times (prior days, same local hour)."""
+    return _stack_plus(tr, te, seed, _HIST)
+
+
+@arm
+def stack_fill(tr, te, seed=42):
+    """stack + historical path + live-or-historical filled path sum."""
+    return _stack_plus(tr, te, seed, _HIST + ["fill_path_sec"])
+
+
+@arm
+def stack_v3(tr, te, seed=42):
+    """stack + every run-4 column."""
+    return _stack_plus(tr, te, seed, ["live_path_sec_m7", "live_path_sec_ewm"] + _HIST
+                       + ["fill_path_sec"])
+
+
+@arm
+def stack_hist_cold(tr, te, seed=42):
+    """stack_hist evaluated with the live store cold (historical table is a
+    static artifact, so it stays)."""
+    cols = _STACK + _HIST
+    tr, te = _sentinel(tr, te, cols)
+    return _fit_predict(tr, _cold(te, _STACK), _NOCAL + cols, seed)
+
+
+@arm
+def stack_cold(tr, te, seed=42):
+    """stack evaluated with the live store cold (reference for stack_hist_cold)."""
+    tr, te = _sentinel(tr, te, _STACK)
+    return _fit_predict(tr, _cold(te, _STACK), _NOCAL + _STACK, seed)
