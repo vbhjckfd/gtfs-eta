@@ -270,3 +270,70 @@ sum it along the path per row (same path walk as the live sum). +0.5 day.
 3. Route 122 still ~320 s — inspect.
 4. Hyper-params on stack_hist (lr 0.1 did nothing before; try l2_regularization,
    min_samples_leaf 100).
+
+## 2026-09-25 — run 6 (retry of the stalled run 5: v4 features, catroute)
+
+Run 5 took the lock at 14:18 and committed the v4 feature code, then stalled while
+rebuilding data (no journal entry and no results). On the user's "try again" this
+run took the lock over at 17:35 (it was 2h43m old).
+
+Rebuilt with `pipeline_lite.py --days 2026-08-31..2026-09-21 --parallel 4`
+(weekdays ~25-47 min per day per worker, weekends ~16 min, about 2.5 h in total). Prep ran
+in a chain as days landed (`MS_FEAT_DIR=ms_features_v4 harness.py prep --days D`,
+ascending). History now starts 08-31, so 09-07 train rows have 7 prior days and
+09-14+ have 14.
+
+Cmds: `MS_FEAT_DIR=ms_features_v4 sh research/model-search/queue.sh ds1v4 2026-09-07..2026-09-18 2026-09-19..2026-09-21 42 <arms>`
+and `… ds1shiftv4 2026-09-07..2026-09-17 2026-09-18..2026-09-20 7 <arms>`.
+
+### Results (MAE / p90, Δ vs baseline on the same tag)
+| arm | ds1v4 (s42) | Δ | ds1shiftv4 (s7) | Δ |
+|---|---|---|---|---|
+| baseline | 110.6 / 230.9 | | 113.0 / 241.1 | |
+| stack_hist (run-4 leader, longer history) | 94.3 / 190.1 | −14.7% | 94.4 / 192.2 | −16.5% |
+| stack_hist_r (+ live/hist ratio) | 94.3 / 190.6 | −14.7% | | |
+| stack_hist_l2 (l2 = 1.0) | 94.3 / 190.1 | −14.7% | | |
+| stack_hist_leaf100 | 94.2 / 189.8 | −14.8% | | |
+| stack_v4 (+ dt, ratio, p75) | 93.5 / 188.0 | −15.5% | | |
+| stack_hist_dt (+ weekday/weekend hist table) | 93.3 / 188.1 | −15.6% | 93.4 / 190.4 | −17.4% |
+| stack_hist_catroute (route_id native categorical) | 93.0 / 188.3 | −15.9% | 93.0 / 189.7 | −17.7% |
+| **stack_hist_dt_cat** | **92.1 / 186.0** | **−16.7%** | **92.1 / 187.6** | **−18.5%** |
+
+- Longer history on its own: stack_hist went 94.8 → 94.3 on ds1 (v3 → v4 features) and
+  94.5 → 94.4 on shift. The gain is small, so 14 days of history is enough.
+- The ratio, p75, l2 and leaf100 arms all come out as noise (±0.1).
+- The day-type table and categorical route are each worth about 1% and add up.
+  Against stack_hist, stack_hist_dt_cat is −2.3% (ds1) and −2.4% (shift), and every
+  stops_ahead bucket improves by 1.8–2.7% on both splits. By day on ds1: Sat
+  89.7→87.0, Sun 93.7→90.7, Mon 98.1→96.8. On shift: Fri 97.8→96.4, Sat 90.1→87.1,
+  Sun 93.9→90.9. By horizon (ds1): sa1 65.9, sa5 92.1, sa10 127.2 (baseline 72.6 / — / 153.5).
+  Rows: train 2.18M / 1.98M, test 1.41M / 1.42M.
+- Worst routes (dt_cat, ds1): 122 309, 133 215, 106 171, 125 155, 113 143, 94 140,
+  878 138, 137 136, 129 134, 131 133. On shift, 122 is 228 and 133 is 160.
+
+**Conclusion: new leader `stack_hist_dt_cat`. It wins per protocol on both splits
+and seeds (ds1 110.6→92.1, −16.7%, p90 230.9→186.0; shift 113.0→92.1, −18.5%,
+p90 241.1→187.6).**
+Cols: `_NOCAL + _STACK + [hist_path_sec, hist_path_cov, hist_path_sec_dt]`, with
+`categorical_features=[0]` (route_id).
+
+### Serving estimate
+- Base: same as stack_hist (link store plus position ring persisted, historical
+  link×hour table at export), about 1.5 days.
+- Day-type table: build two tables (weekday and weekend) instead of one. This
+  costs nothing extra.
+- Categorical route: the exported trees need categorical splits. For each
+  categorical node, export sklearn's `raw_left_cat_bitsets` (8×uint32 per node)
+  and use a bitset membership test in inference, instead of the ordinal
+  threshold now used for route_id (export_worker_data.py route_to_int). Also
+  mirror the change in the worker if it walks the trees. About 0.5–1 day.
+- Total is about 2–2.5 days.
+
+### Next steps
+1. Route 122 (~230–310 s) is still the worst route. Inspect its labels and shape.
+2. Other categoricals: stops_ahead / hour as native categoricals? Probably not
+   useful. A better candidate is a stop-level categorical (next stop id, too
+   many levels for 255 bins, so it would need a hashed or grouped version).
+3. Day-type split of the live store? (Probably none; the live store is already same-day.)
+4. Weight recent training days more heavily, or train on a longer window
+   (more days, now that history is cheap).

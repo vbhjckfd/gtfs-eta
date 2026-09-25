@@ -4,7 +4,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1v3` / `ds1shiftv3` = same splits, features v3 (MS_FEAT_DIR=ms_features_v3: + m7, EWMA, historical link table from prior days); baselines identical.
+Tags: `ds1v4` / `ds1shiftv4` = same splits, features v4 (MS_FEAT_DIR=ms_features_v4: pipeline from 08-31 so the historical link table has 7-14 prior days for every train row, + day-type table, live/hist ratio, p75); baselines identical.
+`ds1v3` / `ds1shiftv3` = same splits, features v3 (MS_FEAT_DIR=ms_features_v3: + m7, EWMA, historical link table from prior days); baselines identical.
 `ds1v2` / `ds1shiftv2` = same splits, features prepped with the run-3 median-of-5 column (MS_FEAT_DIR=ms_features_v2); baselines identical.
 `ds1lag90w15` = ds1 with live features rebuilt at 90 s detection lag, 15-min link window.
 `ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
@@ -52,6 +53,11 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1shiftv3 | stack | 7 | 1,978,242 | 1,424,485 | 96.7 | 48.7 | 196.9 | -21.3 | 66.6 | 134.7 | -14.5% | -18.3% | -6.5% | **yes** | link store (last 5 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
 | ds1shiftv3 | stack_hist | 7 | 1,978,242 | 1,424,485 | 94.5 | 46.8 | 192.1 | -22.7 | 66.0 | 131.6 | -16.4% | -20.3% | -7.4% | **yes** | as stack + static link x hour median table built at export (like priors) |
 | ds1shiftv3 | stack_v3 | 7 | 1,978,242 | 1,424,485 | 94.3 | 46.5 | 191.6 | -22.6 | 66.1 | 131.5 | -16.5% | -20.5% | -7.1% | **yes** | as stack_hist + last 7 traversals + EWMA per link |
+| ds1shiftv4 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
+| ds1shiftv4 | stack_hist | 7 | 1,978,242 | 1,424,485 | 94.4 | 46.6 | 192.2 | -22.9 | 66.0 | 131.6 | -16.5% | -20.3% | -7.3% | **yes** | as stack + static link x hour median table built at export (like priors) |
+| ds1shiftv4 | stack_hist_catroute | 7 | 1,978,242 | 1,424,485 | 93.0 | 46.3 | 189.7 | -21.0 | 64.9 | 129.7 | -17.7% | -21.3% | -8.8% | **yes** | as stack_hist + categorical-split (bitset) support in export/inference, ~0.5-1 day |
+| ds1shiftv4 | stack_hist_dt | 7 | 1,978,242 | 1,424,485 | 93.4 | 45.9 | 190.4 | -21.1 | 65.6 | 129.9 | -17.4% | -21.0% | -7.9% | **yes** | as stack_hist + weekday/weekend link x hour table |
+| ds1shiftv4 | stack_hist_dt_cat | 7 | 1,978,242 | 1,424,485 | 92.1 | 45.6 | 187.6 | -19.5 | 64.5 | 128.3 | -18.5% | -22.2% | -9.4% | **yes** | as stack_hist_dt + categorical-split (bitset) support in export/inference; ~2 days total |
 | ds1v2 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
 | ds1v2 | m3_nocal | 42 | 2,178,139 | 1,414,363 | 98.0 | 48.8 | 198.4 | -20.7 | 68.9 | 135.8 | -11.3% | -14.1% | -5.1% | **yes** | link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
 | ds1v2 | path_own_m3 | 42 | 2,178,139 | 1,414,363 | 98.4 | 49.8 | 199.2 | -19.9 | 69.9 | 136.1 | -11.1% | -13.7% | -3.7% | **yes** | as path_own_s; store keeps last 3 traversals per link |
@@ -68,3 +74,12 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1v3 | stack_hist_cold | 42 | 2,178,139 | 1,414,363 | 154.8 | 95.9 | 324.4 | +18.1 | 94.8 | 217.9 | +40.0% | +40.5% | +50.4% | no | diagnostic (cold start, hist table kept) |
 | ds1v3 | stack_m7 | 42 | 2,178,139 | 1,414,363 | 96.4 | 47.5 | 194.7 | -21.2 | 68.5 | 133.3 | -12.8% | -15.7% | -5.6% | **yes** | as stack; store keeps last 7 traversals per link |
 | ds1v3 | stack_v3 | 42 | 2,178,139 | 1,414,363 | 94.5 | 45.9 | 190.1 | -21.5 | 67.5 | 131.1 | -14.6% | -17.7% | -7.0% | **yes** | as stack_hist + last 7 traversals + EWMA per link |
+| ds1v4 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v4 | stack_hist | 42 | 2,178,139 | 1,414,363 | 94.3 | 46.1 | 190.1 | -19.6 | 67.1 | 130.7 | -14.7% | -17.7% | -7.5% | **yes** | as stack + static link x hour median table built at export (like priors) |
+| ds1v4 | stack_hist_catroute | 42 | 2,178,139 | 1,414,363 | 93.0 | 45.7 | 188.3 | -17.8 | 66.2 | 128.6 | -15.9% | -18.5% | -8.8% | **yes** | as stack_hist + categorical-split (bitset) support in export/inference, ~0.5-1 day |
+| ds1v4 | stack_hist_dt | 42 | 2,178,139 | 1,414,363 | 93.3 | 45.2 | 188.1 | -18.0 | 66.8 | 129.1 | -15.6% | -18.5% | -8.0% | **yes** | as stack_hist + weekday/weekend link x hour table |
+| ds1v4 | stack_hist_dt_cat | 42 | 2,178,139 | 1,414,363 | 92.1 | 44.9 | 186.0 | -16.5 | 65.9 | 127.2 | -16.7% | -19.4% | -9.2% | **yes** | as stack_hist_dt + categorical-split (bitset) support in export/inference; ~2 days total |
+| ds1v4 | stack_hist_l2 | 42 | 2,178,139 | 1,414,363 | 94.3 | 46.0 | 190.1 | -19.8 | 66.9 | 130.9 | -14.7% | -17.6% | -7.8% | **yes** | as stack_hist |
+| ds1v4 | stack_hist_leaf100 | 42 | 2,178,139 | 1,414,363 | 94.2 | 46.0 | 189.8 | -19.6 | 67.0 | 130.5 | -14.8% | -17.8% | -7.7% | **yes** | as stack_hist |
+| ds1v4 | stack_hist_r | 42 | 2,178,139 | 1,414,363 | 94.3 | 45.9 | 190.6 | -19.9 | 67.1 | 131.0 | -14.7% | -17.5% | -7.5% | **yes** | as stack_hist |
+| ds1v4 | stack_v4 | 42 | 2,178,139 | 1,414,363 | 93.5 | 45.3 | 188.0 | -18.2 | 66.8 | 129.4 | -15.5% | -18.6% | -7.9% | **yes** | as stack_hist + day-type and p75 tables |
