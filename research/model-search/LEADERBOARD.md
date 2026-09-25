@@ -4,7 +4,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1lag90w15` = ds1 with live features rebuilt at 90 s detection lag, 15-min link window.
+Tags: `ds1v2` / `ds1shiftv2` = same splits, features prepped with the run-3 median-of-5 column (MS_FEAT_DIR=ms_features_v2); baselines identical.
+`ds1lag90w15` = ds1 with live features rebuilt at 90 s detection lag, 15-min link window.
 `ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
 `ds1shift` = train 09-07..09-17, test 09-18 (Fri), 09-19, 09-20. Train rows 1% of
 snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
@@ -21,17 +22,35 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1 | live_path | 42 | 2,178,139 | 1,414,363 | 104.5 | 52.9 | 216.6 | -20.1 | 73.6 | 143.6 | -5.5% | -6.2% | +1.4% | **yes** | needs serving work (NaN routing + live link store) |
 | ds1 | own_speed | 42 | 2,178,139 | 1,414,363 | 110.0 | 56.6 | 229.5 | -24.6 | 72.9 | 153.7 | -0.6% | -0.6% | +0.4% | no | needs serving work (NaN routing + 5-min position buffer) |
 | ds1 | path_min_s | 42 | 2,178,139 | 1,414,363 | 103.2 | 52.3 | 211.7 | -22.1 | 70.6 | 142.9 | -6.7% | -8.3% | -2.7% | **yes** | needs serving work (link store, 2 cols) |
-| ds1 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.4 | 51.8 | 208.3 | -20.7 | 70.0 | 141.1 | -8.3% | -9.8% | -3.5% | **yes** | needs serving work (link store + 5-min position ring, ~1 day) + cold-start gate |
+| ds1 | path_own_m3 | 42 | 2,178,139 | 1,414,363 | 98.4 | 49.8 | 199.2 | -19.9 | 69.9 | 136.1 | -11.1% | -13.7% | -3.7% | **yes** | as path_own_s; store keeps last 3 traversals per link |
+| ds1 | path_own_m3only | 42 | 2,178,139 | 1,414,363 | 98.3 | 49.3 | 199.8 | -20.7 | 69.0 | 136.1 | -11.1% | -13.5% | -4.9% | **yes** | as path_own_s; store keeps last 3 traversals per link |
+| ds1 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.4 | 51.8 | 208.3 | -20.7 | 70.0 | 141.1 | -8.3% | -9.8% | -3.5% | **yes** | needs serving work (link store + 5-min position ring, ~1 day), state persisted across the 5-min push-feed restarts |
 | ds1 | path_own_s_big | 42 | 2,178,139 | 1,414,363 | 100.5 | 51.4 | 206.3 | -18.7 | 69.3 | 140.2 | -9.1% | -10.7% | -4.5% | **yes** | as path_own_s; 255-leaf trees ~2x export size |
 | ds1 | path_own_s_cold | 42 | 2,178,139 | 1,414,363 | 182.0 | 121.6 | 391.8 | +66.0 | 99.6 | 259.7 | +64.5% | +69.7% | +75.3% | no | diagnostic (cold start) |
 | ds1 | path_own_s_drop | 42 | 2,178,139 | 1,414,363 | 103.6 | 52.8 | 214.9 | -18.7 | 73.3 | 142.8 | -6.3% | -6.9% | +1.1% | **yes** | as path_own_s; degrades less when cold |
 | ds1 | path_own_s_drop_cold | 42 | 2,178,139 | 1,414,363 | 124.4 | 66.3 | 265.5 | -24.3 | 80.4 | 174.9 | +12.5% | +15.0% | +14.0% | no | diagnostic (cold start) |
+| ds1 | path_own_s_gate | 42 | 2,178,139 | 1,414,363 | 101.7 | 51.7 | 208.7 | -21.2 | 69.8 | 141.5 | -8.0% | -9.6% | -3.8% | **yes** | as path_own_s; baseline trees also shipped for cov=0 rows |
 | ds1 | path_own_s_linkcold | 42 | 2,178,139 | 1,414,363 | 150.5 | 84.2 | 338.5 | -90.8 | 77.7 | 242.2 | +36.1% | +46.6% | +57.8% | no | diagnostic (link store cold) |
+| ds1 | path_own_s_nocal | 42 | 2,178,139 | 1,414,363 | 100.6 | 50.9 | 206.3 | -19.2 | 68.9 | 140.4 | -9.1% | -10.6% | -5.0% | **yes** | as path_own_s |
+| ds1 | path_own_s_nw | 42 | 2,178,139 | 1,414,363 | 101.4 | 51.9 | 208.4 | -19.7 | 70.6 | 140.5 | -8.3% | -9.7% | -2.8% | **yes** | as path_own_s |
 | ds1 | path_s | 42 | 2,178,139 | 1,414,363 | 104.8 | 53.1 | 218.8 | -19.1 | 73.9 | 143.8 | -5.2% | -5.2% | +1.8% | **yes** | needs serving work (link store) |
 | ds1lag90w15 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
-| ds1lag90w15 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.9 | 52.2 | 209.6 | -21.1 | 70.4 | 141.5 | -7.8% | -9.2% | -3.0% | **yes** | needs serving work (link store + 5-min position ring, ~1 day) + cold-start gate |
+| ds1lag90w15 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.9 | 52.2 | 209.6 | -21.1 | 70.4 | 141.5 | -7.8% | -9.2% | -3.0% | **yes** | needs serving work (link store + 5-min position ring, ~1 day), state persisted across the 5-min push-feed restarts |
 | ds1shift | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
 | ds1shift | live_all | 7 | 1,978,242 | 1,424,485 | 103.0 | 54.1 | 212.4 | -14.7 | 69.9 | 144.0 | -8.9% | -11.9% | -1.9% | **yes** | needs serving work (NaN routing + live link store) |
 | ds1shift | live_all_s | 7 | 1,978,242 | 1,424,485 | 102.4 | 53.2 | 211.8 | -16.3 | 68.8 | 143.4 | -9.4% | -12.2% | -3.4% | **yes** | needs serving work (live link store, ~1-2 days) |
-| ds1shift | path_own_s | 7 | 1,978,242 | 1,424,485 | 102.8 | 53.6 | 214.2 | -14.8 | 69.6 | 144.0 | -9.0% | -11.2% | -2.2% | **yes** | needs serving work (link store + 5-min position ring, ~1 day) + cold-start gate |
+| ds1shift | m3_nocal | 7 | 1,978,242 | 1,424,485 | 97.9 | 49.7 | 199.9 | -21.3 | 66.9 | 136.7 | -13.4% | -17.1% | -6.0% | **yes** | link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
+| ds1shift | path_own_m3 | 7 | 1,978,242 | 1,424,485 | 99.2 | 51.0 | 203.8 | -16.5 | 68.7 | 138.2 | -12.2% | -15.5% | -3.5% | **yes** | as path_own_s; store keeps last 3 traversals per link |
+| ds1shift | path_own_s | 7 | 1,978,242 | 1,424,485 | 102.8 | 53.6 | 214.2 | -14.8 | 69.6 | 144.0 | -9.0% | -11.2% | -2.2% | **yes** | needs serving work (link store + 5-min position ring, ~1 day), state persisted across the 5-min push-feed restarts |
+| ds1shift | path_own_s_big | 7 | 1,978,242 | 1,424,485 | 100.7 | 52.4 | 208.8 | -14.5 | 67.7 | 141.7 | -10.9% | -13.4% | -4.9% | **yes** | as path_own_s; 255-leaf trees ~2x export size |
 | ds1shift | path_own_s_drop | 7 | 1,978,242 | 1,424,485 | 104.2 | 54.5 | 216.4 | -13.7 | 71.4 | 144.9 | -7.8% | -10.3% | +0.2% | **yes** | as path_own_s; degrades less when cold |
+| ds1shiftv2 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
+| ds1shiftv2 | stack | 7 | 1,978,242 | 1,424,485 | 96.7 | 48.7 | 196.9 | -21.3 | 66.6 | 134.7 | -14.5% | -18.3% | -6.5% | **yes** | link store (last 5 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
+| ds1shiftv2 | stack_big | 7 | 1,978,242 | 1,424,485 | 95.9 | 48.5 | 196.1 | -20.1 | 66.0 | 133.9 | -15.1% | -18.7% | -7.2% | **yes** | as stack; 255-leaf trees ~2x export size |
+| ds1v2 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v2 | m3_nocal | 42 | 2,178,139 | 1,414,363 | 98.0 | 48.8 | 198.4 | -20.7 | 68.9 | 135.8 | -11.3% | -14.1% | -5.1% | **yes** | link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
+| ds1v2 | path_own_m3 | 42 | 2,178,139 | 1,414,363 | 98.4 | 49.8 | 199.2 | -19.9 | 69.9 | 136.1 | -11.1% | -13.7% | -3.7% | **yes** | as path_own_s; store keeps last 3 traversals per link |
+| ds1v2 | path_own_m35 | 42 | 2,178,139 | 1,414,363 | 97.6 | 49.1 | 197.7 | -18.9 | 69.5 | 135.0 | -11.7% | -14.4% | -4.2% | **yes** | as path_own_s; store keeps last 5 traversals per link |
+| ds1v2 | path_own_m3_big | 42 | 2,178,139 | 1,414,363 | 99.7 | 50.6 | 205.6 | -15.6 | 71.8 | 136.2 | -9.9% | -10.9% | -1.0% | **yes** | as path_own_m3; 255-leaf trees ~2x export size |
+| ds1v2 | stack | 42 | 2,178,139 | 1,414,363 | 96.9 | 48.0 | 196.1 | -20.5 | 68.3 | 134.2 | -12.4% | -15.0% | -5.8% | **yes** | link store (last 5 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
+| ds1v2 | stack_big | 42 | 2,178,139 | 1,414,363 | 96.0 | 47.7 | 194.3 | -19.4 | 67.3 | 133.1 | -13.2% | -15.8% | -7.2% | **yes** | as stack; 255-leaf trees ~2x export size |

@@ -132,3 +132,76 @@ Alternatively persist the link store (+ position ring) across restarts.
 3. Worst routes still 122 (~340 s), 133 (~230 s), 106, 125 — not helped by live
    features; inspect route 122 labels/shape.
 4. Remaining ideas: drop calendar cols, sample-weight off, quantile/huber loss.
+
+## 2026-09-25 — run 3 (smoothed link times, gate, ablations, stack)
+
+Rebuilt DS1 again (pipeline_lite 75 min, prep 20 min); baseline 110.6 / 113.0 and
+path_own_s 101.4 / 102.8 reproduced exactly.
+
+### Serving reality check (read scripts/push_feed.py + push-feed.yml)
+The "daemon" is not long-lived: push-feed runs `push_feed.py --loop 10 --count 33`
+every 5 min (~5.5 min per process) and already carries per-vehicle anchors across
+restarts in R2 `feed/tracker_state.json`. So a cold start happens every 5 min
+unless the live state is persisted — the link store (≤ 5 traversals × a few
+thousand stop-pair links, 30-min TTL) and the 5-min position ring must go into
+that same JSON (a few hundred KB). With that, cold start only happens after an R2
+failure / >30 min outage, which is what cov=0 already models.
+
+### Gate (path_own_s_gate): not needed
+Serve path_own_s where live_path_cov>0, else baseline: 101.7 vs 101.4 ungated.
+On naturally cold rows (cov=0, 3.7% of test, start of service) path_own_s is
+already *better* than baseline (211 vs 221 s). By coverage band (live / base MAE):
+cov 0: 211/221, (0,0.5): 153/152, [0.5,0.9): 222/231, ≥0.9 (92%): 91/101.
+→ ship without a gate; only the artificial "everything cold mid-day" case is bad.
+
+### New feature: median of the last k traversals per link
+`features_live.py` now also emits `live_path_sec_m3` / `live_path_sec_m5`: same
+path sum, but each link's time is the median of its last 3 / 5 traversals (the
+latest must still be within the 30-min window; older ones are taken as-is — the
+serving store keeps the last k per link), and `live_path_n` (#links observed).
+
+| arm (seed 42 ds1 / seed 7 shift) | ds1 MAE | Δ | shift MAE | Δ | p90 ds1 / shift |
+|---|---|---|---|---|---|
+| baseline | 110.6 | | 113.0 | | 230.9 / 241.1 |
+| path_own_s (run-2 leader) | 101.4 | −8.3% | 102.8 | −9.0% | 208.3 / 214.2 |
+| path_own_s_nw (no hour weights) | 101.4 | −8.3% | | | 208.4 |
+| path_own_s_nocal (− month/dow/stop_seq) | 100.6 | −9.1% | | | 206.3 |
+| path_own_s_big (255 leaves) | 100.5 | −9.1% | 100.7 | −10.9% | 206.3 / 208.8 |
+| path_own_m3 (+m3, +n) | 98.4 | −11.1% | 99.2 | −12.2% | 199.2 / 203.8 |
+| path_own_m3only (latest→m3) | 98.3 | −11.1% | | | 199.8 |
+| path_own_m35 (+m3,+n,+m5) | 97.6 | −11.7% | | | 197.7 |
+| path_own_m3_big | 99.7 | −9.9% | | | 205.6 |
+| m3_nocal | 98.0 | −11.3% | 97.9 | −13.4% | 198.4 / 199.9 |
+| **stack** (m3+m5 replace latest, own speed, no calendar) | **96.9** | **−12.4%** | **96.7** | **−14.5%** | **196.1 / 196.9** |
+| stack_big (255 leaves) | 96.0 | −13.2% | 95.9 | −15.1% | 194.3 / 196.1 |
+
+`stack` cols = FEATURE_COLS − {month, day_of_week, stop_sequence} +
+{live_path_sec_m3, live_path_cov, live_path_age, live_speed_mps, own_speed_60/180/300,
+live_path_sec_m5}. Every stops_ahead bucket improves on both splits
+(ds1 sa1 72.6→68.3, sa5 112.0→97.1, sa10 153.5→134.2; shift sa1 71.2→66.6,
+sa10 159.7→134.7). Per day ds1: Sat 100.2→91.8, Sun 107.1→95.3, Mon 120.5→101.6;
+shift: Fri 126.8→101.0. Rows: train 2.18M / 1.98M, test 1.41M / 1.42M.
+Worst routes (stack, ds1): 122 330.7 (base 352.7), 133 224.6 (231.2), 106 177.4,
+125 170.7, 131 148.6, 113 148.4, 94 147.0, 129 146.5, 878 143.9, 881 143.2.
+
+**Conclusion: `stack` is the new leader, WIN on both splits/seeds (−12.4% / −14.5%,
+p90 −15% / −18%, all buckets better).** Big trees add ~0.8 pt more (not on m3
+alone — noisy); keep 127 leaves unless the export budget allows 2x.
+Cmds: `MS_FEAT_DIR=ms_features_v2 python research/model-search/harness.py prep --days 2026-09-07..2026-09-21`;
+`MS_FEAT_DIR=ms_features_v2 sh research/model-search/queue.sh ds1v2 2026-09-07..2026-09-18 2026-09-19..2026-09-21 42 baseline stack stack_big`
+(and `ds1shiftv2 2026-09-07..2026-09-17 2026-09-18..2026-09-20 7`).
+
+### Serving estimate for `stack` (~1-1.5 days)
+In push_feed/inference: detect stop crossings between consecutive pushes per
+vehicle; per link keep a deque of the last 5 (t_done, link_sec); per vehicle a
+5-min ring of (t, dist_along); persist both in tracker_state.json; compute the 8
+columns per row (path walk over the trip profile = O(stops_ahead)). Drop 3
+calendar cols → feature indices change, so export + inference must switch
+together (bump the model blob format).
+
+### Next steps
+1. Larger k / time-decayed mean (m5 > m3 → try m7, trimmed mean, EWMA).
+2. Route 122 still ~330 s: inspect labels/shape (not helped by anything so far).
+3. Live shadow check of crossing detection at 10 s cadence vs offline interpolated
+   crossings (lag90 robustness already −7.8% for path_own_s).
+4. Second seed on ds1 for stack (both splits were run once each with distinct seeds).
