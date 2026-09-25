@@ -34,12 +34,14 @@ import pandas as pd
 
 from src.features import build_sched_profile
 
-LINK_WINDOW_SEC = 1800
+import os
+
+LINK_WINDOW_SEC = int(os.environ.get("MS_LINK_WINDOW", 1800))
 TARGET_WINDOW_SEC = 3600
 # A crossing is only known to the daemon once a later snapshot shows the vehicle
 # past the stop; interpolated arrival times can sit before that. Only use
 # crossings at least this old so no feature peeks past t.
-DETECT_LAG_SEC = 30
+DETECT_LAG_SEC = int(os.environ.get("MS_DETECT_LAG", 30))
 
 LIVE_COLS = ["own_speed_60", "own_speed_180", "own_speed_300",
              "live_path_sec", "live_path_cov", "live_path_age", "live_speed_mps",

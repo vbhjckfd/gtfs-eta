@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import date, timedelta
@@ -41,7 +42,7 @@ from src.features import (  # noqa: E402
 )
 
 TRAIN_DIR = REPO / "data" / "ms_lite"   # pipeline_lite output (10% snapshots)
-FEAT_DIR = REPO / "data" / "ms_features"
+FEAT_DIR = REPO / "data" / os.environ.get("MS_FEAT_DIR", "ms_features")
 RESULTS_DIR = Path(__file__).parent / "results"
 
 PASSTHROUGH = ["vehicle_id", "trip_id", "stop_id", "snapshot_ts",

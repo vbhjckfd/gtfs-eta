@@ -91,3 +91,51 @@ def live_all_s(tr, te, seed=42):
     for d in (tr, te):
         d[LIVE_COLS] = d[LIVE_COLS].fillna(-1.0)
     return _fit_predict(tr, te, FEATURE_COLS + LIVE_COLS, seed)
+
+
+def _sentinel(tr, te, cols):
+    tr, te = tr.copy(), te.copy()
+    for d in (tr, te):
+        d[cols] = d[cols].fillna(-1.0)
+    return tr, te
+
+
+@arm
+def path_s(tr, te, seed=42):
+    """Ablation: only the live-path block (no own_speed, no headway)."""
+    tr, te = _sentinel(tr, te, _PATH)
+    return _fit_predict(tr, te, FEATURE_COLS + _PATH, seed)
+
+
+@arm
+def path_min_s(tr, te, seed=42):
+    """Ablation: minimal serving set — live_path_sec + live_path_cov."""
+    cols = ["live_path_sec", "live_path_cov"]
+    tr, te = _sentinel(tr, te, cols)
+    return _fit_predict(tr, te, FEATURE_COLS + cols, seed)
+
+
+@arm
+def path_own_s(tr, te, seed=42):
+    """Ablation: live-path + own speed (drop headway store)."""
+    tr, te = _sentinel(tr, te, _PATH + _OWN)
+    return _fit_predict(tr, te, FEATURE_COLS + _PATH + _OWN, seed)
+
+
+@arm
+def live_all_s_lr10(tr, te, seed=42):
+    """live_all_s with learning_rate 0.1 (n_iter cap of 1200 is binding at 0.05)."""
+    tr, te = _sentinel(tr, te, LIVE_COLS)
+    return _fit_predict(tr, te, FEATURE_COLS + LIVE_COLS, seed, learning_rate=0.1)
+
+
+@arm
+def live_all_s_cold(tr, te, seed=42):
+    """Serving-safety check: train as live_all_s, but test with every live
+    feature at its cold-start value (daemon just restarted: no link store,
+    no position history) — must not be much worse than baseline."""
+    tr, te = _sentinel(tr, te, LIVE_COLS)
+    te = te.copy()
+    te[LIVE_COLS] = -1.0
+    te["live_path_cov"] = 0.0
+    return _fit_predict(tr, te, FEATURE_COLS + LIVE_COLS, seed)
