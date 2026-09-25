@@ -403,3 +403,56 @@ def stack_hist_catroute(tr, te, seed=42):
 def stack_hist_dt_cat(tr, te, seed=42):
     """stack_hist_dt with route_id as a native categorical (run 6)."""
     return _stack_plus(tr, te, seed, _HIST + ["hist_path_sec_dt"], categorical_features=[0])
+
+
+# ---- run 7 (features v4 + V5 own-vs-historical cols, same MS_FEAT_DIR) ------
+_DT = _HIST + ["hist_path_sec_dt"]
+_OWNH = ["own_hist_ratio3", "own_hist_ratio8", "own_excess8"]
+
+
+@arm
+def dtcat_own(tr, te, seed=42):
+    """leader + own last-3/8 link times vs the historical table."""
+    return _stack_plus(tr, te, seed, _DT + _OWNH, categorical_features=[0])
+
+
+@arm
+def dtcat_own_x(tr, te, seed=42):
+    """dtcat_own + historical path scaled by the own ratio."""
+    return _stack_plus(tr, te, seed, _DT + _OWNH + ["hist_x_own"], categorical_features=[0])
+
+
+@arm
+def dtcat_recency(tr, te, seed=42):
+    """leader with training days down-weighted by age (half-life 7 days)."""
+    days = pd.to_datetime(tr["date"])
+    age = (days.max() - days).dt.days.to_numpy()
+    w = prod._build_sample_weights(tr) * 0.5 ** (age / 7.0)
+    return _stack_plus(tr, te, seed, _DT, weights=w, categorical_features=[0])
+
+
+_PRUNE = ("is_holiday", "trip_progress_frac", "stops_remaining")
+
+
+@arm
+def dtcat_prune(tr, te, seed=42):
+    """leader minus is_holiday / trip_progress_frac / stops_remaining
+    (constant or block-schedule-derived)."""
+    cols = _STACK + _DT
+    tr, te = _sentinel(tr, te, cols)
+    base = [c for c in _NOCAL if c not in _PRUNE]
+    return _fit_predict(tr, te, base + cols, seed, categorical_features=[0])
+
+
+@arm
+def dtcat_stopcat(tr, te, seed=42):
+    """leader + target stop as a native categorical (254 most frequent train
+    stops, the rest pooled)."""
+    cols = _STACK + _DT
+    tr, te = _sentinel(tr, te, cols)
+    top = tr["stop_id"].astype(str).value_counts().index[:254]
+    code = {s: i for i, s in enumerate(top)}
+    for d in (tr, te):
+        d["stop_cat"] = d["stop_id"].astype(str).map(code).fillna(254).astype(float)
+    allc = _NOCAL + cols + ["stop_cat"]
+    return _fit_predict(tr, te, allc, seed, categorical_features=[0, len(allc) - 1])

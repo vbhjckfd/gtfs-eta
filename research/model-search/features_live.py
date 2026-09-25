@@ -58,6 +58,11 @@ HIST_MIN_N = 3
 # run 5: day-type (weekday / weekend) historical table, live/historical ratio on
 # the links observed by both, and a historical upper-quartile path (spread).
 V4_COLS = ["hist_path_sec_dt", "live_hist_ratio", "hist_path_p75"]
+# run 7: this vehicle's own recent link times vs the historical table ("this bus
+# is running slow today"): over its last k completed links, sum(actual) /
+# sum(historical) and the excess in seconds; plus hist_dt path scaled by it.
+V5_COLS = ["own_hist_ratio3", "own_hist_ratio8", "own_excess8", "hist_x_own"]
+OWN_WINDOW_SEC = 1800
 
 
 def _epoch(s: pd.Series) -> np.ndarray:
@@ -148,7 +153,9 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     prev_stop = cr["stop_id"].shift()
     dt = cr["t"] - cr["t"].shift()
     ok = same & (cr["pidx"] == cr["pidx"].shift() + 1) & (dt > 0) & (dt < 1800)
-    links = pd.DataFrame({"key": (prev_stop + ">" + cr["stop_id"])[ok].to_numpy(),
+    vt_cr = cr["vehicle_id"].astype(str) + "|" + cr["trip_id"].astype(str)
+    links = pd.DataFrame({"vt": vt_cr[ok].to_numpy(),
+                          "key": (prev_stop + ">" + cr["stop_id"])[ok].to_numpy(),
                           "t": cr["t"][ok].to_numpy(), "lt": dt[ok].to_numpy()})
     links = links.sort_values(["key", "t"]).reset_index(drop=True)
     links["lt7"] = (links.groupby("key")["lt"].rolling(7, min_periods=1).median()
@@ -259,6 +266,35 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     out["live_path_age"] = agg["age"].reindex(out.index).to_numpy()
     out["live_speed_mps"] = plen / np.where(lps > 0, lps, np.nan)
 
+    # ---- run 7: own recent links vs historical ------------------------------
+    ol = links[["vt", "key", "t", "lt"]].copy()
+    ol["h"] = local_hour(ol["t"].to_numpy())
+    ol = ol.merge(hg, on=["key", "h"], how="left").merge(hk, on="key", how="left")
+    hl = ol["hm"].fillna(ol["hk"]).astype(float)
+    has = hl.notna().to_numpy()
+    ol["a"] = np.where(has, ol["lt"].astype(float), 0.0)
+    ol["b"] = np.where(has, hl.fillna(0.0), 0.0)
+    ol = ol.sort_values(["vt", "t"]).reset_index(drop=True)
+    for k in (3, 8):
+        g = ol.groupby("vt", sort=False)
+        ol[f"a{k}"] = g["a"].rolling(k, min_periods=1).sum().reset_index(level=0, drop=True)
+        ol[f"b{k}"] = g["b"].rolling(k, min_periods=1).sum().reset_index(level=0, drop=True)
+    q = pd.DataFrame({"rid": np.arange(n),
+                      "vt": rows["vehicle_id"].astype(str).to_numpy() + "|" + rt.astype(str),
+                      "tq": rows_t - DETECT_LAG_SEC}).sort_values("tq")
+    oq = pd.merge_asof(q, ol[["vt", "t", "a3", "b3", "a8", "b8"]].sort_values("t"),
+                       left_on="tq", right_on="t", by="vt", direction="backward",
+                       tolerance=OWN_WINDOW_SEC)
+    r3 = (oq["a3"] / oq["b3"].where(oq["b3"] > 0)).to_numpy()
+    r8 = (oq["a8"] / oq["b8"].where(oq["b8"] > 0)).to_numpy()
+    ex8 = np.where(oq["b8"].to_numpy() > 0, (oq["a8"] - oq["b8"]).to_numpy(), np.nan)
+    rid_o = oq["rid"].to_numpy()
+    out.loc[rid_o, "own_hist_ratio3"] = r3
+    out.loc[rid_o, "own_hist_ratio8"] = r8
+    out.loc[rid_o, "own_excess8"] = ex8
+    out["hist_x_own"] = (out["hist_path_sec_dt"].to_numpy()
+                         * np.clip(np.nan_to_num(out["own_hist_ratio8"].to_numpy(dtype=float), nan=1.0), 0.5, 3.0))
+
     # ---- time since any vehicle last arrived at the target stop ------------
     st = cr[["stop_id", "t"]].rename(columns={"t": "ta"}).sort_values("ta")
     q = pd.DataFrame({"rid": np.arange(n), "stop_id": rows["stop_id"].astype(str).to_numpy(),
@@ -286,4 +322,4 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         el = mm["t"] - mm["tp"]
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
-    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS].reset_index(drop=True)
+    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS].reset_index(drop=True)
