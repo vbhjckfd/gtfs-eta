@@ -288,11 +288,12 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     # ---- run 9: own previous-lap link times on the path --------------------
     vid_rows = rows["vehicle_id"].astype(str).to_numpy()
     lq = m[["rid", "k", "tq", "w", "lt5"]].copy()
-    lq["vid"] = vid_rows[lq["rid"].to_numpy()]
+    lq["vid"] = pd.Series(vid_rows[lq["rid"].to_numpy()], index=lq.index, dtype=object)
     lq["hd_"] = histd.to_numpy(dtype=float)
     lq = lq.sort_values("tq")
     ll = (links[["vid", "k", "t", "lt"]].rename(columns={"t": "tl2", "lt": "llt"})
           .sort_values("tl2"))
+    ll["vid"] = ll["vid"].astype(object)
     lm = pd.merge_asof(lq, ll, left_on="tq", right_on="tl2", by=["vid", "k"],
                        direction="backward", tolerance=LAP_WINDOW_SEC)
     lf = lm["llt"].notna().to_numpy()
