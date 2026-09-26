@@ -4,7 +4,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1v4` / `ds1shiftv4` = same splits, features v4 (MS_FEAT_DIR=ms_features_v4: pipeline from 08-31 so the historical link table has 7-14 prior days for every train row, + day-type table, live/hist ratio, p75); baselines identical.
+Tags: `ds1v5` / `ds1shiftv5` = v4 features rebuilt in run 7 (+ own-vs-hist cols); baselines identical. `ds1v5k3` = ds1v5 with train rows at 3% of snapshots (3x) instead of 1%.
+`ds1v4` / `ds1shiftv4` = same splits, features v4 (MS_FEAT_DIR=ms_features_v4: pipeline from 08-31 so the historical link table has 7-14 prior days for every train row, + day-type table, live/hist ratio, p75); baselines identical.
 `ds1v3` / `ds1shiftv3` = same splits, features v3 (MS_FEAT_DIR=ms_features_v3: + m7, EWMA, historical link table from prior days); baselines identical.
 `ds1v2` / `ds1shiftv2` = same splits, features prepped with the run-3 median-of-5 column (MS_FEAT_DIR=ms_features_v2); baselines identical.
 `ds1lag90w15` = ds1 with live features rebuilt at 90 s detection lag, 15-min link window.
@@ -58,6 +59,11 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1shiftv4 | stack_hist_catroute | 7 | 1,978,242 | 1,424,485 | 93.0 | 46.3 | 189.7 | -21.0 | 64.9 | 129.7 | -17.7% | -21.3% | -8.8% | **yes** | as stack_hist + categorical-split (bitset) support in export/inference, ~0.5-1 day |
 | ds1shiftv4 | stack_hist_dt | 7 | 1,978,242 | 1,424,485 | 93.4 | 45.9 | 190.4 | -21.1 | 65.6 | 129.9 | -17.4% | -21.0% | -7.9% | **yes** | as stack_hist + weekday/weekend link x hour table |
 | ds1shiftv4 | stack_hist_dt_cat | 7 | 1,978,242 | 1,424,485 | 92.1 | 45.6 | 187.6 | -19.5 | 64.5 | 128.3 | -18.5% | -22.2% | -9.4% | **yes** | as stack_hist_dt + categorical-split (bitset) support in export/inference; ~2 days total |
+| ds1shiftv5 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
+| ds1shiftv5 | dtcat_big | 7 | 1,978,242 | 1,424,485 | 91.3 | 45.5 | 187.3 | -17.4 | 63.2 | 127.3 | -19.2% | -22.3% | -11.2% | **yes** | as stack_hist_dt_cat; 255-leaf trees ~2x export size |
+| ds1shiftv5 | dtcat_stopcat | 7 | 1,978,242 | 1,424,485 | 91.2 | 45.1 | 186.1 | -19.2 | 63.6 | 127.2 | -19.3% | -22.8% | -10.7% | **yes** | as stack_hist_dt_cat + stop->code map (254 stops) shipped with the model |
+| ds1shiftv5 | dtcat_stopcat_big | 7 | 1,978,242 | 1,424,485 | 90.5 | 44.9 | 185.4 | -18.3 | 62.6 | 126.6 | -19.9% | -23.1% | -12.1% | **yes** | as dtcat_stopcat; 255-leaf trees ~2x export size; ~2-2.5 days total |
+| ds1shiftv5 | stack_hist_dt_cat | 7 | 1,978,242 | 1,424,485 | 92.1 | 45.6 | 187.6 | -19.5 | 64.5 | 128.3 | -18.5% | -22.2% | -9.4% | **yes** | as stack_hist_dt + categorical-split (bitset) support in export/inference; ~2 days total |
 | ds1v2 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
 | ds1v2 | m3_nocal | 42 | 2,178,139 | 1,414,363 | 98.0 | 48.8 | 198.4 | -20.7 | 68.9 | 135.8 | -11.3% | -14.1% | -5.1% | **yes** | link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
 | ds1v2 | path_own_m3 | 42 | 2,178,139 | 1,414,363 | 98.4 | 49.8 | 199.2 | -19.9 | 69.9 | 136.1 | -11.1% | -13.7% | -3.7% | **yes** | as path_own_s; store keeps last 3 traversals per link |
@@ -83,3 +89,17 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1v4 | stack_hist_leaf100 | 42 | 2,178,139 | 1,414,363 | 94.2 | 46.0 | 189.8 | -19.6 | 67.0 | 130.5 | -14.8% | -17.8% | -7.7% | **yes** | as stack_hist |
 | ds1v4 | stack_hist_r | 42 | 2,178,139 | 1,414,363 | 94.3 | 45.9 | 190.6 | -19.9 | 67.1 | 131.0 | -14.7% | -17.5% | -7.5% | **yes** | as stack_hist |
 | ds1v4 | stack_v4 | 42 | 2,178,139 | 1,414,363 | 93.5 | 45.3 | 188.0 | -18.2 | 66.8 | 129.4 | -15.5% | -18.6% | -7.9% | **yes** | as stack_hist + day-type and p75 tables |
+| ds1v5 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v5 | dtcat_big | 42 | 2,178,139 | 1,414,363 | 91.6 | 44.8 | 185.4 | -15.5 | 64.9 | 126.7 | -17.2% | -19.7% | -10.6% | **yes** | as stack_hist_dt_cat; 255-leaf trees ~2x export size |
+| ds1v5 | dtcat_logratio | 42 | 2,178,139 | 1,414,363 | 92.6 | 44.4 | 184.8 | -18.6 | 67.1 | 127.5 | -16.3% | -19.9% | -7.6% | **yes** | as dtcat_resid (exp transform) |
+| ds1v5 | dtcat_own | 42 | 2,178,139 | 1,414,363 | 92.0 | 44.6 | 185.8 | -17.6 | 66.1 | 126.8 | -16.8% | -19.5% | -9.0% | **yes** | as stack_hist_dt_cat + own last-k link sums vs hist table (per-vehicle crossing log) |
+| ds1v5 | dtcat_own_x | 42 | 2,178,139 | 1,414,363 | 92.0 | 44.6 | 185.9 | -17.4 | 66.3 | 126.8 | -16.8% | -19.5% | -8.7% | **yes** | as dtcat_own |
+| ds1v5 | dtcat_prune | 42 | 2,178,139 | 1,414,363 | 93.3 | 45.4 | 187.9 | -17.6 | 67.3 | 128.6 | -15.6% | -18.6% | -7.3% | **yes** | as stack_hist_dt_cat |
+| ds1v5 | dtcat_recency | 42 | 2,178,139 | 1,414,363 | 92.5 | 45.0 | 186.6 | -17.1 | 66.4 | 127.8 | -16.3% | -19.2% | -8.6% | **yes** | as stack_hist_dt_cat |
+| ds1v5 | dtcat_resid | 42 | 2,178,139 | 1,414,363 | 91.9 | 44.7 | 185.3 | -16.2 | 66.0 | 126.9 | -16.9% | -19.7% | -9.1% | **yes** | as stack_hist_dt_cat + add base ETA to tree output |
+| ds1v5 | dtcat_stopcat | 42 | 2,178,139 | 1,414,363 | 91.6 | 44.4 | 185.0 | -17.0 | 65.1 | 126.6 | -17.2% | -19.9% | -10.4% | **yes** | as stack_hist_dt_cat + stop->code map (254 stops) shipped with the model |
+| ds1v5 | dtcat_stopcat_big | 42 | 2,178,139 | 1,414,363 | 90.7 | 44.3 | 183.8 | -15.5 | 63.7 | 126.0 | -18.0% | -20.4% | -12.2% | **yes** | as dtcat_stopcat; 255-leaf trees ~2x export size; ~2-2.5 days total |
+| ds1v5 | stack_hist_dt_cat | 42 | 2,178,139 | 1,414,363 | 92.1 | 44.9 | 186.0 | -16.5 | 65.9 | 127.2 | -16.7% | -19.4% | -9.2% | **yes** | as stack_hist_dt + categorical-split (bitset) support in export/inference; ~2 days total |
+| ds1v5k3 | baseline | 42 | 6,510,353 | 1,414,363 | 108.1 | 54.4 | 226.9 | -27.5 | 70.4 | 149.9 | — | — | — | — | prod |
+| ds1v5k3 | dtcat_stopcat_big | 42 | 6,510,353 | 1,414,363 | 88.8 | 43.5 | 180.2 | -15.5 | 61.8 | 123.4 | -17.9% | -20.6% | -12.3% | **yes** | as dtcat_stopcat; 255-leaf trees ~2x export size; ~2-2.5 days total |
+| ds1v5k3 | stack_hist_dt_cat | 42 | 6,510,353 | 1,414,363 | 90.5 | 44.2 | 182.8 | -17.1 | 64.0 | 124.8 | -16.3% | -19.4% | -9.1% | **yes** | as stack_hist_dt + categorical-split (bitset) support in export/inference; ~2 days total |

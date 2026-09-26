@@ -397,3 +397,24 @@ Same as stack_hist_dt_cat (about 2–2.5 days, including categorical bitsets), p
 - 255-leaf trees, so about 2x the node arrays in the export and about 1 more
   level per tree walk.
 Per-row cost grows only by about log2(2) = 1 comparison per tree.
+
+### Scale check: 3x training rows (tag `ds1v5k3`, `--keep-pct 3`, 6.51M train rows, seed 42)
+| arm | MAE / p90 | Δbase | sa1 / sa5 / sa10 | fit |
+|---|---|---|---|---|
+| baseline | 108.1 / 226.9 | | 70.4 / 109.7 / 149.9 | 18 min |
+| stack_hist_dt_cat | 90.5 / 182.8 | −16.3% | 64.0 / 90.8 / 124.8 | 20 min |
+| dtcat_stopcat_big | 88.8 / 180.2 | −17.9% | 61.8 / 89.2 / 123.4 | 22 min |
+
+More data helps every arm by about 2 s. The relative gain holds, so it is not an
+artifact of the 1% subsample. dtcat_stopcat_big vs the old leader is −1.8% here,
+slightly more than at 1%. n_iter still hits the 1200 cap.
+
+### Next steps
+1. Route 122 (230–320 s) is untouched by every feature so far. Inspect its labels,
+   shape and trip inference directly (a data/labeling issue is likely).
+2. Stop coverage: 254 codes leave the tail pooled. Try a second categorical for the
+   vehicle's current/previous stop, or hash the rest into the spare codes by region.
+3. The n_iter cap binds everywhere. Try lr 0.08 with 255 leaves on stopcat
+   (lr 0.1 on live_all_s did nothing, but the tree size is different now).
+4. Serving: settle on 127 vs 255 leaves with a timing test of `src/inference.py`
+   predict_rows at 2x nodes.
