@@ -364,7 +364,8 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     vq = pd.DataFrame({"rid": np.arange(n), "vid": vid_rows.astype(object),
                        "tq": rows_t - DETECT_LAG_SEC}).sort_values("tq")
     vr = ol[["vid", "t", "ca", "cb", "cn"]].copy()
-    vr["vid"] = vr["vid"].astype(object)
+    vr["vid"] = vr["vid"].astype(str)
+    vq["vid"] = vq["vid"].astype(str)
     now = pd.merge_asof(vq, vr, left_on="tq", right_on="t", by="vid",
                         direction="backward", tolerance=VEH_WINDOW_SEC)
     old = pd.merge_asof(vq.assign(tq0=vq["tq"] - VEH_WINDOW_SEC).sort_values("tq0"),
