@@ -1,0 +1,94 @@
+{
+ "n": 1424485,
+ "mae": 90.50664471859224,
+ "median_ae": 44.940857953383784,
+ "p90_ae": 185.43429550799397,
+ "bias": -18.296744814645105,
+ "mae_by_stops_ahead": {
+  "1": 62.55379081179162,
+  "2": 64.63819270330958,
+  "3": 73.75746088284924,
+  "4": 82.24217302866059,
+  "5": 90.62868076856218,
+  "6": 98.50559108661116,
+  "7": 105.06132165187663,
+  "8": 111.60452813944552,
+  "9": 119.06293940694947,
+  "10": 126.62614201343351
+ },
+ "worst_routes": {
+  "122": 227.3,
+  "106": 169.0,
+  "133": 153.5,
+  "125": 145.9,
+  "94": 141.7,
+  "878": 140.7,
+  "98": 138.1,
+  "137": 137.6,
+  "111": 136.8,
+  "2302": 130.0
+ },
+ "mae_by_day": {
+  "2026-09-18": 94.73220675606822,
+  "2026-09-19": 85.5284083066309,
+  "2026-09-20": 89.44115898185554
+ },
+ "n_by_day": {
+  "2026-09-18": 598951,
+  "2026-09-19": 422033,
+  "2026-09-20": 403501
+ },
+ "arm": "dtcat_stopcat_big",
+ "info": {
+  "n_iter": 1200,
+  "cols": [
+   "route_id",
+   "stops_ahead",
+   "hour",
+   "is_weekend",
+   "is_holiday",
+   "remaining_dist_m",
+   "progress_speed_mps",
+   "stops_remaining",
+   "trip_progress_frac",
+   "dist_per_stop_m",
+   "speed_eta_warm",
+   "hist_speed_mps",
+   "hist_travel_time_est",
+   "stationary_sec",
+   "live_path_sec_m3",
+   "live_path_cov",
+   "live_path_age",
+   "live_speed_mps",
+   "own_speed_60",
+   "own_speed_180",
+   "own_speed_300",
+   "live_path_sec_m5",
+   "hist_path_sec",
+   "hist_path_cov",
+   "hist_path_sec_dt",
+   "stop_cat"
+  ],
+  "hp": {
+   "categorical_features": [
+    0,
+    25
+   ],
+   "max_leaf_nodes": 255,
+   "min_samples_leaf": 50
+  }
+ },
+ "train_days": [
+  "2026-09-07",
+  "2026-09-17"
+ ],
+ "test_days": [
+  "2026-09-18",
+  "2026-09-19",
+  "2026-09-20"
+ ],
+ "keep_pct": 1,
+ "seed": 7,
+ "n_train": 1978242,
+ "secs": 393
+}
