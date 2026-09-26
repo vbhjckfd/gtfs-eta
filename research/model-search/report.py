@@ -52,6 +52,10 @@ SERVING = {
     "dtcat_prune": "as stack_hist_dt_cat",
     "dtcat_stopcat": "as stack_hist_dt_cat + stop->code map (254 stops) shipped with the model",
     "dtcat_stopcat_big": "as dtcat_stopcat; 255-leaf trees ~2x export size; ~2-2.5 days total",
+    "sc_big_cur": "as dtcat_stopcat_big + current-link live m5 / hist / fraction (already in the link store); ~2-2.5 days total",
+    "sc_big_nxt": "as dtcat_stopcat_big + 3rd categorical (next stop code map)",
+    "sc_big_v6": "as sc_big_cur + next-stop categorical",
+    "sc_big_lr08": "as dtcat_stopcat_big",
     "dtcat_big": "as stack_hist_dt_cat; 255-leaf trees ~2x export size",
     "dtcat_resid": "as stack_hist_dt_cat + add base ETA to tree output",
     "dtcat_logratio": "as dtcat_resid (exp transform)",
@@ -63,7 +67,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1v5` / `ds1shiftv5` = v4 features rebuilt in run 7 (+ own-vs-hist cols); baselines identical. `ds1v5k3` = ds1v5 with train rows at 3% of snapshots (3x) instead of 1%.
+Tags: `ds1v6` / `ds1shiftv6` = v4/v5 features rebuilt in run 8 (+ V6 current-link cols: next stop id, current-link live m5 / hist / fraction left); baselines identical.
+`ds1v5` / `ds1shiftv5` = v4 features rebuilt in run 7 (+ own-vs-hist cols); baselines identical. `ds1v5k3` = ds1v5 with train rows at 3% of snapshots (3x) instead of 1%.
 `ds1v4` / `ds1shiftv4` = same splits, features v4 (MS_FEAT_DIR=ms_features_v4: pipeline from 08-31 so the historical link table has 7-14 prior days for every train row, + day-type table, live/hist ratio, p75); baselines identical.
 `ds1v3` / `ds1shiftv3` = same splits, features v3 (MS_FEAT_DIR=ms_features_v3: + m7, EWMA, historical link table from prior days); baselines identical.
 `ds1v2` / `ds1shiftv2` = same splits, features prepped with the run-3 median-of-5 column (MS_FEAT_DIR=ms_features_v2); baselines identical.

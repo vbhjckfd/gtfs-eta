@@ -418,3 +418,72 @@ slightly more than at 1%. n_iter still hits the 1200 cap.
    (lr 0.1 on live_all_s did nothing, but the tree size is different now).
 4. Serving: settle on 127 vs 255 leaves with a timing test of `src/inference.py`
    predict_rows at 2x nodes.
+
+## 2026-09-26 — run 8 (current-link features, next-stop categorical, lr 0.08, route 122)
+
+Lock taken at 04:17 UTC (run 7's lock was 5 h old; run 7's session released it later
+and merged, keeping this lock). Rebuilt DS1 with `pipeline_lite.py --days 2026-08-31..2026-09-21 --parallel 4`
+(04:18→06:26 UTC). NB for later runs: prep must run for every day from 08-31, not
+only 09-07+, because each prep writes `links_<day>` that later days read as history.
+The first chain only prepped 09-07+ and was also OOM-killed next to 4 pipeline
+workers. The fixed chain (in the journal cmds below) sets `oom_score_adj=1000` on
+itself and waits for MemAvailable ≥ 6 GB.
+```
+# prep chain: for day in 08-31..09-21 ascending: wait for data/ms_lite/<day>.parquet,
+#   MS_FEAT_DIR=ms_features_v4 python research/model-search/harness.py prep --days <day>
+sh research/model-search/run8.sh    # 11 fits, ~2 h
+```
+New V6 columns in `features_live.py` (appended to the existing ones):
+`next_stop_id` (the vehicle's next stop; for sa=1 it matches the target stop 97% of the time),
+`cur_link_live` (live m5 of the link the vehicle is on), `cur_link_hist` (day-type
+historical median of that link), `cur_link_frac` (fraction of the link still ahead).
+
+### Results (MAE / p90; Δ vs baseline, then Δ vs dtcat_stopcat_big)
+| arm | ds1v6 (s42) | Δbase | Δleader | ds1shiftv6 (s7) | Δbase | Δleader |
+|---|---|---|---|---|---|---|
+| baseline | 110.6 / 230.9 | | | 113.0 / 241.1 | | |
+| dtcat_stopcat_big (run-7 leader) | 90.7 / 183.8 | −18.0% | | 90.5 / 185.4 | −19.9% | |
+| sc_big_nxt (+ next-stop categorical) | 90.5 / 184.7 | −18.1% | −0.1% | 90.3 / 186.2 | −20.1% | −0.2% |
+| **sc_big_cur (+ current-link live/hist/frac)** | **90.1 / 182.9** | **−18.5%** | **−0.6%** | **89.5 / 183.9** | **−20.8%** | **−1.1%** |
+| sc_big_v6 (both) | 90.3 / 183.6 | −18.4% | −0.4% | 89.8 / 185.1 | −20.6% | −0.8% |
+| sc_big_lr08 (lr 0.08) | 90.9 / 184.3 | −17.8% | +0.2% | | | |
+
+- Baseline and the run-7 leader reproduced exactly (110.6 / 113.0, 90.7 / 90.5).
+- The current-link columns give a small gain that holds on both splits: every
+  stops_ahead bucket is 0.3–1.4% better than the run-7 leader and p90 improves.
+  ds1 sa1/sa5/sa10: 63.4 / 90.1 / 125.3 (baseline 72.6 / 112.0 / 153.5).
+  Shift: 61.7 / 89.8 / 125.5 (baseline 71.2 / 114.3 / 159.7).
+  By day, ds1 Sat 100.2→84.9, Sun 107.1→88.5, Mon 120.5→94.9. Shift Fri 126.8→93.9,
+  Sat 99.6→84.6, Sun 106.6→88.2. Median AE 56.0→44.0 (ds1) and 59.5→44.6 (shift).
+  Bias −15.5 / −17.5. Rows: train 2.18M / 1.98M, test 1.41M / 1.42M.
+- Next-stop categorical: noise, and it slightly worsens p90. The target-stop categorical
+  already covers it.
+- lr 0.08: no gain, even though the 1200-iteration cap binds. Leave lr at 0.05.
+- Worst routes (sc_big_cur, ds1): 122 322, 133 219, 106 165, 125 160, 137 138, 94 136,
+  113 135, 111 130, 131 130, 129 129. On shift: 122 224, 106 165, 133 146, 125 145.
+- Route 122 diagnostic (09-07..09-09, 3% prep): 4.5k rows, 17 trips, only 2 vehicles.
+  Live-link coverage is 43% vs 96% on other routes, since its links are not shared
+  and the headway is long. Links are ~130 s per stop vs ~60 s elsewhere, and there is
+  a service gap around hours 8–10. The historical path alone has median AE 89 s vs
+  55 s for other routes. So 122 is data-sparse, not mislabelled. It is expected to
+  stay the worst route unless its own-vehicle history is used more (e.g. the same
+  vehicle's traversal of the same link on its previous round trip).
+
+**Conclusion: new leader `sc_big_cur`, an incremental gain on the run-7 leader.
+It wins per protocol on both splits and seeds (ds1 110.6→90.1, −18.5%, p90
+230.9→182.9; shift 113.0→89.5, −20.8%, p90 241.1→183.9).** Against dtcat_stopcat_big
+it is −0.6% / −1.1%, so it comes almost for free.
+
+### Serving estimate
+Same as dtcat_stopcat_big (about 2–2.5 days in total). The three new columns come
+from state that serving already needs: the current link's m5 from the live link
+store, its day-type median from the historical table, and the fraction left from
+the shape projection. That adds about 0.1 day.
+
+### Next steps
+1. Route 122 / sparse routes: an own-vehicle previous-lap link time
+   (same vehicle, same link, last traversal within ~2 h) as a fallback where live coverage is low.
+2. A timing test of `src/inference.py` at 255 leaves with 2 categorical bitsets, to
+   decide between 127 and 255 leaves before any serving work.
+3. Try a stronger regulariser on 255 leaves (min_samples_leaf 100, l2 1) with 3x
+   data. Run 7's 3x scale check showed that data helps by about 2 s.
