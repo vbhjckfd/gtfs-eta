@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -20,6 +22,9 @@ def _fit_predict(tr, te, cols, seed, weights=None, target=None, inv=None, **hp):
     y = tr[TARGET_COL].astype(float) if target is None else target(tr)
     w = prod._build_sample_weights(tr) if weights is None else weights
     pipe = fit_hgbt(tr[cols], y, w, ["route_id"], random_state=seed, **hp)
+    if os.environ.get("MS_SAVE_MODEL"):   # run 9: keep the fit for the serving timing test
+        import joblib
+        joblib.dump((pipe, cols, te[cols].sample(20000, random_state=0)), os.environ["MS_SAVE_MODEL"])
     pred = pipe.predict(te[cols])
     if inv is not None:
         pred = inv(te, pred)
@@ -564,3 +569,21 @@ def sc_big_v6(tr, te, seed=42):
 def sc_big_lr08(tr, te, seed=42):
     """dtcat_stopcat_big with learning rate 0.08 (the 1200-iteration cap binds)."""
     return _stopcat_big_plus(tr, te, seed, learning_rate=0.08)
+
+
+# ---- run 9 (V7 cols: own previous-lap link times) --------------------------
+_LAP = ["lap_path_sec", "lap_path_cov", "lap_path_age", "lap_fill_path_sec"]
+
+
+@arm
+def sc_big_lap(tr, te, seed=42):
+    """sc_big_cur + the vehicle's own previous traversal of the path links
+    (fallback where the shared live store is empty; sparse routes)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP)
+
+
+@arm
+def sc_big_cur_reg(tr, te, seed=42):
+    """sc_big_cur with min_samples_leaf 100 and l2_regularization 1."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR, min_samples_leaf=100,
+                             l2_regularization=1.0)

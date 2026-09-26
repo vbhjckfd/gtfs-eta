@@ -63,6 +63,12 @@ V4_COLS = ["hist_path_sec_dt", "live_hist_ratio", "hist_path_p75"]
 # sum(historical) and the excess in seconds; plus hist_dt path scaled by it.
 V5_COLS = ["own_hist_ratio3", "own_hist_ratio8", "own_excess8", "hist_x_own"]
 V6_COLS = ["next_stop_id", "cur_link_live", "cur_link_hist", "cur_link_frac"]
+# run 9: this vehicle's own previous traversal of each link on the path (its
+# previous lap, any trip, within LAP_WINDOW_SEC) — a fallback where the shared
+# live link store is empty (sparse routes like 122). lap_fill_path_sec: live m5
+# where seen, else own previous lap, else day-type historical.
+V7_COLS = ["lap_path_sec", "lap_path_cov", "lap_path_age", "lap_fill_path_sec"]
+LAP_WINDOW_SEC = int(os.environ.get("MS_LAP_WINDOW", 10800))
 OWN_WINDOW_SEC = 1800
 
 
@@ -167,6 +173,8 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
                     .reset_index(level=0, drop=True).to_numpy())
     links["lt5"] = (links.groupby("key")["lt"].rolling(5, min_periods=1).median()
                     .reset_index(level=0, drop=True).to_numpy())
+
+    links["vid"] = links["vt"].str.split("|", n=1).str[0]
 
     if links_out is not None:
         links_out.append(links[["key", "t", "lt"]].copy())
@@ -277,6 +285,32 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     out.loc[fm["rid"].to_numpy(), "cur_link_hist"] = histd[fm.index].to_numpy(dtype=float)
     out.loc[fm["rid"].to_numpy(), "cur_link_frac"] = fm["w"].to_numpy(dtype=float)
 
+    # ---- run 9: own previous-lap link times on the path --------------------
+    vid_rows = rows["vehicle_id"].astype(str).to_numpy()
+    lq = m[["rid", "k", "tq", "w", "lt5"]].copy()
+    lq["vid"] = vid_rows[lq["rid"].to_numpy()]
+    lq["hd_"] = histd.to_numpy(dtype=float)
+    lq = lq.sort_values("tq")
+    ll = (links[["vid", "k", "t", "lt"]].rename(columns={"t": "tl2", "lt": "llt"})
+          .sort_values("tl2"))
+    lm = pd.merge_asof(lq, ll, left_on="tq", right_on="tl2", by=["vid", "k"],
+                       direction="backward", tolerance=LAP_WINDOW_SEC)
+    lf = lm["llt"].notna().to_numpy()
+    lm["a"] = np.where(lf, lm["w"] * lm["llt"].fillna(0.0), 0.0)
+    lm["f"] = np.where(lf, lm["w"], 0.0)
+    lm["age2"] = np.where(lf, lm["tq"] - lm["tl2"], np.nan)
+    f2 = np.where(lm["lt5"].notna(), lm["lt5"], np.where(lf, lm["llt"], lm["hd_"])).astype(float)
+    ok2 = ~np.isnan(f2)
+    lm["b"] = np.where(ok2, lm["w"] * np.nan_to_num(f2), 0.0)
+    lm["bf"] = np.where(ok2, lm["w"], 0.0)
+    la = lm.groupby("rid").agg(a=("a", "sum"), f=("f", "sum"), wt=("w", "sum"),
+                               age=("age2", "mean"), b=("b", "sum"), bf=("bf", "sum"))
+    fpos = la["f"].where(la["f"] > 0)
+    out["lap_path_sec"] = (la["a"] / fpos * la["wt"]).reindex(out.index).to_numpy()
+    out["lap_path_cov"] = (la["f"] / la["wt"].where(la["wt"] > 0)).reindex(out.index).fillna(0.0).to_numpy()
+    out["lap_path_age"] = la["age"].reindex(out.index).to_numpy()
+    out["lap_fill_path_sec"] = (la["b"] / la["bf"].where(la["bf"] > 0) * la["wt"]).reindex(out.index).to_numpy()
+
     # ---- run 7: own recent links vs historical ------------------------------
     ol = links[["vt", "key", "t", "lt"]].copy()
     ol["h"] = local_hour(ol["t"].to_numpy())
@@ -333,4 +367,4 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         el = mm["t"] - mm["tp"]
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
-    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS].reset_index(drop=True)
+    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS + V7_COLS].reset_index(drop=True)
