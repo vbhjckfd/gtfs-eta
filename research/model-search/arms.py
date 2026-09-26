@@ -456,3 +456,53 @@ def dtcat_stopcat(tr, te, seed=42):
         d["stop_cat"] = d["stop_id"].astype(str).map(code).fillna(254).astype(float)
     allc = _NOCAL + cols + ["stop_cat"]
     return _fit_predict(tr, te, allc, seed, categorical_features=[0, len(allc) - 1])
+
+
+def _base_eta(d):
+    """Anchor for residual targets: historical day-type path, else live m5, else
+    the warm speed ETA (all already features, so free at serving time)."""
+    h = d["hist_path_sec_dt"].to_numpy(dtype=float)
+    l5 = d["live_path_sec_m5"].to_numpy(dtype=float)
+    s = d["speed_eta_warm"].to_numpy(dtype=float)
+    b = np.where(h > 0, h, np.where(l5 > 0, l5, s))
+    return np.clip(np.nan_to_num(b, nan=300.0), 5.0, 3600.0)
+
+
+def _resid(tr, te, seed, cols, mode, **hp):
+    tr, te = _sentinel(tr, te, _STACK + _DT)
+    btr = _base_eta(tr)
+    y = tr[TARGET_COL].to_numpy(dtype=float)
+    if mode == "diff":
+        target = lambda d: y - btr
+        inv = lambda d, p: np.clip(p + _base_eta(d), 0, 3600)
+    else:
+        target = lambda d: np.log((y + 30.0) / (btr + 30.0))
+        inv = lambda d, p: np.clip(np.exp(p) * (_base_eta(d) + 30.0) - 30.0, 0, 3600)
+    return _fit_predict(tr, te, cols, seed, target=target, inv=inv, categorical_features=[0], **hp)
+
+
+@arm
+def dtcat_resid(tr, te, seed=42):
+    """leader, target = y - base ETA (historical path)."""
+    return _resid(tr, te, seed, _NOCAL + _STACK + _DT, "diff")
+
+
+@arm
+def dtcat_logratio(tr, te, seed=42):
+    """leader, target = log((y+30)/(base+30)). Note: absolute_error on the log
+    scale is a median of the ratio, which is still the median of y."""
+    return _resid(tr, te, seed, _NOCAL + _STACK + _DT, "log")
+
+
+@arm
+def dtcat_stopcat_big(tr, te, seed=42):
+    """dtcat_stopcat with 255 leaves / min 50 per leaf."""
+    cols = _STACK + _DT
+    tr, te = _sentinel(tr, te, cols)
+    top = tr["stop_id"].astype(str).value_counts().index[:254]
+    code = {s: i for i, s in enumerate(top)}
+    for d in (tr, te):
+        d["stop_cat"] = d["stop_id"].astype(str).map(code).fillna(254).astype(float)
+    allc = _NOCAL + cols + ["stop_cat"]
+    return _fit_predict(tr, te, allc, seed, categorical_features=[0, len(allc) - 1],
+                        max_leaf_nodes=255, min_samples_leaf=50)
