@@ -602,3 +602,26 @@ def sc_lap_127(tr, te, seed=42):
     """sc_big_lap at 127 leaves / min_samples_leaf 20 (half the export size)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP, max_leaf_nodes=127,
                              min_samples_leaf=20)
+
+
+# ---- run 12 (V8 cols: 6 h previous lap, vehicle-level own/hist ratio) -------
+_LAP6 = ["lap6_path_sec", "lap6_path_cov", "lap6_path_age", "lap6_fill_path_sec"]
+_VEH = ["veh_hist_ratio60", "veh_hist_n60"]
+
+
+@arm
+def sc_big_lap6(tr, te, seed=42):
+    """sc_big_lap with the previous-lap window widened from 3 h to 6 h."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP6)
+
+
+@arm
+def sc_big_veh(tr, te, seed=42):
+    """sc_big_lap + vehicle-level (any trip) own/historical ratio over the last hour."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH)
+
+
+@arm
+def sc_big_v8(tr, te, seed=42):
+    """sc_big_lap6 + vehicle-level ratio."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP6 + _VEH)

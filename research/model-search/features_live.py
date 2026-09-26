@@ -69,6 +69,13 @@ V6_COLS = ["next_stop_id", "cur_link_live", "cur_link_hist", "cur_link_frac"]
 # where seen, else own previous lap, else day-type historical.
 V7_COLS = ["lap_path_sec", "lap_path_cov", "lap_path_age", "lap_fill_path_sec"]
 LAP_WINDOW_SEC = int(os.environ.get("MS_LAP_WINDOW", 10800))
+# run 12: the same previous-lap cols over a 6 h window (route 122's previous lap is
+# often >3 h back), and a vehicle-level (any trip) own/historical ratio over the
+# last hour, so the "slow bus" signal survives trip changes at the terminus.
+V8_COLS = ["lap6_path_sec", "lap6_path_cov", "lap6_path_age", "lap6_fill_path_sec",
+           "veh_hist_ratio60", "veh_hist_n60"]
+LAP6_WINDOW_SEC = 21600
+VEH_WINDOW_SEC = 3600
 OWN_WINDOW_SEC = 1800
 
 
@@ -294,23 +301,30 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     ll = (links[["vid", "k", "t", "lt"]].rename(columns={"t": "tl2", "lt": "llt"})
           .sort_values("tl2"))
     ll["vid"] = ll["vid"].astype(object)
-    lm = pd.merge_asof(lq, ll, left_on="tq", right_on="tl2", by=["vid", "k"],
-                       direction="backward", tolerance=LAP_WINDOW_SEC)
-    lf = lm["llt"].notna().to_numpy()
-    lm["a"] = np.where(lf, lm["w"] * lm["llt"].fillna(0.0), 0.0)
-    lm["f"] = np.where(lf, lm["w"], 0.0)
-    lm["age2"] = np.where(lf, lm["tq"] - lm["tl2"], np.nan)
-    f2 = np.where(lm["lt5"].notna(), lm["lt5"], np.where(lf, lm["llt"], lm["hd_"])).astype(float)
-    ok2 = ~np.isnan(f2)
-    lm["b"] = np.where(ok2, lm["w"] * np.nan_to_num(f2), 0.0)
-    lm["bf"] = np.where(ok2, lm["w"], 0.0)
-    la = lm.groupby("rid").agg(a=("a", "sum"), f=("f", "sum"), wt=("w", "sum"),
-                               age=("age2", "mean"), b=("b", "sum"), bf=("bf", "sum"))
-    fpos = la["f"].where(la["f"] > 0)
-    out["lap_path_sec"] = (la["a"] / fpos * la["wt"]).reindex(out.index).to_numpy()
-    out["lap_path_cov"] = (la["f"] / la["wt"].where(la["wt"] > 0)).reindex(out.index).fillna(0.0).to_numpy()
-    out["lap_path_age"] = la["age"].reindex(out.index).to_numpy()
-    out["lap_fill_path_sec"] = (la["b"] / la["bf"].where(la["bf"] > 0) * la["wt"]).reindex(out.index).to_numpy()
+
+    def _lap(window):
+        lm = pd.merge_asof(lq, ll, left_on="tq", right_on="tl2", by=["vid", "k"],
+                           direction="backward", tolerance=window)
+        lf = lm["llt"].notna().to_numpy()
+        lm["a"] = np.where(lf, lm["w"] * lm["llt"].fillna(0.0), 0.0)
+        lm["f"] = np.where(lf, lm["w"], 0.0)
+        lm["age2"] = np.where(lf, lm["tq"] - lm["tl2"], np.nan)
+        f2 = np.where(lm["lt5"].notna(), lm["lt5"], np.where(lf, lm["llt"], lm["hd_"])).astype(float)
+        ok2 = ~np.isnan(f2)
+        lm["b"] = np.where(ok2, lm["w"] * np.nan_to_num(f2), 0.0)
+        lm["bf"] = np.where(ok2, lm["w"], 0.0)
+        la = lm.groupby("rid").agg(a=("a", "sum"), f=("f", "sum"), wt=("w", "sum"),
+                                   age=("age2", "mean"), b=("b", "sum"), bf=("bf", "sum"))
+        fpos = la["f"].where(la["f"] > 0)
+        return ((la["a"] / fpos * la["wt"]).reindex(out.index).to_numpy(),
+                (la["f"] / la["wt"].where(la["wt"] > 0)).reindex(out.index).fillna(0.0).to_numpy(),
+                la["age"].reindex(out.index).to_numpy(),
+                (la["b"] / la["bf"].where(la["bf"] > 0) * la["wt"]).reindex(out.index).to_numpy())
+
+    (out["lap_path_sec"], out["lap_path_cov"], out["lap_path_age"],
+     out["lap_fill_path_sec"]) = _lap(LAP_WINDOW_SEC)
+    (out["lap6_path_sec"], out["lap6_path_cov"], out["lap6_path_age"],
+     out["lap6_fill_path_sec"]) = _lap(LAP6_WINDOW_SEC)
 
     # ---- run 7: own recent links vs historical ------------------------------
     ol = links[["vt", "key", "t", "lt"]].copy()
@@ -341,6 +355,29 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     out["hist_x_own"] = (out["hist_path_sec_dt"].to_numpy()
                          * np.clip(np.nan_to_num(out["own_hist_ratio8"].to_numpy(dtype=float), nan=1.0), 0.5, 3.0))
 
+    # ---- run 12: vehicle-level own/historical ratio, any trip, last hour -----
+    ol["vid"] = ol["vt"].str.split("|", n=1).str[0]
+    ol["ha"] = (ol["b"] > 0).astype(float)
+    ol = ol.sort_values("t").reset_index(drop=True)
+    cs = ol.groupby("vid", sort=False)[["a", "b", "ha"]].cumsum()
+    ol["ca"], ol["cb"], ol["cn"] = cs["a"], cs["b"], cs["ha"]
+    vq = pd.DataFrame({"rid": np.arange(n), "vid": vid_rows.astype(object),
+                       "tq": rows_t - DETECT_LAG_SEC}).sort_values("tq")
+    vr = ol[["vid", "t", "ca", "cb", "cn"]].copy()
+    vr["vid"] = vr["vid"].astype(object)
+    now = pd.merge_asof(vq, vr, left_on="tq", right_on="t", by="vid",
+                        direction="backward", tolerance=VEH_WINDOW_SEC)
+    old = pd.merge_asof(vq.assign(tq0=vq["tq"] - VEH_WINDOW_SEC).sort_values("tq0"),
+                        vr.rename(columns={"t": "t0", "ca": "ca0", "cb": "cb0", "cn": "cn0"}),
+                        left_on="tq0", right_on="t0", by="vid", direction="backward")
+    now = now.set_index("rid")
+    old = old.set_index("rid").reindex(now.index)
+    da = now["ca"] - old["ca0"].fillna(0.0)
+    db = now["cb"] - old["cb0"].fillna(0.0)
+    dn = now["cn"] - old["cn0"].fillna(0.0)
+    out.loc[now.index, "veh_hist_ratio60"] = (da / db.where(db > 0)).to_numpy()
+    out.loc[now.index, "veh_hist_n60"] = dn.fillna(0.0).to_numpy()
+
     # ---- time since any vehicle last arrived at the target stop ------------
     st = cr[["stop_id", "t"]].rename(columns={"t": "ta"}).sort_values("ta")
     q = pd.DataFrame({"rid": np.arange(n), "stop_id": rows["stop_id"].astype(str).to_numpy(),
@@ -368,4 +405,4 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         el = mm["t"] - mm["tp"]
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
-    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS + V7_COLS].reset_index(drop=True)
+    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS + V7_COLS + V8_COLS].reset_index(drop=True)
