@@ -502,3 +502,56 @@ sh research/model-search/run11.sh     # prep chain -> ms_features_v7, then fits
 Plan: ds1v7 / ds1shiftv7 with baseline, sc_big_cur (leader), sc_big_lap (+ own
 previous-lap link times, V7 cols), sc_big_cur_reg (min_samples_leaf 100, l2 1); then
 the serving timing test (`timing.py` on the saved baseline and sc_big_cur fits).
+
+### Run 11 results (rebuild 19:25→21:40 UTC, fits until ~23:00)
+The rebuild was slower than in run 8 (first days took about 35 min per worker; 22
+days in 2 h 15 min at `--parallel 4`, with peak use around 11 GB). Baseline and sc_big_cur
+reproduced exactly (110.6 / 113.0 and 90.1 / 89.5), so v7 = v6 plus the new columns.
+
+| arm | ds1v7 (s42) MAE / p90 | Δbase | Δleader | ds1shiftv7 (s7) | Δbase | Δleader |
+|---|---|---|---|---|---|---|
+| baseline | 110.6 / 230.9 | | | 113.0 / 241.1 | | |
+| sc_big_cur (run-8 leader) | 90.1 / 182.9 | −18.5% | | 89.5 / 183.9 | −20.8% | |
+| **sc_big_lap (+ own previous lap)** | **88.8 / 180.6** | **−19.7%** | **−1.45%** | **88.5 / 182.1** | **−21.7%** | **−1.19%** |
+| sc_lap_127 (sc_big_lap, 127 leaves) | 89.7 / 181.5 | −18.9% | −0.5% | 89.4 / 183.1 | −20.9% | −0.1% |
+| sc_big_cur_reg (msl 100, l2 1) | 90.1 / 182.9 | −18.5% | +0.0% | | | |
+
+- sc_big_lap improves p90 and every stops_ahead bucket against sc_big_cur on both splits.
+  Against the leader, the worst bucket is only −0.3% / −0.3%, so no bucket gets worse.
+  Against the baseline, ds1 sa1/sa5/sa10 is 72.6→63.2, 112.0→88.7, 153.5→123.6; shift
+  is 71.2→61.5, 114.3→88.6, 159.7→124.1. Median AE 56.0→43.6 / 59.5→44.2. Bias −15.0 / −17.1.
+  By day, ds1 Sat 100.2→83.6, Sun 107.1→87.0, Mon 120.5→93.7; shift Fri 126.8→93.2,
+  Sat 99.6→83.2, Sun 106.6→86.9. Rows: train 2.18M / 1.98M, test 1.41M / 1.42M
+  (Sat 422k, Sun 404k, Mon 589k, Fri 599k).
+- Worst routes (sc_big_lap, ds1): 122 319, 133 207, 106 158, 125 156, 113 134, 137 134,
+  131 131, 111 131, 129 127, 881 123. Shift: 122 228, 106 159, 125 144, 111 136, 137 135.
+  Route 133 improved most (219→207 on ds1). Route 122 barely moved (322→319); its
+  previous lap is often more than 3 h back or on the other direction.
+- Regularisation (min_samples_leaf 100, l2 1): exactly neutral. Stop tuning regularisation.
+- At 127 leaves the previous-lap gain mostly disappears (sc_lap_127 ≈ sc_big_cur at 255 leaves).
+- Loss: production already trains with `absolute_error`, so the loss idea is moot.
+
+**Serving timing test** (`timing.py`, single thread, this 4-vCPU box, 3000-row batch,
+walking the exported trees with a categorical bitset test added):
+baseline 1200 trees / 304k nodes: 0.75 s (export ~15 MB). sc_big_cur 1200 trees / 611k
+nodes, 116k categorical nodes: 1.55 s (~29 MB). Parity with sklearn is exact (max
+|d| 1e-11). 255 leaves plus bitsets cost 2x per push but fit easily in the 10 s cycle, so
+there is no serving reason to drop to 127 leaves. Serving needs: export `is_categorical`,
+`bitset_idx`, `missing_go_to_left` and `raw_left_cat_bitsets` per tree, and the
+categorical column permutation / re-encoding from `model._preprocessor`.
+
+**Conclusion: new leader `sc_big_lap`, which wins per protocol on both splits and seeds (ds1
+110.6→88.8, −19.7%, p90 230.9→180.6; shift 113.0→88.5, −21.7%, p90 241.1→182.1). It is
+−1.2 to −1.5% against sc_big_cur.** Serving cost on top of sc_big_cur: the link store also
+keeps the last traversal per (vehicle, link) for 3 h, a dict updated from the same crossing
+events. That is about +0.3 day, so ~2.5 days in total.
+
+### Next steps
+1. Lap window: re-prep with `MS_LAP_WINDOW=21600` (6 h) and 5400 (1.5 h) into new feature
+   dirs (~50 min of prep each, sequential because of links history). Route 122 needs the
+   longer window.
+2. Direction-agnostic previous lap: the same vehicle's traversal of the *same stop pair* in
+   either direction, or the time of its previous full round trip.
+3. A 3x-data check of sc_big_lap (`--keep-pct 3`, ~25 min per fit).
+4. Session budget: the rebuild alone is about 2.25 h. Keep each run to at most one re-prep plus
+   about 6 fits.

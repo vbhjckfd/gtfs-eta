@@ -55,6 +55,10 @@ SERVING = {
     "sc_big_cur": "as dtcat_stopcat_big + current-link live m5 / hist / fraction (already in the link store); ~2-2.5 days total",
     "sc_big_nxt": "as dtcat_stopcat_big + 3rd categorical (next stop code map)",
     "sc_big_v6": "as sc_big_cur + next-stop categorical",
+    "sc_big_lap": "as sc_big_cur + per-vehicle last traversal of each link (3 h window; the link store already sees every traversal, keyed also by vehicle); ~2.5 days total",
+    "sc_big_cur_reg": "as sc_big_cur",
+    "sc_big_lap_reg": "as sc_big_lap",
+    "sc_lap_127": "as sc_big_lap at 127 leaves (current export size)",
     "sc_big_lr08": "as dtcat_stopcat_big",
     "dtcat_big": "as stack_hist_dt_cat; 255-leaf trees ~2x export size",
     "dtcat_resid": "as stack_hist_dt_cat + add base ETA to tree output",
@@ -67,7 +71,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1v6` / `ds1shiftv6` = v4/v5 features rebuilt in run 8 (+ V6 current-link cols: next stop id, current-link live m5 / hist / fraction left); baselines identical.
+Tags: `ds1v7` / `ds1shiftv7` = rebuilt in run 11 (+ V7 own previous-lap cols: lap_path_sec / cov / age, lap_fill_path_sec; MS_FEAT_DIR=ms_features_v7); baselines identical.
+`ds1v6` / `ds1shiftv6` = v4/v5 features rebuilt in run 8 (+ V6 current-link cols: next stop id, current-link live m5 / hist / fraction left); baselines identical.
 `ds1v5` / `ds1shiftv5` = v4 features rebuilt in run 7 (+ own-vs-hist cols); baselines identical. `ds1v5k3` = ds1v5 with train rows at 3% of snapshots (3x) instead of 1%.
 `ds1v4` / `ds1shiftv4` = same splits, features v4 (MS_FEAT_DIR=ms_features_v4: pipeline from 08-31 so the historical link table has 7-14 prior days for every train row, + day-type table, live/hist ratio, p75); baselines identical.
 `ds1v3` / `ds1shiftv3` = same splits, features v3 (MS_FEAT_DIR=ms_features_v3: + m7, EWMA, historical link table from prior days); baselines identical.
