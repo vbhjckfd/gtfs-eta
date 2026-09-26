@@ -587,3 +587,18 @@ def sc_big_cur_reg(tr, te, seed=42):
     """sc_big_cur with min_samples_leaf 100 and l2_regularization 1."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_CUR, min_samples_leaf=100,
                              l2_regularization=1.0)
+
+
+# ---- run 11 -----------------------------------------------------------------
+@arm
+def sc_big_lap_reg(tr, te, seed=42):
+    """sc_big_lap with min_samples_leaf 100 and l2_regularization 1."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP, min_samples_leaf=100,
+                             l2_regularization=1.0)
+
+
+@arm
+def sc_lap_127(tr, te, seed=42):
+    """sc_big_lap at 127 leaves / min_samples_leaf 20 (half the export size)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP, max_leaf_nodes=127,
+                             min_samples_leaf=20)
