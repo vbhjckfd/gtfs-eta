@@ -62,6 +62,7 @@ V4_COLS = ["hist_path_sec_dt", "live_hist_ratio", "hist_path_p75"]
 # is running slow today"): over its last k completed links, sum(actual) /
 # sum(historical) and the excess in seconds; plus hist_dt path scaled by it.
 V5_COLS = ["own_hist_ratio3", "own_hist_ratio8", "own_excess8", "hist_x_own"]
+V6_COLS = ["next_stop_id", "cur_link_live", "cur_link_hist", "cur_link_frac"]
 OWN_WINDOW_SEC = 1800
 
 
@@ -176,6 +177,7 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     dv = rows["dist_along_m"].to_numpy(dtype=float)
     dtg = rows["stop_dist_along_m"].to_numpy(dtype=float)
     rid, keys, wts, plen = [], [], [], np.full(n, np.nan)
+    first, nxt = [], np.full(n, "", dtype=object)
     for tid, ix in pd.Series(np.arange(n)).groupby(rt, sort=False):
         if tid not in profs:
             continue
@@ -188,13 +190,15 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
                 continue
             span = dists[a] - dists[a - 1]
             w0 = (dists[a] - dv[p]) / span if span > 0 else 1.0
+            nxt[p] = sids[a]
             for j in range(a, b + 1):
+                first.append(j == a)
                 rid.append(p)
                 keys.append(sids[j - 1] + ">" + sids[j])
                 wts.append(min(max(w0, 0.0), 1.0) if j == a else 1.0)
             plen[p] = dists[b] - dv[p]
     ex = pd.DataFrame({"rid": np.array(rid, dtype=np.int64), "key": keys,
-                       "w": np.array(wts), "t": rows_t[np.array(rid, dtype=np.int64)] if rid else []})
+                       "w": np.array(wts), "first": np.array(first, dtype=bool), "t": rows_t[np.array(rid, dtype=np.int64)] if rid else []})
     ex["tq"] = ex["t"] - DETECT_LAG_SEC
 
     # latest traversal of each link completed at or before t
@@ -266,6 +270,13 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     out["live_path_age"] = agg["age"].reindex(out.index).to_numpy()
     out["live_speed_mps"] = plen / np.where(lps > 0, lps, np.nan)
 
+    # ---- run 8: the vehicle's current link (next stop id, live/hist link time)
+    fm = m[m["first"].to_numpy()]
+    out["next_stop_id"] = nxt
+    out.loc[fm["rid"].to_numpy(), "cur_link_live"] = fm["lt5"].to_numpy(dtype=float)
+    out.loc[fm["rid"].to_numpy(), "cur_link_hist"] = histd[fm.index].to_numpy(dtype=float)
+    out.loc[fm["rid"].to_numpy(), "cur_link_frac"] = fm["w"].to_numpy(dtype=float)
+
     # ---- run 7: own recent links vs historical ------------------------------
     ol = links[["vt", "key", "t", "lt"]].copy()
     ol["h"] = local_hour(ol["t"].to_numpy())
@@ -322,4 +333,4 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         el = mm["t"] - mm["tp"]
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
-    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS].reset_index(drop=True)
+    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS].reset_index(drop=True)

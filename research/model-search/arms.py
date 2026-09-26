@@ -513,3 +513,48 @@ def dtcat_big(tr, te, seed=42):
     """Control for dtcat_stopcat_big: leader with 255 leaves / min 50 per leaf."""
     return _stack_plus(tr, te, seed, _DT, categorical_features=[0],
                        max_leaf_nodes=255, min_samples_leaf=50)
+
+
+# ---- run 8 (V6 cols: the vehicle's current link) ---------------------------
+_CUR = ["cur_link_live", "cur_link_hist", "cur_link_frac"]
+
+
+def _topcode(tr, te, src, dst):
+    top = tr[src].astype(str).value_counts().index[:254]
+    code = {s: i for i, s in enumerate(top)}
+    for d in (tr, te):
+        d[dst] = d[src].astype(str).map(code).fillna(254).astype(float)
+
+
+def _stopcat_big_plus(tr, te, seed, extra_num=(), next_cat=False, **hp):
+    cols = _STACK + _DT
+    tr, te = _sentinel(tr, te, cols + list(extra_num))
+    _topcode(tr, te, "stop_id", "stop_cat")
+    allc = _NOCAL + cols + list(extra_num) + ["stop_cat"]
+    cats = [0, len(allc) - 1]
+    if next_cat:
+        _topcode(tr, te, "next_stop_id", "next_cat")
+        allc.append("next_cat")
+        cats.append(len(allc) - 1)
+    params = dict(max_leaf_nodes=255, min_samples_leaf=50)
+    params.update(hp)
+    return _fit_predict(tr, te, allc, seed, categorical_features=cats, **params)
+
+
+@arm
+def sc_big_nxt(tr, te, seed=42):
+    """dtcat_stopcat_big + the vehicle's next stop as a native categorical
+    (dwell / signal at the current location)."""
+    return _stopcat_big_plus(tr, te, seed, next_cat=True)
+
+
+@arm
+def sc_big_cur(tr, te, seed=42):
+    """dtcat_stopcat_big + current-link live m5 / historical time / fraction left."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR)
+
+
+@arm
+def sc_big_v6(tr, te, seed=42):
+    """dtcat_stopcat_big + next-stop categorical + current-link cols."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR, next_cat=True)
