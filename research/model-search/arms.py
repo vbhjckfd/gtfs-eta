@@ -558,3 +558,9 @@ def sc_big_cur(tr, te, seed=42):
 def sc_big_v6(tr, te, seed=42):
     """dtcat_stopcat_big + next-stop categorical + current-link cols."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_CUR, next_cat=True)
+
+
+@arm
+def sc_big_lr08(tr, te, seed=42):
+    """dtcat_stopcat_big with learning rate 0.08 (the 1200-iteration cap binds)."""
+    return _stopcat_big_plus(tr, te, seed, learning_rate=0.08)
