@@ -506,3 +506,10 @@ def dtcat_stopcat_big(tr, te, seed=42):
     allc = _NOCAL + cols + ["stop_cat"]
     return _fit_predict(tr, te, allc, seed, categorical_features=[0, len(allc) - 1],
                         max_leaf_nodes=255, min_samples_leaf=50)
+
+
+@arm
+def dtcat_big(tr, te, seed=42):
+    """Control for dtcat_stopcat_big: leader with 255 leaves / min 50 per leaf."""
+    return _stack_plus(tr, te, seed, _DT, categorical_features=[0],
+                       max_leaf_nodes=255, min_samples_leaf=50)
