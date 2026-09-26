@@ -487,3 +487,18 @@ the shape projection. That adds about 0.1 day.
    decide between 127 and 255 leaves before any serving work.
 3. Try a stronger regulariser on 255 leaves (min_samples_leaf 100, l2 1) with 3x
    data. Run 7's 3x scale check showed that data helps by about 2 s.
+
+## 2026-09-26 — runs 9 and 10 (lost) and run 11
+
+Runs 9 (08:21 UTC) and 10 (~15:20 UTC) committed code and lock refreshes but no
+results or journal; their sessions ended mid-rebuild. Run 11 (lock 19:17 UTC) re-runs
+run 9's plan with `research/model-search/run11.sh`, which commits and pushes results
+after every fit. Setup notes for a fresh box: `pip install -e . tzdata` (without
+tzdata every pipeline day fails with ZoneInfoNotFoundError 'Europe/Kiev').
+```
+python research/model-search/pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21 &
+sh research/model-search/run11.sh     # prep chain -> ms_features_v7, then fits
+```
+Plan: ds1v7 / ds1shiftv7 with baseline, sc_big_cur (leader), sc_big_lap (+ own
+previous-lap link times, V7 cols), sc_big_cur_reg (min_samples_leaf 100, l2 1); then
+the serving timing test (`timing.py` on the saved baseline and sc_big_cur fits).
