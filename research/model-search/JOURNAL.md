@@ -337,3 +337,63 @@ Cols: `_NOCAL + _STACK + [hist_path_sec, hist_path_cov, hist_path_sec_dt]`, with
 3. Day-type split of the live store? (Probably none; the live store is already same-day.)
 4. Weight recent training days more heavily, or train on a longer window
    (more days, now that history is cheap).
+
+## 2026-09-26 — run 7 (own-vs-hist, recency, prune, residual targets, stop categorical)
+
+Rebuilt DS1 as in run 6 (`pipeline_lite.py --days 2026-08-31..2026-09-21 --parallel 4`,
+23:17→01:34 UTC with prep chained per day; `MS_FEAT_DIR=ms_features_v4`). Baseline
+110.6 / 113.0 and stack_hist_dt_cat 92.1 / 92.1 reproduced exactly, so v5 = v4 numbers.
+New V5 columns in `features_live.py` (appended; the existing columns are unchanged):
+`own_hist_ratio3/8`, `own_excess8` (this vehicle's own last 3 or 8 completed links:
+actual vs the historical link×hour median), `hist_x_own`.
+New `cmp.py TAG [REF]` prints a tag's arms vs the baseline and vs a reference arm.
+
+Cmds: `MS_FEAT_DIR=ms_features_v4 sh research/model-search/queue.sh ds1v5 2026-09-07..2026-09-18 2026-09-19..2026-09-21 42 <arms>`,
+`… ds1shiftv5 2026-09-07..2026-09-17 2026-09-18..2026-09-20 7 <arms>`.
+
+### Results (MAE / p90; Δ vs baseline, then Δ vs stack_hist_dt_cat)
+| arm | ds1v5 (s42) | Δbase | Δleader | ds1shiftv5 (s7) | Δbase | Δleader |
+|---|---|---|---|---|---|---|
+| baseline | 110.6 / 230.9 | | | 113.0 / 241.1 | | |
+| stack_hist_dt_cat (run-6 leader) | 92.1 / 186.0 | −16.7% | | 92.1 / 187.6 | −18.5% | |
+| dtcat_own (+ own vs hist) | 92.0 / 185.8 | −16.8% | −0.1% | | | |
+| dtcat_own_x (+ hist×own ratio) | 92.0 / 185.9 | −16.8% | −0.1% | | | |
+| dtcat_recency (half-life 7 d) | 92.5 / 186.6 | −16.3% | +0.5% | | | |
+| dtcat_prune (− is_holiday, trip_progress_frac, stops_remaining) | 93.3 / 187.9 | −15.6% | +1.3% | | | |
+| dtcat_resid (target y − hist path) | 91.9 / 185.3 | −16.9% | −0.2% | | | |
+| dtcat_logratio (log ratio target) | 92.6 / 184.8 | −16.3% | +0.5% | | | |
+| dtcat_big (255 leaves, min 50) | 91.6 / 185.4 | −17.2% | −0.6% | 91.3 / 187.3 | −19.2% | −0.9% |
+| dtcat_stopcat (+ target stop categorical) | 91.6 / 185.0 | −17.2% | −0.6% | 91.2 / 186.1 | −19.3% | −1.0% |
+| **dtcat_stopcat_big** | **90.7 / 183.8** | **−18.0%** | **−1.6%** | **90.5 / 185.4** | **−19.9%** | **−1.7%** |
+
+- Own-vs-historical ratio: noise. Own speed plus live links already carry it.
+- Recency weighting and the residual/log-ratio targets: no gain. The trees already
+  track the historical path closely.
+- Pruning hurts by 1.3%. trip_progress_frac and stops_remaining carry signal even
+  though the schedule is synthetic, so keep them.
+- The target-stop categorical (`stop_cat`: the 254 most frequent train stops get
+  their own code, the rest share code 254; native categorical next to route_id) and
+  255-leaf trees add up (−0.6 and −0.6 on ds1, −1.6 together; −1.0 and −0.9 on
+  shift, −1.7 together).
+- dtcat_stopcat_big vs baseline: every stops_ahead bucket improves on both splits.
+  ds1: sa1 72.6→63.7, sa5 112.0→90.9, sa10 153.5→126.0. Shift: sa1 71.2→62.6,
+  sa10 159.7→126.6. By day, ds1 Sat 100.2→85.5, Sun 107.1→89.2, Mon 120.5→95.4;
+  shift Fri 126.8→94.7. Rows: train 2.18M / 1.98M, test 1.41M / 1.42M. n_iter still
+  hits the 1200 cap.
+- Worst routes (dtcat_stopcat_big, ds1): 122 317, 133 216, 106 168, 125 156, 113 138,
+  137 137, 94 136, 129 133, 131 132, 111 130. On shift, 122 is 227 and 133 is 154.
+  Route 122 gets no better from anything we have tried.
+
+**Conclusion: new leader `dtcat_stopcat_big`. It wins per protocol on both splits
+and seeds (ds1 110.6→90.7, −18.0%, p90 230.9→183.8; shift 113.0→90.5, −19.9%, p90
+241.1→185.4).** It is only 1.6–1.7% better than the run-6 leader, so if 2x trees
+are too much for the push-feed runner, `dtcat_stopcat` at 127 leaves keeps
+−0.6 to −1.0%.
+
+### Serving estimate
+Same as stack_hist_dt_cat (about 2–2.5 days, including categorical bitsets), plus:
+- a stop_id→code map with 254 entries, shipped with the model;
+- a second categorical column in the bitset path;
+- 255-leaf trees, so about 2x the node arrays in the export and about 1 more
+  level per tree walk.
+Per-row cost grows only by about log2(2) = 1 comparison per tree.
