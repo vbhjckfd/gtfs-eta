@@ -1,0 +1,105 @@
+{
+ "n": 1424485,
+ "mae": 87.53691345571907,
+ "median_ae": 43.88237423573895,
+ "p90_ae": 179.84342980147707,
+ "bias": -15.910179878525504,
+ "mae_by_stops_ahead": {
+  "1": 61.178160442242216,
+  "2": 62.715401343485915,
+  "3": 71.38264489390907,
+  "4": 79.70008681592138,
+  "5": 87.60629478089537,
+  "6": 95.0489718040512,
+  "7": 101.35521143027714,
+  "8": 107.67391427338352,
+  "9": 114.75366932966932,
+  "10": 122.21174935612369
+ },
+ "worst_routes": {
+  "122": 247.2,
+  "106": 160.8,
+  "133": 146.6,
+  "125": 138.1,
+  "98": 135.3,
+  "878": 132.0,
+  "111": 131.0,
+  "2302": 130.8,
+  "137": 130.1,
+  "94": 123.9
+ },
+ "mae_by_day": {
+  "2026-09-18": 92.13051398776116,
+  "2026-09-19": 82.67921445974906,
+  "2026-09-20": 85.79904328463913
+ },
+ "n_by_day": {
+  "2026-09-18": 598951,
+  "2026-09-19": 422033,
+  "2026-09-20": 403501
+ },
+ "arm": "sc_big_net",
+ "info": {
+  "n_iter": 1200,
+  "cols": [
+   "route_id",
+   "stops_ahead",
+   "hour",
+   "is_weekend",
+   "is_holiday",
+   "remaining_dist_m",
+   "progress_speed_mps",
+   "stops_remaining",
+   "trip_progress_frac",
+   "dist_per_stop_m",
+   "speed_eta_warm",
+   "hist_speed_mps",
+   "hist_travel_time_est",
+   "stationary_sec",
+   "live_path_sec_m3",
+   "live_path_cov",
+   "live_path_age",
+   "live_speed_mps",
+   "own_speed_60",
+   "own_speed_180",
+   "own_speed_300",
+   "live_path_sec_m5",
+   "hist_path_sec",
+   "hist_path_cov",
+   "hist_path_sec_dt",
+   "cur_link_live",
+   "cur_link_hist",
+   "cur_link_frac",
+   "lap_path_sec",
+   "lap_path_cov",
+   "lap_path_age",
+   "lap_fill_path_sec",
+   "veh_hist_ratio60",
+   "veh_hist_n60",
+   "net_ratio15",
+   "net_n15",
+   "stop_cat"
+  ],
+  "hp": {
+   "categorical_features": [
+    0,
+    36
+   ],
+   "max_leaf_nodes": 255,
+   "min_samples_leaf": 50
+  }
+ },
+ "train_days": [
+  "2026-09-07",
+  "2026-09-17"
+ ],
+ "test_days": [
+  "2026-09-18",
+  "2026-09-19",
+  "2026-09-20"
+ ],
+ "keep_pct": 1,
+ "seed": 7,
+ "n_train": 1978242,
+ "secs": 502
+}
