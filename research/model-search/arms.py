@@ -625,3 +625,20 @@ def sc_big_veh(tr, te, seed=42):
 def sc_big_v8(tr, te, seed=42):
     """sc_big_lap6 + vehicle-level ratio."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP6 + _VEH)
+
+
+# ---- run 13 (V9 cols: network ratio, short / clipped vehicle ratios) --------
+_NET = ["net_ratio15", "net_n15"]
+_VEH2 = ["veh_hist_ratio20", "veh_hist_ratio60c"]
+
+
+@arm
+def sc_big_net(tr, te, seed=42):
+    """sc_big_veh + network-wide live/historical ratio over the last 15 min."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH + _NET)
+
+
+@arm
+def sc_big_v9(tr, te, seed=42):
+    """sc_big_net + 20 min and clipped 60 min vehicle-level ratios."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH + _NET + _VEH2)

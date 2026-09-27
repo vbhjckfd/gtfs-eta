@@ -75,6 +75,11 @@ LAP_WINDOW_SEC = int(os.environ.get("MS_LAP_WINDOW", 10800))
 V8_COLS = ["lap6_path_sec", "lap6_path_cov", "lap6_path_age", "lap6_fill_path_sec",
            "veh_hist_ratio60", "veh_hist_n60"]
 LAP6_WINDOW_SEC = 21600
+# run 13: network-wide live/historical ratio over the last 15 min (citywide
+# traffic state: all vehicles' completed links), the vehicle-level ratio over
+# 20 min, and a 60 min vehicle-level ratio with each link clipped to
+# [hist/3, 3*hist] so a terminus layover can't dominate it.
+V9_COLS = ["net_ratio15", "net_n15", "veh_hist_ratio20", "veh_hist_ratio60c"]
 VEH_WINDOW_SEC = 3600
 OWN_WINDOW_SEC = 1800
 
@@ -379,6 +384,40 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     out.loc[now.index, "veh_hist_ratio60"] = (da / db.where(db > 0)).to_numpy()
     out.loc[now.index, "veh_hist_n60"] = dn.fillna(0.0).to_numpy()
 
+    # ---- run 13: network ratio, short / clipped vehicle ratios --------------
+    bpos = ol["b"].to_numpy() > 0
+    ol["ac"] = np.where(bpos, np.clip(ol["a"].to_numpy(), ol["b"].to_numpy() / 3,
+                                      ol["b"].to_numpy() * 3), 0.0)
+    ol["cac"] = ol.groupby("vid", sort=False)["ac"].cumsum()
+
+    def _veh_ratio(col, window):
+        vr2 = ol[["vid", "t", col, "cb"]].copy()
+        vr2["vid"] = vr2["vid"].astype(str)
+        nw = pd.merge_asof(vq, vr2, left_on="tq", right_on="t", by="vid",
+                           direction="backward", tolerance=window).set_index("rid")
+        od = pd.merge_asof(vq.assign(tq0=vq["tq"] - window).sort_values("tq0"),
+                           vr2.rename(columns={"t": "t0", col: "x0", "cb": "cb0"}),
+                           left_on="tq0", right_on="t0", by="vid",
+                           direction="backward").set_index("rid").reindex(nw.index)
+        a_ = nw[col] - od["x0"].fillna(0.0)
+        b_ = nw["cb"] - od["cb0"].fillna(0.0)
+        out.loc[nw.index, f"_r"] = (a_ / b_.where(b_ > 0)).to_numpy()
+        return out.pop("_r").to_numpy()
+
+    out["veh_hist_ratio20"] = _veh_ratio("ca", 1200)
+    out["veh_hist_ratio60c"] = _veh_ratio("cac", VEH_WINDOW_SEC)
+    # network: global cumulative sums over links with a historical value
+    tt = ol["t"].to_numpy(dtype=float)
+    ga = np.concatenate([[0.0], np.cumsum(ol["ac"].to_numpy())])
+    gb = np.concatenate([[0.0], np.cumsum(ol["b"].to_numpy())])
+    gn = np.concatenate([[0.0], np.cumsum(ol["ha"].to_numpy())])
+    tq_all = rows_t - DETECT_LAG_SEC
+    i1 = np.searchsorted(tt, tq_all, side="right")
+    i0 = np.searchsorted(tt, tq_all - 900, side="right")
+    nb = gb[i1] - gb[i0]
+    out["net_ratio15"] = np.where(nb > 0, (ga[i1] - ga[i0]) / np.where(nb > 0, nb, 1), np.nan)
+    out["net_n15"] = gn[i1] - gn[i0]
+
     # ---- time since any vehicle last arrived at the target stop ------------
     st = cr[["stop_id", "t"]].rename(columns={"t": "ta"}).sort_values("ta")
     q = pd.DataFrame({"rid": np.arange(n), "stop_id": rows["stop_id"].astype(str).to_numpy(),
@@ -406,4 +445,4 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         el = mm["t"] - mm["tp"]
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
-    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS + V7_COLS + V8_COLS].reset_index(drop=True)
+    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS + V7_COLS + V8_COLS + V9_COLS].reset_index(drop=True)
