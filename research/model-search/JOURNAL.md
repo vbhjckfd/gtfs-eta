@@ -638,3 +638,56 @@ New V9 columns in `features_live.py` (V8 outputs unchanged):
   layover and deadhead links at the terminus can't dominate it (run 12 next step 1, the route 133 regression).
 
 Arms: `sc_big_net` (sc_big_veh + net), `sc_big_v9` (net + ratio20 + ratio60c).
+
+The rebuild ran from 03:20 to 05:36 UTC (first batch about 41 min per day, later days about 20 min).
+Baseline and sc_big_veh reproduced exactly (110.6 / 113.0 and 87.7 / 87.7).
+
+### Results (MAE / p90; Δ vs baseline, Δ vs the leader sc_big_veh)
+| arm | ds1v9 (s42) | Δbase | Δleader | ds1shiftv9 (s7) | Δbase | Δleader |
+|---|---|---|---|---|---|---|
+| baseline | 110.6 / 230.9 | | | 113.0 / 241.1 | | |
+| sc_big_veh (leader) | 87.7 / 179.1 | −20.7% | | 87.7 / 180.6 | −22.4% | |
+| sc_big_net | 87.8 / 179.0 | −20.6% | +0.07% | 87.5 / 179.8 | −22.5% | −0.13% |
+| sc_big_v9 | 87.6 / 178.1 | −20.8% | −0.13% | 87.5 / 179.4 | −22.6% | −0.16% |
+
+- Both are noise-level. sc_big_v9 trims p90 by 0.5–0.65% and the long horizons (ds1 sa10
+  122.3→121.6), but sa1 gets 0.5–0.9% worse. The network ratio alone does nothing: the
+  shared live link store already carries current traffic on each link, so a citywide scalar adds
+  no information.
+- The clipped vehicle ratio does not fix route 133 on shift (146.0 → 146.9), so the run-12
+  regression there is not caused by layover links. Route 122 gets worse with the net
+  cols (ds1 325→334–337, shift 230→246–247). 122 is sparse and long-headway, so a global
+  scalar is a spurious split for it.
+- Rows: train 2.18M / 1.98M, test 1.41M / 1.42M (unchanged).
+
+**Conclusion: no new leader. sc_big_veh stays. The vehicle/network "state ratio" family is
+exhausted: 3 h / 6 h lap, 20 / 60 min vehicle ratio, clipped, and network-wide all land within ±0.2%.**
+
+### Scale check: 3x training rows (tag `ds1v9k3`, `--keep-pct 3`, 6.51M train rows, seed 42)
+The first attempt was OOM-killed for both arms, because the v9 feature files are too wide for 3x in 15.7 GB.
+`harness.py` now reads `MS_DROP_COLS` (a comma list of feature cols to skip at load; numerics
+unchanged). run13b.sh drops the 21 live cols that neither arm uses.
+| arm | MAE / median / p90 | Δbase | sa1 / sa5 / sa10 | Sat / Sun / Mon | fit |
+|---|---|---|---|---|---|
+| baseline | 108.1 / 54.4 / 226.9 | | 70.4 / 109.7 / 149.9 | 96.8 / 106.3 / 117.4 | 20 min |
+| sc_big_veh | 85.4 / 42.4 / 174.3 | −21.0% | 60.2 / 85.5 / 119.2 | 79.7 / 83.8 / 90.7 | 28 min |
+- The baseline reproduces run 7's 3x baseline exactly (108.1 / 226.9). 3x data helps the leader by 2.3 s
+  (87.7→85.4), a little more than the baseline's 2.5 s relative to its size. The relative gain holds and grows
+  (−20.7% → −21.0%), with p90 −23.2% and the worst bucket −14.5%. Bias is −14.7 (baseline −27.5).
+- Worst routes at 3x: 122 296, 133 207, 125 150, 106 143, 137 132, 129 131, 111 126, 113 126,
+  131 125, 881 124. Route 122 gains the most from more data (325→296), so part of its error is data
+  sparsity in training, not only in the live features.
+
+### Next steps
+1. Stop adding live-state ratio features (exhausted, see above). The remaining levers are data volume
+   (3x = −2.3 s; production trains on 100% of snapshots over more days, so the served gain is likely
+   larger than measured here) and the target side.
+2. Target-side / dwell: model arrival at the target as arrival at the previous stop plus the target's
+   own link, i.e. the historical dwell at the target stop × hour (a static table like hist_dt, keyed by
+   stop) and the observed dwell of the last vehicle at the target stop (live, from `.pos`
+   stationary runs near the stop).
+3. Route 133 (early by ~200 s at long horizons): check whether its trips have a long layover *inside*
+   the trip (a timed point), which the model can't see. If so, add a "timed-point stops between
+   vehicle and target" count from historical dwell > 60 s.
+4. Serving: sc_big_veh is ready to hand off (≈2.7 days, see the run-12 serving estimate; timing test
+   in run 11). A productionisation PR is the owner's call, not this routine's.
