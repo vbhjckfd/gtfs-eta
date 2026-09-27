@@ -124,7 +124,7 @@ def prep_day(day: str, keep_pct: float, client=None) -> Path:
     return out
 
 
-HIST_DAYS = 14   # historical link table looks back this many prior days
+HIST_DAYS = int(os.environ.get("MS_HIST_DAYS", 14))   # historical link table looks back this many prior days
 PREP_PCT = 3.0   # every day is prepped once at this rate; runs subsample it
 
 
