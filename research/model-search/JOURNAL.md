@@ -620,3 +620,21 @@ consumes. Two running sums per vehicle, so about +0.2 day. No new artifacts.
 3. Route 122: features on the path are exhausted. Look at the target side instead
    (dwell/terminus layover at its stops, schedule headway gaps 8–10h) or accept it.
 4. A 3x-data check of sc_big_veh (`--keep-pct 3`).
+
+## 2026-09-27 — run 13 (network-wide ratio, short / clipped vehicle ratios)
+
+Lock taken at 03:17 UTC. Rebuilt DS1 with `pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21`,
+at about 41 min per batch of 4 days, then ran `sh research/model-search/run13.sh`, which runs the prep chain
+into `ms_features_v9` and then the fits. A background loop refreshes LOCK every 50 min, because the
+run lasts longer than the 3 h lock age.
+
+New V9 columns in `features_live.py` (V8 outputs unchanged):
+- `net_ratio15`, `net_n15`: network-wide sum(link time, clipped to [hist/3, 3·hist]) / sum(historical
+  day-hour median) over *all* vehicles' links completed in the last 15 min (citywide traffic state; a
+  global cumsum plus searchsorted, O(1) per row when serving). On 09-01 it ranges 0.77–1.24 (median 1.04),
+  with n ≈ 3k links per 15 min.
+- `veh_hist_ratio20`: the run-12 vehicle-level ratio over a 20 min window.
+- `veh_hist_ratio60c`: the 60 min vehicle ratio with each link clipped to [hist/3, 3·hist], so that
+  layover and deadhead links at the terminus can't dominate it (run 12 next step 1, the route 133 regression).
+
+Arms: `sc_big_net` (sc_big_veh + net), `sc_big_v9` (net + ratio20 + ratio60c).
