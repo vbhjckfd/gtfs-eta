@@ -555,3 +555,68 @@ events. That is about +0.3 day, so ~2.5 days in total.
 3. A 3x-data check of sc_big_lap (`--keep-pct 3`, ~25 min per fit).
 4. Session budget: the rebuild alone is about 2.25 h. Keep each run to at most one re-prep plus
    about 6 fits.
+
+## 2026-09-26/27 — run 12 (6 h previous-lap window, vehicle-level own/historical ratio)
+
+Lock taken at 23:16 UTC. Rebuilt DS1 with `pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21`
+(about 1.5 h this time). Ran `sh research/model-search/run12.sh`, which runs the prep chain into
+`ms_features_v8` and then the fits. The first prep crashed with a pandas 3 merge-key dtype
+mismatch (StringDtype vs object) in the new vehicle merge; fixed by casting both sides with
+`.astype(str)`. Everything finished around 03:00 UTC.
+
+New V8 columns in `features_live.py` (the lap code is refactored into `_lap(window)`; the V7
+outputs are unchanged, and sc_big_lap reproduced exactly):
+- `lap6_path_sec / cov / age / fill`: the same own previous-lap link times with a 6 h window
+  instead of 3 h. Coverage on 08-31 rises from 64% to 80% of rows, and on route 122 from
+  41% to 68%.
+- `veh_hist_ratio60`, `veh_hist_n60`: the vehicle's own link times / day-hour historical
+  medians over its links completed in the last hour, **across trips** (cumulative sums per
+  vehicle and merge_asof at tq and tq−3600). The run-7 own_hist_ratio* cols are keyed by
+  vehicle|trip, so they are empty right after a terminus turnaround. Coverage on 09-01 is
+  546k rows vs 463k for own_hist_ratio8.
+
+Arms (arms.py): `sc_big_lap6` (lap cols → 6 h versions), `sc_big_veh` (sc_big_lap + veh
+cols), `sc_big_v8` (lap6 + veh).
+
+### Results (MAE / p90; Δ vs baseline, Δ vs the run-11 leader sc_big_lap)
+| arm | ds1v8 (s42) | Δbase | Δleader | ds1shiftv8 (s7) | Δbase | Δleader |
+|---|---|---|---|---|---|---|
+| baseline | 110.6 / 230.9 | | | 113.0 / 241.1 | | |
+| sc_big_lap (run-11 leader) | 88.8 / 180.6 | −19.7% | | 88.5 / 182.1 | −21.7% | |
+| sc_big_lap6 | 88.9 / 180.7 | −19.6% | +0.16% | 88.4 / 182.1 | −21.7% | −0.05% |
+| **sc_big_veh** | **87.7 / 179.1** | **−20.7%** | **−1.19%** | **87.7 / 180.6** | **−22.4%** | **−0.95%** |
+| sc_big_v8 (lap6 + veh) | 87.7 / 179.1 | −20.7% | −1.22% | 87.5 / 180.1 | −22.6% | −1.10% |
+
+- sc_big_veh vs baseline: ds1 sa1/sa5/sa10 72.6→62.0, 112.0→87.6, 153.5→122.3; shift
+  71.2→60.7, 114.3→87.8, 159.7→123.2. Every stops_ahead bucket is better than the leader
+  (worst bucket −0.9% / −0.6%). Median AE 56.0→43.3 / 59.5→44.1. Bias −14.0 / −16.0
+  (baseline −28.2 / −14.2).
+  By day, ds1 Sat 100.2→82.5, Sun 107.1→85.7, Mon 120.5→92.9; shift Fri 126.8→92.5,
+  Sat 99.6→82.5, Sun 106.6→85.9. Rows: test 1.41M / 1.42M (Sat 422k, Sun 404k, Mon 589k,
+  Fri 599k); train 2.18M / 1.98M.
+- Worst routes (sc_big_veh, ds1): 122 325, 133 210, 106 161, 125 157, 137 131, 131 131,
+  129 130, 113 129, 111 128, 881 124. Shift: 122 231, 106 157, 133 146 (leader 134, so it
+  got worse on this split), 125 142, 98 141, 111 134, 878 132, 137 132, 2302 132, 94 123.
+- The 6 h lap window does nothing, even though it adds route-122 coverage (41%→68%). Route
+  122 stays at 320–325 (ds1) / 230 (shift). A 3–6 h old lap does not predict this route's
+  current link times, so its error is not about missing features on the path. Stop pursuing
+  lap windows.
+- sc_big_v8 vs sc_big_veh is −0.03% / −0.15%, which is noise, so prefer the simpler sc_big_veh.
+
+**Conclusion: new leader `sc_big_veh`. It wins per protocol on both splits and seeds (ds1
+110.6→87.7, −20.7%, p90 230.9→179.1; shift 113.0→87.7, −22.4%, p90 241.1→180.6), and it
+beats sc_big_lap on both by −1.0 to −1.2% with p90 and every bucket better.**
+
+### Serving estimate
+On top of sc_big_lap (~2.5 days): a per-vehicle deque of (t, own link time, historical
+link time) for the last hour, fed by the same crossing events that the link store already
+consumes. Two running sums per vehicle, so about +0.2 day. No new artifacts.
+
+### Next steps
+1. Route 133 got worse on shift with veh (134→146). Check whether veh_hist_ratio60 is
+   polluted by deadhead / layover links at the terminus, e.g. with a cap on link time or
+   by excluding the first link after a trip change.
+2. Vehicle-level ratio windows: 30 min and 2 h, and a count-based (last 15 links) version.
+3. Route 122: features on the path are exhausted. Look at the target side instead
+   (dwell/terminus layover at its stops, schedule headway gaps 8–10h) or accept it.
+4. A 3x-data check of sc_big_veh (`--keep-pct 3`).

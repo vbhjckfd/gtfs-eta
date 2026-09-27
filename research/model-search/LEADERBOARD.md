@@ -4,7 +4,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1v7` / `ds1shiftv7` = rebuilt in run 11 (+ V7 own previous-lap cols: lap_path_sec / cov / age, lap_fill_path_sec; MS_FEAT_DIR=ms_features_v7); baselines identical.
+Tags: `ds1v8` / `ds1shiftv8` = rebuilt in run 12 (+ V8 cols: 6 h previous lap lap6_*, vehicle-level own/hist ratio veh_hist_ratio60 / veh_hist_n60; MS_FEAT_DIR=ms_features_v8); baselines identical.
+`ds1v7` / `ds1shiftv7` = rebuilt in run 11 (+ V7 own previous-lap cols: lap_path_sec / cov / age, lap_fill_path_sec; MS_FEAT_DIR=ms_features_v7); baselines identical.
 `ds1v6` / `ds1shiftv6` = v4/v5 features rebuilt in run 8 (+ V6 current-link cols: next stop id, current-link live m5 / hist / fraction left); baselines identical.
 `ds1v5` / `ds1shiftv5` = v4 features rebuilt in run 7 (+ own-vs-hist cols); baselines identical. `ds1v5k3` = ds1v5 with train rows at 3% of snapshots (3x) instead of 1%.
 `ds1v4` / `ds1shiftv4` = same splits, features v4 (MS_FEAT_DIR=ms_features_v4: pipeline from 08-31 so the historical link table has 7-14 prior days for every train row, + day-type table, live/hist ratio, p75); baselines identical.
@@ -75,6 +76,11 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1shiftv7 | sc_big_cur | 7 | 1,978,242 | 1,424,485 | 89.5 | 44.6 | 183.9 | -17.5 | 61.7 | 125.5 | -20.8% | -23.7% | -13.3% | **yes** | as dtcat_stopcat_big + current-link live m5 / hist / fraction (already in the link store); ~2-2.5 days total |
 | ds1shiftv7 | sc_big_lap | 7 | 1,978,242 | 1,424,485 | 88.5 | 44.2 | 182.1 | -17.1 | 61.5 | 124.1 | -21.7% | -24.5% | -13.6% | **yes** | as sc_big_cur + per-vehicle last traversal of each link (3 h window; the link store already sees every traversal, keyed also by vehicle); ~2.5 days total |
 | ds1shiftv7 | sc_lap_127 | 7 | 1,978,242 | 1,424,485 | 89.4 | 44.4 | 183.1 | -18.4 | 62.8 | 124.9 | -20.9% | -24.1% | -11.8% | **yes** | as sc_big_lap at 127 leaves (current export size) |
+| ds1shiftv8 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
+| ds1shiftv8 | sc_big_lap | 7 | 1,978,242 | 1,424,485 | 88.5 | 44.2 | 182.1 | -17.1 | 61.5 | 124.1 | -21.7% | -24.5% | -13.6% | **yes** | as sc_big_cur + per-vehicle last traversal of each link (3 h window; the link store already sees every traversal, keyed also by vehicle); ~2.5 days total |
+| ds1shiftv8 | sc_big_lap6 | 7 | 1,978,242 | 1,424,485 | 88.4 | 44.2 | 182.1 | -16.9 | 61.6 | 123.7 | -21.7% | -24.5% | -13.5% | **yes** | ? |
+| ds1shiftv8 | sc_big_v8 | 7 | 1,978,242 | 1,424,485 | 87.5 | 44.0 | 180.1 | -16.1 | 60.6 | 122.6 | -22.6% | -25.3% | -14.8% | **yes** | ? |
+| ds1shiftv8 | sc_big_veh | 7 | 1,978,242 | 1,424,485 | 87.7 | 44.1 | 180.6 | -16.0 | 60.7 | 123.2 | -22.4% | -25.1% | -14.7% | **yes** | ? |
 | ds1v2 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
 | ds1v2 | m3_nocal | 42 | 2,178,139 | 1,414,363 | 98.0 | 48.8 | 198.4 | -20.7 | 68.9 | 135.8 | -11.3% | -14.1% | -5.1% | **yes** | link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
 | ds1v2 | path_own_m3 | 42 | 2,178,139 | 1,414,363 | 98.4 | 49.8 | 199.2 | -19.9 | 69.9 | 136.1 | -11.1% | -13.7% | -3.7% | **yes** | as path_own_s; store keeps last 3 traversals per link |
@@ -125,3 +131,8 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1v7 | sc_big_cur_reg | 42 | 2,178,139 | 1,414,363 | 90.1 | 43.9 | 182.9 | -15.8 | 63.5 | 125.6 | -18.5% | -20.8% | -12.5% | **yes** | as sc_big_cur |
 | ds1v7 | sc_big_lap | 42 | 2,178,139 | 1,414,363 | 88.8 | 43.6 | 180.6 | -15.0 | 63.2 | 123.6 | -19.7% | -21.8% | -12.9% | **yes** | as sc_big_cur + per-vehicle last traversal of each link (3 h window; the link store already sees every traversal, keyed also by vehicle); ~2.5 days total |
 | ds1v7 | sc_lap_127 | 42 | 2,178,139 | 1,414,363 | 89.7 | 43.6 | 181.5 | -16.6 | 64.3 | 124.5 | -18.9% | -21.4% | -11.5% | **yes** | as sc_big_lap at 127 leaves (current export size) |
+| ds1v8 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v8 | sc_big_lap | 42 | 2,178,139 | 1,414,363 | 88.8 | 43.6 | 180.6 | -15.0 | 63.2 | 123.6 | -19.7% | -21.8% | -12.9% | **yes** | as sc_big_cur + per-vehicle last traversal of each link (3 h window; the link store already sees every traversal, keyed also by vehicle); ~2.5 days total |
+| ds1v8 | sc_big_lap6 | 42 | 2,178,139 | 1,414,363 | 88.9 | 43.5 | 180.7 | -15.2 | 63.0 | 123.7 | -19.6% | -21.7% | -13.2% | **yes** | ? |
+| ds1v8 | sc_big_v8 | 42 | 2,178,139 | 1,414,363 | 87.7 | 43.2 | 179.1 | -14.4 | 62.0 | 122.4 | -20.7% | -22.4% | -14.6% | **yes** | ? |
+| ds1v8 | sc_big_veh | 42 | 2,178,139 | 1,414,363 | 87.7 | 43.3 | 179.1 | -14.0 | 62.0 | 122.3 | -20.7% | -22.4% | -14.6% | **yes** | ? |
