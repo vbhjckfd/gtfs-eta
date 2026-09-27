@@ -4,7 +4,8 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1v9` / `ds1shiftv9` = rebuilt in run 13 (+ V9 cols: network ratio net_ratio15 / net_n15, veh_hist_ratio20, clipped veh_hist_ratio60c; MS_FEAT_DIR=ms_features_v9); baselines identical. `ds1v9k3` = ds1v9 with train rows at 3% of snapshots (3x).
+Tags: `ds1v10` / `ds1shiftv10` = rebuilt in run 14 (+ V10 cols: conditional remaining dwell at the current location from prior days' stationary runs; MS_FEAT_DIR=ms_features_v10); `ds1v11` / `ds1shiftv11` = same rows + V11 add-on cols (hour-banded dwell, live same-location dwell; MS_FEAT_DIR=ms_features_v11); baselines identical.
+`ds1v9` / `ds1shiftv9` = rebuilt in run 13 (+ V9 cols: network ratio net_ratio15 / net_n15, veh_hist_ratio20, clipped veh_hist_ratio60c; MS_FEAT_DIR=ms_features_v9); baselines identical. `ds1v9k3` = ds1v9 with train rows at 3% of snapshots (3x).
 `ds1v8` / `ds1shiftv8` = rebuilt in run 12 (+ V8 cols: 6 h previous lap lap6_*, vehicle-level own/hist ratio veh_hist_ratio60 / veh_hist_n60; MS_FEAT_DIR=ms_features_v8); baselines identical.
 `ds1v7` / `ds1shiftv7` = rebuilt in run 11 (+ V7 own previous-lap cols: lap_path_sec / cov / age, lap_fill_path_sec; MS_FEAT_DIR=ms_features_v7); baselines identical.
 `ds1v6` / `ds1shiftv6` = v4/v5 features rebuilt in run 8 (+ V6 current-link cols: next stop id, current-link live m5 / hist / fraction left); baselines identical.
@@ -51,6 +52,10 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1shift | path_own_s | 7 | 1,978,242 | 1,424,485 | 102.8 | 53.6 | 214.2 | -14.8 | 69.6 | 144.0 | -9.0% | -11.2% | -2.2% | **yes** | needs serving work (link store + 5-min position ring, ~1 day), state persisted across the 5-min push-feed restarts |
 | ds1shift | path_own_s_big | 7 | 1,978,242 | 1,424,485 | 100.7 | 52.4 | 208.8 | -14.5 | 67.7 | 141.7 | -10.9% | -13.4% | -4.9% | **yes** | as path_own_s; 255-leaf trees ~2x export size |
 | ds1shift | path_own_s_drop | 7 | 1,978,242 | 1,424,485 | 104.2 | 54.5 | 216.4 | -13.7 | 71.4 | 144.9 | -7.8% | -10.3% | +0.2% | **yes** | as path_own_s; degrades less when cold |
+| ds1shiftv10 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
+| ds1shiftv10 | sc_big_dwell | 7 | 1,978,242 | 1,424,485 | 87.0 | 43.9 | 179.5 | -14.6 | 59.7 | 122.3 | -23.1% | -25.6% | -16.1% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds1shiftv10 | sc_big_dwell2 | 7 | 1,978,242 | 1,424,485 | 87.0 | 43.8 | 179.4 | -14.9 | 59.6 | 122.4 | -23.0% | -25.6% | -16.3% | **yes** | as sc_big_dwell (2 of its 5 cols) |
+| ds1shiftv10 | sc_big_veh | 7 | 1,978,242 | 1,424,485 | 87.7 | 44.1 | 180.6 | -16.0 | 60.7 | 123.2 | -22.4% | -25.1% | -14.7% | **yes** | as sc_big_lap + per-vehicle 1 h deque of (own link time, hist link time) from the same crossing events; ~2.7 days total |
 | ds1shiftv2 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
 | ds1shiftv2 | stack | 7 | 1,978,242 | 1,424,485 | 96.7 | 48.7 | 196.9 | -21.3 | 66.6 | 134.7 | -14.5% | -18.3% | -6.5% | **yes** | link store (last 5 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
 | ds1shiftv2 | stack_big | 7 | 1,978,242 | 1,424,485 | 95.9 | 48.5 | 196.1 | -20.1 | 66.0 | 133.9 | -15.1% | -18.7% | -7.2% | **yes** | as stack; 255-leaf trees ~2x export size |
@@ -86,6 +91,10 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds1shiftv9 | sc_big_net | 7 | 1,978,242 | 1,424,485 | 87.5 | 43.9 | 179.8 | -15.9 | 61.2 | 122.2 | -22.5% | -25.4% | -14.1% | **yes** | as sc_big_veh + one global 15-min ring of (link time, hist) sums |
 | ds1shiftv9 | sc_big_v9 | 7 | 1,978,242 | 1,424,485 | 87.5 | 43.9 | 179.4 | -15.8 | 61.3 | 122.2 | -22.6% | -25.6% | -13.9% | **yes** | as sc_big_net + 20 min and clipped 60 min vehicle ratios |
 | ds1shiftv9 | sc_big_veh | 7 | 1,978,242 | 1,424,485 | 87.7 | 44.1 | 180.6 | -16.0 | 60.7 | 123.2 | -22.4% | -25.1% | -14.7% | **yes** | as sc_big_lap + per-vehicle 1 h deque of (own link time, hist link time) from the same crossing events; ~2.7 days total |
+| ds1v10 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v10 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.0 | 43.1 | 178.2 | -12.6 | 60.7 | 121.6 | -21.3% | -22.8% | -16.4% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds1v10 | sc_big_dwell2 | 42 | 2,178,139 | 1,414,363 | 87.2 | 43.1 | 177.7 | -13.8 | 60.8 | 122.0 | -21.1% | -23.0% | -16.2% | **yes** | as sc_big_dwell (2 of its 5 cols) |
+| ds1v10 | sc_big_veh | 42 | 2,178,139 | 1,414,363 | 87.7 | 43.3 | 179.1 | -14.0 | 62.0 | 122.3 | -20.7% | -22.4% | -14.6% | **yes** | as sc_big_lap + per-vehicle 1 h deque of (own link time, hist link time) from the same crossing events; ~2.7 days total |
 | ds1v2 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
 | ds1v2 | m3_nocal | 42 | 2,178,139 | 1,414,363 | 98.0 | 48.8 | 198.4 | -20.7 | 68.9 | 135.8 | -11.3% | -14.1% | -5.1% | **yes** | link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
 | ds1v2 | path_own_m3 | 42 | 2,178,139 | 1,414,363 | 98.4 | 49.8 | 199.2 | -19.9 | 69.9 | 136.1 | -11.1% | -13.7% | -3.7% | **yes** | as path_own_s; store keeps last 3 traversals per link |

@@ -691,3 +691,50 @@ unchanged). run13b.sh drops the 21 live cols that neither arm uses.
    vehicle and target" count from historical dwell > 60 s.
 4. Serving: sc_big_veh is ready to hand off (≈2.7 days, see the run-12 serving estimate; timing test
    in run 11). A productionisation PR is the owner's call, not this routine's.
+
+## 2026-09-27 — run 14 (dwell at the vehicle's current location)
+
+Lock taken at 08:16 UTC. The fresh box had no deps (`pip install -e . tzdata`, as noted in run 11).
+Rebuilt DS1 with `pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21` (08:20–10:15, ~35 min
+per 4-day batch), and ran `sh research/model-search/run14.sh` (prep chain into `ms_features_v10`, then fits).
+A background loop refreshes LOCK every 50 min.
+
+Idea (run 13 next step 2, turned around): the tail is stopped vehicles, and `stationary_sec` tells the
+model how long a vehicle has been stopped, but not how long stops *at this place* usually last (a red light
+vs a terminus layover vs a timed point). New V10 cols in `features_live.py`:
+- `stationary_runs(pos)`: every stationary run of the full day, same 25 m anchor rule as
+  `labeling._stationary_seconds` (plus a break on >120 s gaps), keyed by location = (last passed stop id,
+  50 m bin of the offset past it). ~480k runs/day, median 18 s, 1.4% longer than 120 s. Saved per day as
+  `runs_<day>.parquet` next to `links_<day>.parquet`.
+- `dwell_features`: over the prior 14 days' runs at the row's location, conditional on the run lasting
+  longer than the row's current `stationary_sec` s: `dwell_rem_med` (median of D − s), `dwell_rem_p75`,
+  `dwell_p_more120` (P(D > s + 120 | D > s)), `dwell_n`, `dwell_long_share` (share of runs at the key > 120 s).
+  NaN when fewer than 5 runs survive. Coverage on 09-10: 89% of all rows; for rows stopped > 60 s, 72%
+  (47% with only one prior day); corr with the target on those rows 0.44.
+  Serving: a static table key -> sorted durations built at export (like hist_dt), one searchsorted per row.
+
+Arms: `sc_big_dwell` (sc_big_veh + all 5 cols), `sc_big_dwell2` (+ dwell_rem_med, dwell_p_more120 only).
+
+### Results (MAE / p90; Δ vs baseline, Δ vs the leader sc_big_veh)
+| arm | ds1v10 (s42) | Δbase | Δleader | ds1shiftv10 (s7) | Δbase | Δleader |
+|---|---|---|---|---|---|---|
+| baseline | 110.6 / 230.9 | | | 113.0 / 241.1 | | |
+| sc_big_veh (leader) | 87.7 / 179.1 | −20.7% | | 87.7 / 180.6 | −22.4% | |
+| **sc_big_dwell** | **87.0 / 178.2** | **−21.3%** | **−0.86%** | **87.0 / 179.5** | **−23.1%** | **−0.79%** |
+| sc_big_dwell2 | 87.2 / 177.7 | −21.1% | −0.61% | 87.0 / 179.4 | −23.0% | −0.75% |
+
+- Baselines and the leader reproduced exactly (110.6 / 113.0, 87.7 / 87.7). Rows unchanged: train
+  2.18M / 1.98M, test 1.41M / 1.42M (Sat 422k, Sun 404k, Mon 589k, Fri 599k).
+- sc_big_dwell vs the leader improves every stops_ahead bucket on both splits, most at short horizons
+  where a remaining dwell is a big part of the ETA: ds1 sa1 −2.1%, sa2 −1.4%, sa5 −0.7%, sa10 −0.5%; shift
+  sa1 −1.7%, sa10 −0.8%. Every test day improves (ds1 Sat 82.5→81.5, Sun 85.7→84.9, Mon 92.9→92.3; shift
+  Fri 92.5→91.9, Sat 82.5→81.8, Sun 85.9→85.1). Median 43.3→43.1 / 44.1→43.9, bias −14.0→−12.6 / −16.0→−14.6.
+- Route 133 on shift (the run-12 regression) 146→138; ds1 210→208. Route 122 unchanged-to-worse
+  (ds1 325→332, shift 230→234).
+- Worst routes (sc_big_dwell): ds1 122 332, 133 208, 106 161, 125 155, 129 138, 881 129, 111 129, 137 127,
+  113 126, 131 124; shift 122 234, 106 167, 125 144, 98 140, 133 138, 137 134, 111 133, 2302 130, 129 129, 88 121.
+- It is the first gain above ±0.2% since run 12; small in MAE but consistent on both splits/seeds and in
+  every bucket and day. Both fits hit the 1200-iteration cap, like the leader.
+
+**Conclusion: new leader `sc_big_dwell` (ds1 110.6→87.0, −21.3%, p90 230.9→178.2; shift 113.0→87.0,
+−23.1%, p90 241.1→179.5), −0.8% vs sc_big_veh on both splits with every bucket better.**
