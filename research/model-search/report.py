@@ -72,6 +72,9 @@ SERVING = {
     "sc_big_dwell2": "as sc_big_dwell (2 of its 5 cols)",
     "sc_big_dwell_h": "as sc_big_dwell with the table also keyed by 3-hour band",
     "sc_big_dwell_v11": "as sc_big_dwell_h + per-location ring of the last 3 live stop durations",
+    "sc_big_hw": "as sc_big_dwell + (route, dir, stop) -> last 2 arrivals dict fed by the crossing events; ~+0.2 day",
+    "sc_big_dwc": "as sc_big_dwell + stop-keyed dwell table (same export step)",
+    "sc_big_v12": "as sc_big_hw + stop-keyed dwell table",
     "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);

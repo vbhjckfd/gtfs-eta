@@ -677,3 +677,27 @@ def sc_big_dwell_v11(tr, te, seed=42):
     """sc_big_dwell_h + today's last stop durations at the same location."""
     return _stopcat_big_plus(tr, te, seed,
                              extra_num=_CUR + _LAP + _VEH + _DWELL + _DWELL_H + _DWELL_LIVE)
+
+
+# ---- run 15 add-on (V12 cols, MS_FEAT_DIR=ms_features_v12) -------------------
+_HW = ["hw_ahead_cur", "hw_ahead_tgt", "hw_ahead_prev"]
+_DWELL_C = ["dwell_c_rem_med", "dwell_c_p_more120", "dwell_c_n"]
+_LEAD = _CUR + _LAP + _VEH + _DWELL
+
+
+@arm
+def sc_big_hw(tr, te, seed=42):
+    """sc_big_dwell + same-route headway to the leader (at our last stop, at the target)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _HW)
+
+
+@arm
+def sc_big_dwc(tr, te, seed=42):
+    """sc_big_dwell + conditional remaining dwell keyed by the last passed stop only."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _DWELL_C)
+
+
+@arm
+def sc_big_v12(tr, te, seed=42):
+    """sc_big_dwell + headway + coarse dwell."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _HW + _DWELL_C)
