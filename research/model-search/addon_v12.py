@@ -62,13 +62,17 @@ def _arrivals(cross: pd.DataFrame, rd: dict) -> pd.DataFrame:
                       "t": _epoch(cross["actual_arrival"])})
     c = c.dropna(subset=["k", "t"]).sort_values(["k", "t"]).reset_index(drop=True)
     g = c.groupby("k", sort=False)
-    c["veh_p"] = g["veh"].shift(1)
-    c["t_p"] = g["t"].shift(1)
-    c["veh_p2"] = g["veh"].shift(2)
-    c["t_p2"] = g["t"].shift(2)
-    # the leader's own gap: previous other-vehicle arrival relative to this one
-    c["gap"] = np.where(c["veh_p"] != c["veh"], c["t"] - c["t_p"],
-                        np.where(c["veh_p2"] != c["veh"], c["t"] - c["t_p2"], np.nan))
+    tp1, tp2 = g["t"].shift(1), g["t"].shift(2)
+    vp1, vp2 = g["veh"].shift(1), g["veh"].shift(2)
+    # lt: the previous OTHER vehicle's arrival (the leader), lead: 1 or 2 rows back
+    lead = np.where(vp1.notna() & (vp1 != c["veh"]), 1,
+                    np.where(vp2.notna() & (vp2 != c["veh"]), 2, 0))
+    c["lt"] = np.where(lead == 1, tp1, np.where(lead == 2, tp2, np.nan))
+    gap = c["t"] - c["lt"]
+    c["gap"] = np.where(gap <= HW_WINDOW, gap, np.nan)
+    # the leader's own gap to its leader
+    c["lgap"] = np.where(lead == 1, c.groupby("k")["gap"].shift(1),
+                         np.where(lead == 2, c.groupby("k")["gap"].shift(2), np.nan))
     return c
 
 
@@ -80,14 +84,13 @@ def _last_other(arr: pd.DataFrame, keys: np.ndarray, veh: np.ndarray, tq: np.nda
     a = arr.assign(ki=allk.get_indexer(arr["k"])).sort_values("t")
     q = pd.DataFrame({"rid": np.arange(n), "ki": allk.get_indexer(pd.Series(keys, dtype=object)),
                       "veh": veh, "tq": tq}).sort_values("tq")
-    m = pd.merge_asof(q, a[["ki", "t", "veh", "t_p", "veh_p", "gap"]].rename(columns={"veh": "veh_a"}),
+    m = pd.merge_asof(q, a[["ki", "t", "veh", "lt", "gap", "lgap"]].rename(columns={"veh": "veh_a"}),
                       left_on="tq", right_on="t", by="ki", direction="backward", tolerance=HW_WINDOW)
     m = m.set_index("rid").reindex(np.arange(n))
     own = (m["veh_a"] == m["veh"]).to_numpy()
-    t_last = np.where(own, m["t_p"].to_numpy(dtype=float), m["t"].to_numpy(dtype=float))
-    # if the latest arrival is our own, the leader's gap is unknown here (would need
-    # the arrival before it); keep it simple and leave NaN
-    gap = np.where(own, np.nan, m["gap"].to_numpy(dtype=float))
+    # latest arrival is our own -> the leader is that arrival's leader
+    t_last = np.where(own, m["lt"].to_numpy(dtype=float), m["t"].to_numpy(dtype=float))
+    gap = np.where(own, m["lgap"].to_numpy(dtype=float), m["gap"].to_numpy(dtype=float))
     ok = tq - t_last <= HW_WINDOW
     return np.where(ok, t_last, np.nan), np.where(ok, gap, np.nan)
 
