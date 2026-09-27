@@ -1,0 +1,105 @@
+{
+ "n": 1414363,
+ "mae": 87.20363691922239,
+ "median_ae": 43.11284961434296,
+ "p90_ae": 177.67713578760436,
+ "bias": -13.7624103275885,
+ "mae_by_stops_ahead": {
+  "1": 60.83278443628488,
+  "2": 62.033369271336056,
+  "3": 70.78882953043197,
+  "4": 79.39442445471761,
+  "5": 87.19014841607057,
+  "6": 94.93286113590091,
+  "7": 101.05604894871709,
+  "8": 107.76355697745488,
+  "9": 114.60337710500539,
+  "10": 121.97653043876781
+ },
+ "worst_routes": {
+  "122": 325.8,
+  "133": 205.2,
+  "106": 163.3,
+  "125": 159.0,
+  "129": 134.6,
+  "111": 129.8,
+  "881": 129.3,
+  "137": 126.6,
+  "113": 126.3,
+  "131": 123.2
+ },
+ "mae_by_day": {
+  "2026-09-19": 81.7065099032901,
+  "2026-09-20": 85.09457903230518,
+  "2026-09-21": 92.58886076577875
+ },
+ "n_by_day": {
+  "2026-09-19": 422033,
+  "2026-09-20": 403501,
+  "2026-09-21": 588829
+ },
+ "arm": "sc_big_dwell2",
+ "info": {
+  "n_iter": 1200,
+  "cols": [
+   "route_id",
+   "stops_ahead",
+   "hour",
+   "is_weekend",
+   "is_holiday",
+   "remaining_dist_m",
+   "progress_speed_mps",
+   "stops_remaining",
+   "trip_progress_frac",
+   "dist_per_stop_m",
+   "speed_eta_warm",
+   "hist_speed_mps",
+   "hist_travel_time_est",
+   "stationary_sec",
+   "live_path_sec_m3",
+   "live_path_cov",
+   "live_path_age",
+   "live_speed_mps",
+   "own_speed_60",
+   "own_speed_180",
+   "own_speed_300",
+   "live_path_sec_m5",
+   "hist_path_sec",
+   "hist_path_cov",
+   "hist_path_sec_dt",
+   "cur_link_live",
+   "cur_link_hist",
+   "cur_link_frac",
+   "lap_path_sec",
+   "lap_path_cov",
+   "lap_path_age",
+   "lap_fill_path_sec",
+   "veh_hist_ratio60",
+   "veh_hist_n60",
+   "dwell_rem_med",
+   "dwell_p_more120",
+   "stop_cat"
+  ],
+  "hp": {
+   "categorical_features": [
+    0,
+    36
+   ],
+   "max_leaf_nodes": 255,
+   "min_samples_leaf": 50
+  }
+ },
+ "train_days": [
+  "2026-09-07",
+  "2026-09-18"
+ ],
+ "test_days": [
+  "2026-09-19",
+  "2026-09-20",
+  "2026-09-21"
+ ],
+ "keep_pct": 1,
+ "seed": 42,
+ "n_train": 2178139,
+ "secs": 602
+}
