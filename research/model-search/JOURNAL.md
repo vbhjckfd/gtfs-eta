@@ -738,3 +738,38 @@ Arms: `sc_big_dwell` (sc_big_veh + all 5 cols), `sc_big_dwell2` (+ dwell_rem_med
 
 **Conclusion: new leader `sc_big_dwell` (ds1 110.6→87.0, −21.3%, p90 230.9→178.2; shift 113.0→87.0,
 −23.1%, p90 241.1→179.5), −0.8% vs sc_big_veh on both splits with every bucket better.**
+
+### Add-on: V11 dwell cols (`addon_v11.py`, `run14b.sh`, tag `ds1v11`, same rows)
+`addon_v11.py` appends cols to the v10 day files (into `ms_features_v11`) without a full re-prep (~50 s/day):
+- `dwell_h_rem_med / dwell_h_p_more120 / dwell_h_n`: the V10 conditional remaining dwell keyed by
+  (location, 3-hour local band). For stopped > 60 s rows its corr with the target is 0.47 (V10: 0.44), but
+  coverage is 58% (V10: 72%).
+- `dwell_live_last / dwell_live_age / dwell_live_m3`: today's most recent completed stop (run ≥ 30 s) by any
+  vehicle at the same location, ended ≤ t − 30 s within the last hour, plus the mean of the last 3.
+  Coverage for stopped > 60 s rows is 81%, corr 0.23 / 0.28.
+
+| arm (ds1v11, s42) | MAE / p90 | Δ vs sc_big_dwell | sa1 / sa5 / sa10 Δ |
+|---|---|---|---|
+| baseline | 110.6 / 230.9 | | |
+| sc_big_dwell | 87.0 / 178.2 | (reproduced exactly) | |
+| sc_big_dwell_h | 87.1 / 177.9 | +0.19% | −0.4 / +0.2 / +0.4% |
+| sc_big_dwell_v11 | 87.1 / 177.9 | +0.13% | −0.4 / −0.0 / +0.5% |
+
+Both are noise with a slight loss, so I stopped the shift-split fits for them early (only one split
+was run, so they are not claims either way). The prior-day location table already carries the signal; hour
+banding thins it, and the last live stop at a location is mostly a different vehicle in a different phase
+(33% of live rows lack it and it correlates weakly).
+
+### Serving estimate (sc_big_dwell)
+On top of sc_big_veh (~2.7 days): at export, build location → sorted stop-duration arrays from the last
+14 days of stationary runs (from the same positions the pipeline already projects; ~10k keys/day, a few MB).
+At serving, derive the location key from the tracker's dist_along + the trip profile, then do one
+searchsorted per row against the stationary_sec the daemon already computes (`inference.stationary_seconds`).
+No new live state. About +0.3 day, so ~3 days total.
+
+### Next steps
+1. Hand-off candidate is now `sc_big_dwell`. Productionizing it is the owner's decision.
+2. Dwell family: try the location key without the 50 m bin (stop only) for more coverage, or a
+   fallback chain bin→stop. Also try conditioning on route (terminus layover lengths are route-specific).
+3. Route 122 stays the worst (230–330 s) through every feature family. Treat it as a data / target issue.
+4. If time allows, do a 3x-data check of sc_big_dwell (`--keep-pct 3` with `MS_DROP_COLS`, as in run 13).
