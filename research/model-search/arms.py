@@ -99,7 +99,10 @@ def live_all_s(tr, te, seed=42):
 
 
 def _sentinel(tr, te, cols):
-    tr, te = tr.copy(), te.copy()
+    # MS_INPLACE=1 (run 15, 3x fits): fill in place instead of copying the frames;
+    # same numbers, ~half the peak memory (the harness does not reuse these cols)
+    if not os.environ.get("MS_INPLACE"):
+        tr, te = tr.copy(), te.copy()
     for d in (tr, te):
         d[cols] = d[cols].fillna(-1.0)
     return tr, te
