@@ -7,7 +7,7 @@ feature dir). Results JSON per arm in `results/`; `report.py` regenerates
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries 1–12 are in `archive/JOURNAL-runs-1-12.md`.
 
-## State of the search (updated run 15)
+## State of the search (updated run 16)
 
 ### Protocol set-up (fixed)
 - Fresh box: `pip install -e . tzdata` (without tzdata every pipeline day fails).
@@ -80,8 +80,12 @@ Timing (run 11): 255 leaves + bitsets = 1.55 s per 3000-row batch single-threade
 - Same-route headway to the leader (at the last stop / target, leader's own gap): +0.3% (run 15).
 - Stop-keyed dwell fallback for sparse 50 m bins: +0.1% (run 15).
 
+- Longer train window (19 vs 12 days) is a data lever, not a model one: at equal rows both the baseline and
+  the leader gain ≈ 0.8–1.5%, so the leader's relative gain is unchanged (−20.7% vs −21.3%) (run 16).
+
 ### Open next steps
-1. More training days / longer window (the only lever still moving: 3x rows = −2.3 s).
+1. Longer window / more rows help both models equally (run 16), and production already trains on all days.
+   The model-side search has saturated. The remaining open item is hand-off.
 2. Route 133 trip-structure diagnostic (headway cols moved only this route).
 3. Hand-off of sc_big_dwell is the owner's call.
 
@@ -302,3 +306,54 @@ Same-route headway and the coarse dwell fallback are ruled out.**
 2. Route 133 alone: the headway cols help it (−3%). A route-133-only diagnostic of its long-horizon early bias
    would need its trip structure (timed points), not more generic features.
 3. The leader is ready for hand-off (~3 days of serving work, see the State section). Productionising is the owner's call.
+
+## 2026-09-27 — run 16 (longer training window, DS2)
+
+Lock taken at 18:17 UTC. No housekeeping was due (the journal was 304 lines, and run 16 is not a 5th run). Main was
+already merged. This run tested run-15 next step 1: is the 3x-rows gain about volume or about window length?
+
+Rebuild: `pipeline_lite.py --parallel 4 --days 2026-08-17..2026-09-21` (36 days, 18:18–~21:45). Then
+`sh research/model-search/run16.sh`, which runs the prep chain into `ms_features_v10` and then the fits. The
+09-01 prep was OOM-killed while running next to the pipeline. It was restarted in a retry wrapper, and cached days
+were skipped. The new days 08-17..08-30 mean that every day from 08-31 on has the full 14-day history table.
+`harness.py` now also takes `MS_HIST_DAYS` (default 14, so nothing changes by default).
+
+Splits, all tested on 09-19 Sat / 09-20 Sun / 09-21 Mon (1.41M rows at 3%), seed 42:
+- `ds1v10f`: ds1 (train 09-07..09-18, 1%). Its early train days now have a full 14-day history instead of 7–13 days.
+- `ds2w`: train 08-31..09-18 (19 days) at `--keep-pct 0.63`, so the row count matches ds1 (the window effect only).
+- `ds2`: the same 19 days at 1% (window plus volume).
+
+| split | train rows | baseline MAE / med / p90 / bias | sc_big_dwell MAE / med / p90 / bias | Δ | Sat / Sun / Mon (leader) |
+|---|---|---|---|---|---|
+| ds1v10f | 2.18M | 110.6 / 56.0 / 230.9 / −28.2 | 87.0 / 43.2 / 178.2 / −12.1 | −21.3% | 81.4 / 85.0 / 92.4 |
+| ds2w | 2.13M | 108.9 / 54.3 / 227.7 / −31.0 | 86.3 / 43.0 / 177.3 / −11.8 | −20.7% | 80.2 / 83.4 / 92.7 |
+| ds2 | 3.37M | 107.4 / 53.6 / 224.3 / −31.1 | 85.3 / 42.5 / 175.1 / −13.2 | −20.5% | 79.2 / 82.7 / 91.5 |
+| (run 15, ds1 3x) | 6.51M | 108.1 / 54.4 / 226.9 | 84.7 / 42.1 / 173.3 | −21.7% | 78.7 / 83.0 / 90.1 |
+
+The leader's stops_ahead values are sa1 / sa5 / sa10: 60.6 / 87.0 / 122.0 (ds1v10f), 59.9 / 86.2 / 120.8 (ds2w),
+59.3 / 85.3 / 119.4 (ds2). Every protocol check passes on every split (the worst bucket is −16%).
+- A full history for the early train days changes nothing (87.01 vs 87.0; the baseline is identical, since it has no
+  history features). The run 1–15 ds1 numbers are therefore not biased by the truncated history.
+- A longer window at the same row count helps both models: the baseline by −1.5%, the leader by −0.8%. The gain is
+  almost entirely on weekends (the leader goes Sat 81.4→80.2, Sun 85.0→83.4, Mon 92.4→92.7), because 19 days hold
+  6 weekend days where 12 days hold 4. Adding rows on top (ds2) gains another ~1.1%. Per training row, 3x rows over
+  12 days (84.7) beats 1.6x rows over 19 days (85.3) only slightly.
+- The leader's relative gain is stable across window and volume (−20.5% to −21.7%), so it is not an artefact of a
+  short window.
+- Route 133 gets *worse* for the leader with the longer window (206 → 222 at equal rows, 209 at ds2), while the
+  baseline improves there (278 → 248). This fits a route whose behaviour changed during late August.
+  Worst routes for the leader on ds2: 122 333, 133 209, 125 150, 106 147, 129 136, 881 128, 111 128, 137 125,
+  113 121, 131 120.
+
+**Conclusion: no new model candidate. sc_big_dwell stays the leader, and its gain holds with a 19-day window.
+A longer window and more rows are data levers that help both models about equally. Production already trains on
+all available days, so there is nothing to hand off from this run beyond the confirmation.**
+
+### Next steps
+1. The model-side search has saturated: the last five runs landed within ±0.3%, except dwell at −0.8%. Unless the
+   owner wants specific directions, the most useful remaining work is hand-off support for sc_big_dwell (a serving
+   prototype behind a flag in research/, with the timing checked against the live daemon cycle). That is a
+   code-change decision for the owner.
+2. Route 133: check the operator's schedule or trip changes around late August (the longer window hurts it).
+3. If the search continues, try `MS_HIST_DAYS=28` for the historical link and dwell tables. The DS2 days make that
+   possible for test days from 09-14 on (prep into a separate feature dir with the links_/runs_ files symlinked).
