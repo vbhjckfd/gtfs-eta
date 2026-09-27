@@ -26,8 +26,8 @@ Full run entries 1–12 are in `archive/JOURNAL-runs-1-12.md`.
 
 ### Current leader: `sc_big_dwell` (run 14) — WIN on both splits/seeds
 ds1 110.6 → 87.0 (−21.3%), p90 230.9 → 178.2; shift 113.0 → 87.0 (−23.1%), p90 241.1 → 179.5;
-every stops_ahead bucket better (ds1 sa1 72.6→60.7, sa10 153.5→121.6). At 3x train data the
-previous leader sc_big_veh gains another 2.3 s (85.4 vs baseline 108.1, −21.0%).
+every stops_ahead bucket better (ds1 sa1 72.6→60.7, sa10 153.5→121.6). Confirmed at 3x train data
+(run 15, `ds1v12k3`): 108.1 → 84.7 (−21.7%), p90 226.9 → 173.3.
 Recipe (arms.py `sc_big_dwell`): production FEATURE_COLS − {month, day_of_week, stop_sequence},
 route_id and target-stop code (top-254 stops) as native categoricals, 255 leaves /
 min_samples_leaf 50, lr 0.05, 1200 iters (cap binds), sentinel −1 for missing live values, plus:
@@ -77,10 +77,13 @@ Timing (run 11): 255 leaves + bitsets = 1.55 s per 3000-row batch single-threade
 - Route 122 (230–330 s): data-sparse (2 vehicles, 43% live coverage, long links); untouched by
   every feature family; more training data helps it most (3x: 325→296). Treat as data issue.
 
+- Same-route headway to the leader (at the last stop / target, leader's own gap): +0.3% (run 15).
+- Stop-keyed dwell fallback for sparse 50 m bins: +0.1% (run 15).
+
 ### Open next steps
-1. Same-route headway / bunching cols (run 15, see below).
-2. 3x-data confirmation of the leader (`--keep-pct 3` with `MS_DROP_COLS`, ~30 min per fit).
-3. Dwell: coarser fallback key when the 50 m bin has < 5 runs.
+1. More training days / longer window (the only lever still moving: 3x rows = −2.3 s).
+2. Route 133 trip-structure diagnostic (headway cols moved only this route).
+3. Hand-off of sc_big_dwell is the owner's call.
 
 ## 2026-09-27 — run 13 (network-wide ratio, short / clipped vehicle ratios)
 
@@ -234,3 +237,68 @@ No new live state. About +0.3 day, so ~3 days total.
    fallback chain bin→stop. Also try conditioning on route (terminus layover lengths are route-specific).
 3. Route 122 stays the worst (230–330 s) through every feature family. Treat it as a data / target issue.
 4. If time allows, do a 3x-data check of sc_big_dwell (`--keep-pct 3` with `MS_DROP_COLS`, as in run 13).
+
+## 2026-09-27 — run 15 (housekeeping; same-route headway, coarse dwell; 3x check of the leader)
+
+Lock taken at 13:17 UTC. First did housekeeping (JOURNAL > 400 lines): runs 1–12 moved to
+`archive/JOURNAL-runs-1-12.md`, a "State of the search" section added, `report.py` now writes
+LEADERBOARD.md for the current tags and `archive/LEADERBOARD-old.md` for the rest, and the old
+`runNN.sh` scripts were replaced by one parameterised `run.sh`. Arms/feature code was not pruned:
+nothing in arms.py has lost twice. Most arms ran on one split only, or lost only against a leader.
+
+Rebuild: `pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21` (13:18–15:45), then
+```
+RUN=15 PREP_DIR=ms_features_v10 FEAT_DIR=ms_features_v12 ADDON=addon_v12.py TAG=v12 \
+  ARMS_A="baseline sc_big_dwell sc_big_hw sc_big_dwc sc_big_v12" ARMS_B="..." sh research/model-search/run.sh
+```
+(the prep chain into v10, then `addon_v12.py` into v12, about 1 min/day). A smoke test of the add-on while the pipeline
+was running got the 09-01 prep OOM-killed. The chain was restarted and cached days were skipped. Don't run
+anything heavy next to pipeline_lite.
+
+New V12 cols (`addon_v12.py`, appended to the v10 day files):
+- `hw_ahead_cur`: seconds since the previous *other* vehicle of the same route+direction arrived at the stop this
+  vehicle passed last (gap to the leader). `hw_ahead_tgt` is the same measured at the target stop. `hw_ahead_prev`
+  is the leader's own gap to its leader (regularity). Only crossings at or before t − 30 s within 2 h are used.
+  Coverage is 91–93% / 96–98% / 88–92%. The median gap is ~800 s on weekdays and ~970 s at weekends.
+  Serving would be a (route, dir, stop) → last 2 arrivals dict.
+- `dwell_c_*`: the V10 conditional remaining dwell keyed by the last passed stop only, as a fallback.
+  Coverage of stopped > 60 s rows goes from 0.64–0.78 (V10) to 0.77–0.88.
+
+### Results (ds1v12, seed 42; Δ vs the leader sc_big_dwell)
+| arm | MAE / median / p90 | Δleader | sa1 / sa5 / sa10 Δ | Sat / Sun / Mon |
+|---|---|---|---|---|
+| baseline | 110.6 / 56.0 / 230.9 | | | 100.2 / 107.1 / 120.5 |
+| sc_big_dwell (leader, reproduced exactly) | 87.0 / 43.1 / 178.2 | | | 81.5 / 84.9 / 92.3 |
+| sc_big_hw (+ headway) | 87.2 / 43.1 / 178.1 | +0.30% | +0.3 / +0.1 / +0.3% | 81.7 / 85.3 / 92.6 |
+| sc_big_dwc (+ coarse dwell) | 87.1 / 43.1 / 178.2 | +0.11% | −0.1 / −0.0 / +0.3% | 81.5 / 85.1 / 92.4 |
+| sc_big_v12 (both) | 87.3 / 43.1 / 178.2 | +0.33% | +0.2 / +0.3 / +0.5% | 81.7 / 85.1 / 92.7 |
+
+Rows: train 2.18M, test 1.41M. All three arms are a small loss, so I skipped the shift-split fits (no claim either way).
+Headway was the one family the search had not tried at route level (run 1 tried "any vehicle at the target").
+It does move route 133 (208 → 204 / 201 with v12), but it costs elsewhere. The live link store already sees the
+leader's traversals, so the gap itself carries no extra information. The coarse dwell key adds coverage but no
+accuracy: the rows that lack a 50 m-bin table are the rarely-stopped ones.
+
+### Scale check: 3x training rows (tag `ds1v12k3`, `--keep-pct 3`, 6.51M train rows, seed 42)
+At 3x, sc_big_dwell was first OOM-killed. `_sentinel` copied both whole frames, so `MS_INPLACE=1` now
+fills in place instead. The numbers are identical and the peak memory is ~8 GB. `run15b.sh` has the command.
+| arm | MAE / median / p90 | Δbase | sa1 / sa5 / sa10 | Sat / Sun / Mon | fit |
+|---|---|---|---|---|---|
+| baseline | 108.1 / 54.4 / 226.9 | | 70.4 / 109.7 / 149.9 | 96.8 / 106.3 / 117.4 | 21 min |
+| **sc_big_dwell** | **84.7 / 42.1 / 173.3** | **−21.7%** | 58.6 / 84.7 / 118.7 | 78.7 / 83.0 / 90.1 | 31 min |
+- The baseline reproduces run 13's 3x number exactly. The leader at 3x beats the 3x sc_big_veh (85.4) by 0.8%,
+  the same margin as at 1%. So the dwell gain holds with more data, and the relative gain grows slightly
+  (−21.3% → −21.7%, p90 −23.6%, worst bucket −16.8%). Bias is −13.4 (baseline −27.5).
+- Worst routes at 3x: 122 305, 133 211, 125 153, 106 149, 129 144, 881 124, 111 124, 137 123, 113 121, 131 118.
+
+**Conclusion: no new leader. sc_big_dwell stays, now also confirmed at 3x data (108.1 → 84.7, −21.7%).
+Same-route headway and the coarse dwell fallback are ruled out.**
+
+### Next steps
+1. Feature families on the path, the vehicle state, the location dwell and the headway are all saturated (±0.3%).
+   Remaining levers: training volume/days (3x = −2.3 s; prod trains on more days at 100%), and a longer
+   training window. A DS2 with 4 weeks of train days (from 2026-08-17, still ≥ 2026-07-31) would test the
+   second, but the rebuild takes ~2x as long (~4 h at `--parallel 4`), so it needs a run with nothing else in it.
+2. Route 133 alone: the headway cols help it (−3%). A route-133-only diagnostic of its long-horizon early bias
+   would need its trip structure (timed points), not more generic features.
+3. The leader is ready for hand-off (~3 days of serving work, see the State section). Productionising is the owner's call.
