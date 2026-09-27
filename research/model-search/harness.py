@@ -108,11 +108,14 @@ def prep_day(day: str, keep_pct: float, client=None) -> Path:
     d0 = date.fromisoformat(day)
     prior = [pd.read_parquet(fp) for k in range(1, HIST_DAYS + 1)
              if (fp := FEAT_DIR / f"links_{(d0 - timedelta(days=k)).isoformat()}.parquet").exists()]
-    lo = []
+    prior_runs = [pd.read_parquet(fp) for k in range(1, HIST_DAYS + 1)
+                  if (fp := FEAT_DIR / f"runs_{(d0 - timedelta(days=k)).isoformat()}.parquet").exists()]
+    lo, ro = [], []
     live = live_features(cross, pos, raw.iloc[idx].reset_index(drop=True), gtfs,
-                         prior_links=prior, links_out=lo)
+                         prior_links=prior, links_out=lo, prior_runs=prior_runs, runs_out=ro)
     FEAT_DIR.mkdir(parents=True, exist_ok=True)
     lo[0].to_parquet(FEAT_DIR / f"links_{day}.parquet", index=False)
+    ro[0].to_parquet(FEAT_DIR / f"runs_{day}.parquet", index=False)
     for c in live.columns:
         feats[c] = live[c].to_numpy()
     FEAT_DIR.mkdir(parents=True, exist_ok=True)

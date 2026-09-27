@@ -80,6 +80,15 @@ LAP6_WINDOW_SEC = 21600
 # 20 min, and a 60 min vehicle-level ratio with each link clipped to
 # [hist/3, 3*hist] so a terminus layover can't dominate it.
 V9_COLS = ["net_ratio15", "net_n15", "veh_hist_ratio20", "veh_hist_ratio60c"]
+# run 14: dwell at the vehicle's CURRENT location (the tail is stopped vehicles;
+# stationary_sec says how long it has been stopped, not how long it will stay).
+# From prior days' stationary runs (same 25 m anchor rule as labeling) keyed by
+# (last passed stop, 50 m offset bin): conditional median remaining dwell given
+# the run so far, P(run > s + 120 | run > s), and the key's share of long (>120 s)
+# stops. Static artifact at serving (key -> sorted run durations), like hist_dt.
+V10_COLS = ["dwell_rem_med", "dwell_rem_p75", "dwell_p_more120", "dwell_n", "dwell_long_share"]
+DWELL_BIN_M = 50.0
+DWELL_MIN_N = 5
 VEH_WINDOW_SEC = 3600
 OWN_WINDOW_SEC = 1800
 
@@ -148,9 +157,91 @@ def hist_table(prior_links: list[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFr
     return g, k
 
 
+def _loc_keys(profs, trip_ids, d):
+    """(last passed stop id, 50 m bin of the offset past it) per position."""
+    out = np.full(len(d), "", dtype=object)
+    for tid, ix in pd.Series(np.arange(len(d))).groupby(trip_ids, sort=False):
+        if tid not in profs:
+            continue
+        dists, sids = profs[tid]
+        ix = ix.to_numpy()
+        a = np.clip(np.searchsorted(dists, d[ix], side="right"), 1, len(dists)) - 1
+        off = np.maximum(d[ix] - dists[a], 0.0) // DWELL_BIN_M
+        sid = np.asarray(sids, dtype=object)[a]
+        out[ix] = sid + "@" + off.astype(int).astype(str)
+    return out
+
+
+def stationary_runs(pos: pd.DataFrame, profs) -> pd.DataFrame:
+    """Full-day stationary runs (labeling._stationary_seconds anchor rule):
+    key = location of the anchor, D = seconds from anchor to the last snapshot
+    before the vehicle advances > 25 m (runs of 0 s dropped)."""
+    p = pd.DataFrame({"vt": pos["vehicle_id"].astype(str).to_numpy() + "|" + pos["trip_id"].astype(str).to_numpy(),
+                      "tid": pos["trip_id"].to_numpy(), "t": _epoch(pos["snapshot_ts"]),
+                      "d": pos["dist_along_m"].to_numpy(dtype=float)}
+                     ).drop_duplicates(["vt", "t"]).sort_values(["vt", "t"]).reset_index(drop=True)
+    vt = p["vt"].to_numpy()
+    t = p["t"].to_numpy()
+    d = p["d"].to_numpy()
+    anc = np.empty(len(p), dtype=np.int64)
+    a = 0
+    for i in range(len(p)):
+        if i == 0 or vt[i] != vt[i - 1] or d[i] - d[a] > 25.0 or t[i] - t[i - 1] > 120:
+            a = i
+        anc[i] = a
+    last = np.r_[anc[1:] != anc[:-1], True]
+    ai = anc[last]
+    D = t[last] - t[ai]
+    ok = D > 0
+    ai, D = ai[ok], D[ok]
+    keys = _loc_keys(profs, p["tid"].to_numpy()[ai], d[ai])
+    r = pd.DataFrame({"key": keys, "t": t[ai], "D": D})
+    return r[r["key"] != ""].reset_index(drop=True)
+
+
+def dwell_features(prior_runs: list[pd.DataFrame], keys: np.ndarray, s: np.ndarray) -> pd.DataFrame:
+    """Conditional remaining dwell at key given s seconds already stopped."""
+    n = len(keys)
+    out = pd.DataFrame({c: np.full(n, np.nan) for c in V10_COLS})
+    if not prior_runs:
+        return out
+    R = pd.concat(prior_runs, ignore_index=True)
+    kidx = pd.Index(pd.unique(R["key"]))
+    kc = kidx.get_indexer(R["key"]).astype(np.int64)
+    Dv = R["D"].to_numpy(dtype=float)
+    o = np.lexsort((Dv, kc))
+    kc, Dv = kc[o], Dv[o]
+    comb = kc * 1e6 + Dv
+    starts = np.searchsorted(kc, np.arange(len(kidx)), side="left")
+    ends = np.searchsorted(kc, np.arange(len(kidx)), side="right")
+    long_share = np.add.reduceat((Dv > 120).astype(float), starts) / np.maximum(ends - starts, 1) \
+        if len(kidx) else np.array([])
+    qk = kidx.get_indexer(pd.Series(keys, dtype=object))
+    have = qk >= 0
+    ss = np.nan_to_num(s.astype(float), nan=0.0)
+    qki = np.where(have, qk, 0)
+    lo = np.searchsorted(comb, qki * 1e6 + ss, side="right")
+    hi = ends[qki] if len(kidx) else np.zeros(n, int)
+    m = np.where(have, hi - lo, 0)
+    ok = m >= DWELL_MIN_N
+    safe = lambda i: Dv[np.clip(i, 0, len(Dv) - 1)]
+    med = safe(lo + (m - 1) // 2) - ss
+    p75 = safe(lo + (3 * (m - 1)) // 4) - ss
+    lo2 = np.searchsorted(comb, qki * 1e6 + ss + 120, side="right")
+    pm = (hi - lo2) / np.maximum(m, 1)
+    out["dwell_rem_med"] = np.where(ok, med, np.nan)
+    out["dwell_rem_p75"] = np.where(ok, p75, np.nan)
+    out["dwell_p_more120"] = np.where(ok, pm, np.nan)
+    out["dwell_n"] = m.astype(float)
+    out["dwell_long_share"] = np.where(have, long_share[qki] if len(kidx) else np.nan, np.nan)
+    return out
+
+
 def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
                   gtfs, prior_links: list[pd.DataFrame] | None = None,
-                  links_out: list | None = None) -> pd.DataFrame:
+                  links_out: list | None = None,
+                  prior_runs: list[pd.DataFrame] | None = None,
+                  runs_out: list | None = None) -> pd.DataFrame:
     """cross/pos: full-day side tables from pipeline_lite; rows: sampled rows."""
     arr_t = _epoch(cross["actual_arrival"])
     rows_t = _epoch(rows["snapshot_ts"])
@@ -418,6 +509,16 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     out["net_ratio15"] = np.where(nb > 0, (ga[i1] - ga[i0]) / np.where(nb > 0, nb, 1), np.nan)
     out["net_n15"] = gn[i1] - gn[i0]
 
+    # ---- run 14: dwell at the current location ----------------------------
+    if runs_out is not None:
+        runs_out.append(stationary_runs(pos, profs))
+    rkeys = _loc_keys(profs, rt, dv)
+    stat = (rows["stationary_sec"].to_numpy(dtype=float) if "stationary_sec" in rows.columns
+            else np.zeros(n))
+    dw = dwell_features(prior_runs or [], rkeys, stat)
+    for c in V10_COLS:
+        out[c] = dw[c].to_numpy()
+
     # ---- time since any vehicle last arrived at the target stop ------------
     st = cr[["stop_id", "t"]].rename(columns={"t": "ta"}).sort_values("ta")
     q = pd.DataFrame({"rid": np.arange(n), "stop_id": rows["stop_id"].astype(str).to_numpy(),
@@ -445,4 +546,4 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         el = mm["t"] - mm["tp"]
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
-    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS + V7_COLS + V8_COLS + V9_COLS].reset_index(drop=True)
+    return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS + V7_COLS + V8_COLS + V9_COLS + V10_COLS].reset_index(drop=True)

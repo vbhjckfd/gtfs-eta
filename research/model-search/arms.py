@@ -642,3 +642,20 @@ def sc_big_net(tr, te, seed=42):
 def sc_big_v9(tr, te, seed=42):
     """sc_big_net + 20 min and clipped 60 min vehicle-level ratios."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH + _NET + _VEH2)
+
+
+# ---- run 14 (V10 cols: dwell at the vehicle's current location) -------------
+_DWELL = ["dwell_rem_med", "dwell_rem_p75", "dwell_p_more120", "dwell_n", "dwell_long_share"]
+
+
+@arm
+def sc_big_dwell(tr, te, seed=42):
+    """sc_big_veh + historical conditional remaining dwell at the current location."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH + _DWELL)
+
+
+@arm
+def sc_big_dwell2(tr, te, seed=42):
+    """sc_big_veh + remaining-dwell median and P(>120 s more) only."""
+    return _stopcat_big_plus(tr, te, seed,
+                             extra_num=_CUR + _LAP + _VEH + ["dwell_rem_med", "dwell_p_more120"])
