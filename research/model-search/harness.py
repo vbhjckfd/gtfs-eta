@@ -126,8 +126,10 @@ PREP_PCT = 3.0   # every day is prepped once at this rate; runs subsample it
 
 
 def load_days(days: list[str], keep_pct: float) -> pd.DataFrame:
-    df = pd.concat([pd.read_parquet(feat_path(d, PREP_PCT)) for d in days],
-                   ignore_index=True)
+    # MS_DROP_COLS: comma-separated feature columns to skip at load (memory for 3x fits)
+    drop = [c for c in os.environ.get("MS_DROP_COLS", "").split(",") if c]
+    df = pd.concat([pd.read_parquet(feat_path(d, PREP_PCT)).drop(columns=drop, errors="ignore")
+                    for d in days], ignore_index=True)
     if keep_pct < PREP_PCT:
         key = pd.util.hash_pandas_object(
             df[["vehicle_id", "snapshot_ts"]].astype(str), index=False).to_numpy()

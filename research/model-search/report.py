@@ -63,6 +63,11 @@ SERVING = {
     "dtcat_big": "as stack_hist_dt_cat; 255-leaf trees ~2x export size",
     "dtcat_resid": "as stack_hist_dt_cat + add base ETA to tree output",
     "dtcat_logratio": "as dtcat_resid (exp transform)",
+    "sc_big_lap6": "as sc_big_lap (6 h window)",
+    "sc_big_veh": "as sc_big_lap + per-vehicle 1 h deque of (own link time, hist link time) from the same crossing events; ~2.7 days total",
+    "sc_big_v8": "as sc_big_veh + 6 h lap window",
+    "sc_big_net": "as sc_big_veh + one global 15-min ring of (link time, hist) sums",
+    "sc_big_v9": "as sc_big_net + 20 min and clipped 60 min vehicle ratios",
     "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
 HEAD = """# Leaderboard
@@ -71,7 +76,9 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 (day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
-Tags: `ds1v7` / `ds1shiftv7` = rebuilt in run 11 (+ V7 own previous-lap cols: lap_path_sec / cov / age, lap_fill_path_sec; MS_FEAT_DIR=ms_features_v7); baselines identical.
+Tags: `ds1v9` / `ds1shiftv9` = rebuilt in run 13 (+ V9 cols: network ratio net_ratio15 / net_n15, veh_hist_ratio20, clipped veh_hist_ratio60c; MS_FEAT_DIR=ms_features_v9); baselines identical. `ds1v9k3` = ds1v9 with train rows at 3% of snapshots (3x).
+`ds1v8` / `ds1shiftv8` = rebuilt in run 12 (+ V8 cols: 6 h previous lap lap6_*, vehicle-level own/hist ratio veh_hist_ratio60 / veh_hist_n60; MS_FEAT_DIR=ms_features_v8); baselines identical.
+`ds1v7` / `ds1shiftv7` = rebuilt in run 11 (+ V7 own previous-lap cols: lap_path_sec / cov / age, lap_fill_path_sec; MS_FEAT_DIR=ms_features_v7); baselines identical.
 `ds1v6` / `ds1shiftv6` = v4/v5 features rebuilt in run 8 (+ V6 current-link cols: next stop id, current-link live m5 / hist / fraction left); baselines identical.
 `ds1v5` / `ds1shiftv5` = v4 features rebuilt in run 7 (+ own-vs-hist cols); baselines identical. `ds1v5k3` = ds1v5 with train rows at 3% of snapshots (3x) instead of 1%.
 `ds1v4` / `ds1shiftv4` = same splits, features v4 (MS_FEAT_DIR=ms_features_v4: pipeline from 08-31 so the historical link table has 7-14 prior days for every train row, + day-type table, live/hist ratio, p75); baselines identical.
