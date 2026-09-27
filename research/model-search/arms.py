@@ -659,3 +659,21 @@ def sc_big_dwell2(tr, te, seed=42):
     """sc_big_veh + remaining-dwell median and P(>120 s more) only."""
     return _stopcat_big_plus(tr, te, seed,
                              extra_num=_CUR + _LAP + _VEH + ["dwell_rem_med", "dwell_p_more120"])
+
+
+# ---- run 14 add-on (V11 cols, MS_FEAT_DIR=ms_features_v11) -------------------
+_DWELL_H = ["dwell_h_rem_med", "dwell_h_p_more120", "dwell_h_n"]
+_DWELL_LIVE = ["dwell_live_last", "dwell_live_age", "dwell_live_m3"]
+
+
+@arm
+def sc_big_dwell_h(tr, te, seed=42):
+    """sc_big_dwell + remaining dwell keyed by location x 3-hour band."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH + _DWELL + _DWELL_H)
+
+
+@arm
+def sc_big_dwell_v11(tr, te, seed=42):
+    """sc_big_dwell_h + today's last stop durations at the same location."""
+    return _stopcat_big_plus(tr, te, seed,
+                             extra_num=_CUR + _LAP + _VEH + _DWELL + _DWELL_H + _DWELL_LIVE)
