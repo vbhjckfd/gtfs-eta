@@ -5,9 +5,9 @@ Harness: `harness.py` (prep/run), arms in `arms.py`, live features in
 `features_live.py` (+ add-on scripts `addon_v*.py` that append cols to an existing
 feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed by `name` = arm_tag_sSEED; written by `harness.save_result`, run 20 replaced the per-fit `results/*.json` files); `report.py` regenerates
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
-Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOURNAL-runs-13-16.md`, `archive/JOURNAL-runs-17-17.md`.
+Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOURNAL-runs-13-16.md`, `archive/JOURNAL-runs-17-18.md`.
 
-## State of the search (updated run 19)
+## State of the search (updated run 20)
 
 ### Protocol set-up (fixed)
 - Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
@@ -103,62 +103,22 @@ so only viable with vectorised/compiled serving or smaller batches. Not recommen
   path cols can't be constrained (−1 sentinel).
 
 - Recency weighting inside the 14-day tables (last 3 or 7 prior days counted twice): +0.14% / +0.11% (run 19).
+- Dropping the production hour sample weights from the leader (`sc_big_nw`): −0.07% / −0.11% (run 20). Neutral, so
+  production can keep or drop them.
+- Trip-keyed holds (`sc_big_hold`, V13: trip × location remaining dwell + prior days' holds between here and the target):
+  −0.02% (ds1) / −0.52% (shift) (run 20). Helps only where it applies (6–11% of rows, −0.7 to −1.4% there). Routes 133
+  and 122 barely move: their timetabled breaks are real, but the recurring trip ids are too new (133 since 09-16).
 
 ### Open next steps
-1. Longer window / more rows help both models equally (run 16), and production already trains on all days.
-   The model-side search has saturated (capacity −0.5% at 2.6x measured serving cost, run 18/19; table recency
-   ±0.1%, run 19). The remaining open item is hand-off.
-2. Route 133 trip-structure diagnostic (headway cols moved only this route).
-3. Hand-off of sc_big_dwell is the owner's call. Keep the 14-day lookback for its static tables (run 17).
-
-## 2026-09-28 — run 18 (housekeeping; monotone constraints, tree capacity)
-
-Lock taken at 04:17 UTC. Housekeeping was due (journal 401 lines), commit "model-search: housekeeping": runs 13–16
-moved to `archive/JOURNAL-runs-13-16.md`; LEADERBOARD.md shows the current tags only (old tag definitions now in
-`archive/LEADERBOARD-old.md`, written by report.py); run13/13b/14/14b/15b.sh deleted; arms that lost on both splits
-removed (sc_big_net, sc_big_v9, sc_big_lap6, sc_big_v8, sc_lap_127, sc_big_nxt, path_own_s_drop(_cold)), plus the
-lap6_* and V9 cols in features_live.py. The leader's cols are untouched, and it reproduced exactly afterwards.
-
-Rebuild: `pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21` (04:18–~06:40), then `sh research/model-search/run18.sh`
-(prep chain into `ms_features_v10`, tag `v18`; the 09-06 prep was OOM-killed next to the pipeline, and the retry
-wrapper resumed with cached days skipped). Follow-up fits with
-`ARMS_A=... ARMS_B=... PREP_DIR= FEAT_DIR=ms_features_v10 RUN=18 TAG=v18 sh research/model-search/run.sh`.
-
-Arms (arms.py, no new cols; all = sc_big_dwell's features):
-- `sc_big_mono`: `monotonic_cst` +1 on remaining_dist_m, stops_ahead, speed_eta_warm, hist_travel_time_est
-  (the never-missing ones; the −1 sentinel rules out the live/hist path cols).
-- `sc_big_511`: 511 leaves, min_samples_leaf 100. `sc_big_it2k`: max_iter 2400. `sc_big_511_it2k`: both.
-
-### Results (MAE / median / p90 / bias; Δ vs the leader sc_big_dwell; rows train 2.18M / 1.98M, test 1.41M / 1.42M)
-| arm | ds1v18 (s42) | ΔL | sa1 / sa5 / sa10 | ds1shiftv18 (s7) | ΔL | sa1 / sa5 / sa10 | iters, fit |
-|---|---|---|---|---|---|---|---|
-| baseline | 110.6 / 56.0 / 230.9 / −28.2 | | 72.6 / 112.0 / 153.5 | 113.0 / 59.5 / 241.1 / −14.2 | | 71.2 / 114.3 / 159.7 | 1200, 7 min |
-| sc_big_dwell | 87.0 / 43.1 / 178.2 / −12.6 | | 60.7 / 87.1 / 121.6 | 87.0 / 43.9 / 179.5 / −14.6 | | 59.7 / 87.1 / 122.3 | 1200, 12 min |
-| sc_big_mono | 87.2 / 43.2 / 178.1 / −13.2 | +0.24% | 61.0 / 87.1 / 121.7 | — | | | 1200, 12 min |
-| sc_big_511 | 86.7 / 43.1 / 177.4 / −12.7 | −0.28% | 60.3 / 86.8 / 121.4 | 86.5 / 43.8 / 178.7 / −14.4 | −0.51% | 59.1 / 86.7 / 122.0 | 1200, 14 min |
-| sc_big_it2k | 86.7 / 43.0 / 177.9 / −11.9 | −0.32% | 60.3 / 86.8 / 121.3 | 86.6 / 43.9 / 179.2 / −13.9 | −0.37% | 59.3 / 86.8 / 121.9 | 2400, 21 min |
-| sc_big_511_it2k | 86.5 / 43.1 / 177.3 / −11.6 | −0.51% | 59.9 / 86.6 / 121.2 | 86.4 / 43.8 / 178.8 / −13.8 | −0.62% | 59.0 / 86.6 / 121.8 | 2400, 25 min |
-
-- Baseline and leader reproduced exactly (110.6 / 113.0; 87.0 / 87.0).
-- Monotone constraints lose a little (sa1 +0.6%); the trees already learn the monotone shape, the constraint only
-  blocks useful local splits.
-- Capacity helps a little and consistently: every bucket (−0.3% to −1.3%), every test day (ds1 Sat 81.5→81.1,
-  Sun 84.9→84.5, Mon 92.3→91.8; shift Fri 91.9→91.2, Sat 81.8→81.2, Sun 85.1→84.8), p90 not worse. The 2400 cap
-  binds again, so the recipe is still under-fit at lr 0.05 on 2.2M rows. vs baseline: −21.8% / −23.5%.
-- Worst routes (511_it2k): ds1 122 327, 133 210, 106 162, 125 155, 129 137, 137 129, 881 128, 111 127, 131 124,
-  113 124; shift 122 241, 106 164, 125 142, 98 137, 133 137, 137 132, 111 132, 2302 129, 129 128, 88 120.
-
-**Conclusion: no new leader under the protocol (needs ≥ 3% vs the current best to be worth a notification; this is
-−0.5 to −0.6%). `sc_big_511_it2k` is recorded as a capacity option: the same serving work as sc_big_dwell plus ~2x
-trees and ~2x leaves (≈ 3 s per 3000-row batch single-threaded from the run-11 timing, still inside the 10 s cycle
-but with less headroom; export ≈ 4x, ~120 MB). Monotone constraints are ruled out.**
-
-### Next steps
-1. Search is saturated on features, lookbacks and now capacity. The useful next step is hand-off of sc_big_dwell,
-   which is the owner's call; if headroom allows, serve the 511/2400 variant.
-2. If the search continues: time the 511/2400 export with `timing.py` (the run-11 script) to replace the 2x
-   estimate with a measurement; and a 3x-rows check of sc_big_511_it2k (capacity may pay more with more rows).
-
+1. The model-side search has saturated: runs 16–20 all land within ±0.6% of sc_big_dwell (capacity, lookback,
+   recency, weights, trip-keyed holds). The open item is hand-off of sc_big_dwell, which is the owner's call. Keep
+   the 14-day lookback for its static tables (run 17).
+2. Routes 133 / 122 (run 20 diagnostic, `diag_route.py` + `diag_holds.py`): 1–2 vehicles each. 62% / 45% of their
+   error sits in rows where the actual time exceeds the historical path by > 300 s. These are driver breaks
+   at a fixed place and clock time on weekdays (133: 400 m into the trip at ~10:03 / ~12:15 / ~15:45 since
+   09-16; 122: ~12:45 at 2.7 km, ~09:30 at 900 m). A table keyed by trip id needs weeks of history for
+   these trips. If `sc_big_hold` is ever retried, use a day set ending ≥ 3 weeks after 09-16. Better still,
+   get the break times from the operator.
 
 ## 2026-09-28 — run 19 (recency-weighted history tables; measured serving cost of the capacity variant)
 
@@ -210,3 +170,65 @@ the hand-off candidate.** No notification (no protocol win).
    folding run19.sh's re-prep loop into run.sh as a `VARIANT_ENV` option (run 17 and run 19 repeat the same pattern).
 3. If hourly runs continue without a hand-off, consider pausing the schedule: each run costs ~5 h and the last five
    runs moved the leader by 0%.
+
+## 2026-09-28 — run 20 (housekeeping; results.jsonl; no hour weights; route 133/122 holds; trip-keyed holds)
+
+Lock taken at 16:18 UTC. Housekeeping was due (every 5th run), commit "model-search: housekeeping":
+- Run 17 was moved to `archive/JOURNAL-runs-17-18.md`, and run 18 joined it at the end of this run.
+- The ds1h21 / ds1h7 / ds1r32 / ds1r72 tags moved to the old leaderboard.
+- run16.sh and run17.sh were deleted.
+- Arms that lost on both splits were removed: sc_big_v6, sc_big_dwell2.
+- run.sh gained `VARIANTS=` (the re-prep loop of run17/19.sh).
+
+Owner request mid-run: the 176 per-fit `results/*.json` files are now one compact line each in `results.jsonl`
+(harness `save_result` / `load_results`; report.py and cmp.py read it). Both leaderboards regenerated byte-identical,
+and the branch diff vs main went from +19.8k to +3.9k lines. The owner also asked to move the routine to every 4th hour.
+That has to be changed in the routine settings on claude.ai; this session can't do it.
+
+Rebuild: `pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21` (16:19–18:43; the first round took ≈ 42 min/day/worker,
+later rounds were faster). `sh research/model-search/run20.sh`: prep into v10 → `ds1v20` / `ds1shiftv20`, with baseline,
+sc_big_nw and sc_big_dwell. The ds1 fits save per-row predictions (`MS_SAVE_PRED`, new in harness.py). No OOM this time.
+
+**A. `sc_big_nw`** = the leader without the production hour sample weights (`_build_sample_weights`).
+**B. Route diagnostic** on the ds1 leader predictions (`diag_route.py pred 133 122`, `diag_holds.py 2026-09-07..2026-09-21 133 122`):
+- 133: MAE 208, bias −119 s. One vehicle (2528) has 80% of the rows. The error sits in a few local hours (11h MAE 449,
+  18h MAE 412) and in stationary > 900 s rows. 26% of rows have actual > hist path + 300 s; they carry 64% of the
+  route's AE, with bias −501 s.
+- `diag_holds.py`: vehicle 2528 holds 12–46 min at 400 m into the trip at ~10:03, ~12:15 and ~15:45 on every weekday
+  since its trip ids changed to block 29328 on 09-16.
+- 122 (MAE 332) is the same kind of case: vehicle 2258 holds ~22–25 min at 2.7 km at ~12:45 on weekdays; vehicle 901
+  holds 39–55 min at 900 m at ~09:30.
+- These are driver breaks, timetabled per trip id, not traffic.
+
+**C. `sc_big_hold`** (V13, `addon_v13.py` → `ms_features_v13`, `sh research/model-search/run20b.sh`). New cols:
+- trip_id × (last stop, 50 m bin) conditional remaining dwell: `dwell_t_rem_med` / `dwell_t_p_more120` / `dwell_t_n`, min 5 runs;
+- `hold_ahead_med`: median over prior days of the trip's summed stops ≥ 120 s between the current position and the target;
+- `hold_ahead_days`.
+
+Coverage (test days): trip ids seen before 100%, hold_ahead > 0 on 4–7% of rows, trip dwell on 12–18% of weekday stopped
+rows and ~1% on weekends. Serving: two static tables at export (~+0.5 day).
+
+### Results (MAE / median / p90 / bias; Δ vs the leader; train 2.18M / 1.98M, test 1.41M / 1.42M rows)
+| arm | ds1 (s42) | ΔL | sa1 / sa5 / sa10 | Sat / Sun / Mon | shift (s7) | ΔL | sa1 / sa5 / sa10 | Fri / Sat / Sun |
+|---|---|---|---|---|---|---|---|---|
+| baseline (v20 = v13, reproduced exactly) | 110.6 / 56.0 / 230.9 / −28.2 | | 72.6 / 112.0 / 153.5 | 100.2 / 107.1 / 120.5 | 113.0 / 59.5 / 241.1 / −14.2 | | 71.2 / 114.3 / 159.7 | 126.8 / 99.6 / 106.6 |
+| sc_big_dwell (reproduced exactly) | 87.0 / 43.1 / 178.2 / −12.6 | | 60.7 / 87.1 / 121.6 | 81.5 / 84.9 / 92.3 | 87.0 / 43.9 / 179.5 / −14.6 | | 59.7 / 87.1 / 122.3 | 91.9 / 81.8 / 85.1 |
+| sc_big_nw | 86.9 / 43.1 / 177.8 / −12.4 | −0.07% | 60.7 / 86.9 / 121.6 | 81.4 / 84.8 / 92.4 | 86.9 / 43.8 / 179.6 / −14.7 | −0.11% | 59.7 / 86.9 / 122.2 | 91.7 / 81.8 / 85.0 |
+| sc_big_hold | 87.0 / — / 178.6 / −11.6 | −0.02% | 60.4 / 86.8 / 122.0 | 81.7 / 85.1 / 92.0 | 86.5 / 43.9 / 179.4 / −13.7 | −0.52% | 59.0 / 86.7 / 122.0 | 91.2 / 81.4 / 84.8 |
+
+- sc_big_hold on the ds1 test rows: rows with hold_ahead > 0 (5.9%) MAE 198.6 → 197.3; rows with a trip dwell
+  (10.7%) 90.2 → 88.9; the rest 79.6 → 79.7. The weekday test days gain (Mon −0.3%, Fri −0.8%), the weekend days don't:
+  there is not enough weekend history per trip.
+- Routes: 133 208 → 206 (ds1), 122 332 → 332 (ds1), 239 → 231 (shift). Worst routes (hold, ds1) 122 332, 133 206, 106 164,
+  125 157, 129 141, 881 129, 137 129, 111 128, 113 126, 131 123; (hold, shift) 122 231, 106 164, 125 142, 133 140,
+  98 137, 137 133, 111 132, 2302 126, 129 125, 88 121.
+- Worst routes (nw, ds1): 122 319, 133 201, 106 162, 125 158, 129 130, 111 129, 137 129, 881 128, 131 124, 113 124.
+
+**Conclusion: no new leader and no notification.**
+- The hour weights are neutral on the leader.
+- Trip-keyed holds are real but sparse. They gain 0–0.5%, and less where history is short. The breaks behind routes
+  133 / 122 are identified: they are recurring per-trip driver breaks.
+
+### Next steps
+See "Open next steps" above. The search is saturated; the useful work is hand-off. At a 4-hour cadence with ~5 h runs,
+most firings will find the lock and exit.
