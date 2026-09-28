@@ -10,6 +10,8 @@ Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOU
 ## State of the search (updated run 19)
 
 ### Protocol set-up (fixed)
+- Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
+  as "keep results.jsonl". Never recreate per-fit JSON files; `harness.py run` appends through `save_result`.
 - Fresh box: `pip install -e . tzdata` (without tzdata every pipeline day fails).
 - Rebuild: `python research/model-search/pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21`
   (≈ 1.5–2.25 h; 10% of snapshots + full-day `.cross` / `.pos` side tables; peak ~11 GB).
