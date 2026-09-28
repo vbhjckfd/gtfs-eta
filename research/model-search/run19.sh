@@ -9,7 +9,7 @@ H=$D/harness.py
 RUN=19 PREP_DIR=ms_features_v10 TAG=v19 \
   ARMS_A="${ARMS_A-baseline sc_big_dwell}" ARMS_B="" sh $D/run.sh || exit 1
 save() {
-  git add $D/results >/dev/null 2>&1
+  git add $D/results.jsonl >/dev/null 2>&1
   git commit -qm "model-search run 19: results ($1)" >/dev/null 2>&1 && \
     for i in 1 2 3 4; do git push -q origin claude/model-search && break; sleep $((2*i)); done
 }

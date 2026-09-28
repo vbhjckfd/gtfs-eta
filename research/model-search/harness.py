@@ -43,7 +43,21 @@ from src.features import (  # noqa: E402
 
 TRAIN_DIR = REPO / "data" / "ms_lite"   # pipeline_lite output (10% snapshots)
 FEAT_DIR = REPO / "data" / os.environ.get("MS_FEAT_DIR", "ms_features")
-RESULTS_DIR = Path(__file__).parent / "results"
+RESULTS = Path(__file__).parent / "results.jsonl"   # one compact JSON line per fit, keyed by "name"
+
+
+def load_results() -> dict:
+    """name -> metrics dict (name = <arm>[_<tag>]_s<seed>)."""
+    if not RESULTS.exists():
+        return {}
+    return {m["name"]: m for m in map(json.loads, RESULTS.read_text().splitlines()) if m}
+
+
+def save_result(m: dict) -> None:
+    """Insert or replace one fit's line; the file stays sorted by name."""
+    res = load_results()
+    res[m["name"]] = m
+    RESULTS.write_text("".join(json.dumps(res[k], separators=(",", ":")) + "\n" for k in sorted(res)))
 
 PASSTHROUGH = ["vehicle_id", "trip_id", "stop_id", "snapshot_ts",
                "dist_along_m", "stop_dist_along_m", "actual_arrival"]
@@ -287,10 +301,10 @@ def main():
     m.update(arm=args.arm, info=info, train_days=[train_days[0], train_days[-1]],
              test_days=test_days, keep_pct=args.keep_pct, seed=args.seed,
              n_train=int(len(tr)), secs=round(time.monotonic() - t0))
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     name = f"{args.arm}{'_' + args.tag if args.tag else ''}_s{args.seed}"
-    (RESULTS_DIR / f"{name}.json").write_text(json.dumps(m, indent=1))
-    base_path = RESULTS_DIR / f"baseline{'_' + args.tag if args.tag else ''}_s{args.seed}.json"
+    m = json.loads(json.dumps({**m, "name": name, "tag": args.tag or "-"}))
+    save_result(m)
+    base = load_results().get(f"baseline{'_' + args.tag if args.tag else ''}_s{args.seed}")
     print(json.dumps({k: m[k] for k in ("n", "mae", "median_ae", "p90_ae", "bias")}, indent=1))
     print("by stops_ahead:", {k: round(v, 1) for k, v in m["mae_by_stops_ahead"].items()})
     print("worst routes:", m["worst_routes"])
@@ -298,9 +312,8 @@ def main():
     if os.environ.get("MS_SAVE_MODEL") and last:
         import joblib
         joblib.dump(tuple(last), os.environ["MS_SAVE_MODEL"])
-    if args.arm != "baseline" and base_path.exists():
-        print("vs baseline:", judge(json.loads(base_path.read_text()),
-                                    json.loads(json.dumps(m))))
+    if args.arm != "baseline" and base:
+        print("vs baseline:", judge(base, m))
 
 
 if __name__ == "__main__":

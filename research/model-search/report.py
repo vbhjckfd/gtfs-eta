@@ -1,9 +1,8 @@
-"""Regenerate LEADERBOARD.md from results/*.json (baseline row per tag+seed)."""
+"""Regenerate LEADERBOARD.md from results.jsonl (baseline row per tag+seed)."""
 
-import json
 from pathlib import Path
 
-from harness import judge
+from harness import judge, load_results
 
 HERE = Path(__file__).parent
 SERVING = {
@@ -146,11 +145,7 @@ def _rows(res, keep):
 
 
 def main():
-    res = {}
-    for p in sorted((HERE / "results").glob("*.json")):
-        m = json.loads(p.read_text())
-        tag = p.stem.rsplit("_s", 1)[0][len(m["arm"]):].lstrip("_") or "-"
-        res[(tag, m["seed"], m["arm"])] = m
+    res = {(m["tag"], m["seed"], m["arm"]): m for m in load_results().values()}
     cur = _rows(res, lambda t: t in CURRENT_TAGS)
     old = _rows(res, lambda t: t not in CURRENT_TAGS)
     (HERE / "LEADERBOARD.md").write_text("\n".join([HEAD.rstrip("\n")] + cur) + "\n")

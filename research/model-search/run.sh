@@ -14,7 +14,7 @@ D=research/model-search
 H=$D/harness.py
 DAYS=${DAYS:-2026-08-31..2026-09-21}
 save() {
-  git add $D/results >/dev/null 2>&1
+  git add $D/results.jsonl >/dev/null 2>&1
   git commit -qm "model-search run $RUN: results ($1)" >/dev/null 2>&1 && \
     for i in 1 2 3 4; do git push -q origin claude/model-search && break; sleep $((2*i)); done
 }

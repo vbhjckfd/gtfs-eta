@@ -3,7 +3,7 @@
 Research-only search for a better ETA model. Branch `claude/model-search`.
 Harness: `harness.py` (prep/run), arms in `arms.py`, live features in
 `features_live.py` (+ add-on scripts `addon_v*.py` that append cols to an existing
-feature dir). Results JSON per arm in `results/`; `report.py` regenerates
+feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed by `name` = arm_tag_sSEED; written by `harness.save_result`, run 20 replaced the per-fit `results/*.json` files); `report.py` regenerates
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOURNAL-runs-13-16.md`, `archive/JOURNAL-runs-17-17.md`.
 
