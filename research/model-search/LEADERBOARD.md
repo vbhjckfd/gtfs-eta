@@ -7,7 +7,8 @@ worse by > 5%. Regenerate with `python research/model-search/report.py`.
 Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1lag90w15) are in
 `archive/LEADERBOARD-old.md`; their baselines are identical to the ones below.
 
-Tags: `ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).
+Tags: `ds1h21` / `ds1h7` = run 17, ds1 split with the history link / dwell tables built from the prior 21 / 7 days (MS_HIST_DAYS; ds1v10f is the 14-day case); the baseline row is the ds1v10f baseline (it uses no history cols).
+`ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).
 `ds1v12` / `ds1shiftv12` = rebuilt in run 15 (v10 files + V12 add-on cols from `addon_v12.py`: same-route headway / bunching, coarse dwell fallback; MS_FEAT_DIR=ms_features_v12); baselines identical. `ds1v12k3` = 3x train rows.
 `ds1v10` / `ds1shiftv10` = rebuilt in run 14 (+ V10 cols: conditional remaining dwell at the current location from prior days' stationary runs; MS_FEAT_DIR=ms_features_v10); `ds1v11` / `ds1shiftv11` = same rows + V11 add-on cols (hour-banded dwell, live same-location dwell; MS_FEAT_DIR=ms_features_v11); baselines identical.
 `ds1v9` / `ds1shiftv9` = rebuilt in run 13 (+ V9 cols: network ratio net_ratio15 / net_n15, veh_hist_ratio20, clipped veh_hist_ratio60c; MS_FEAT_DIR=ms_features_v9); baselines identical. `ds1v9k3` = ds1v9 with train rows at 3% of snapshots (3x).
@@ -26,6 +27,10 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | tag | arm | seed | n_train | n_test | MAE | median | p90 | bias | sa1 | sa10 | ΔMAE | Δp90 | worst bucket Δ | win | serving |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 
+| ds1h21 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1h21 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.2 | 43.1 | 178.3 | -11.8 | 60.7 | 122.2 | -21.2% | -22.8% | -16.4% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds1h7 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1h7 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.8 | 43.5 | 178.8 | -14.2 | 61.6 | 123.0 | -20.6% | -22.6% | -15.2% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds1shiftv10 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
 | ds1shiftv10 | sc_big_dwell | 7 | 1,978,242 | 1,424,485 | 87.0 | 43.9 | 179.5 | -14.6 | 59.7 | 122.3 | -23.1% | -25.6% | -16.1% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds1shiftv10 | sc_big_dwell2 | 7 | 1,978,242 | 1,424,485 | 87.0 | 43.8 | 179.4 | -14.9 | 59.6 | 122.4 | -23.0% | -25.6% | -16.3% | **yes** | as sc_big_dwell (2 of its 5 cols) |
