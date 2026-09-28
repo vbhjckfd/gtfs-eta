@@ -650,3 +650,11 @@ def sc_big_511_it2k(tr, te, seed=42):
     """sc_big_511 with the 2400-iteration cap (both capacity levers together)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_leaf_nodes=511,
                              min_samples_leaf=100, max_iter=2400)
+
+
+# ---- run 20 (no new cols) ----------------------------------------------------
+@arm
+def sc_big_nw(tr, te, seed=42):
+    """sc_big_dwell without the production hour sample weights (the protocol scores
+    unweighted MAE; the weights were a bias fix for the old feature set)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, weights=np.ones(len(tr)))

@@ -61,6 +61,7 @@ SERVING = {
     "sc_big_mono": "as sc_big_dwell (monotone constraints live inside the trees; export unchanged)",
     "sc_big_it2k": "as sc_big_dwell with up to 2x the trees (~2400; serving time scales ~2x, ~3 s per 3000 rows)",
     "sc_big_511": "as sc_big_dwell with 511-leaf trees (deeper walk, ~2x export size)",
+    "sc_big_nw": "as sc_big_dwell (training-only change)",
     "sc_big_511_it2k": "as sc_big_dwell with 511-leaf trees and up to ~2400 of them (~4x export size, ~2x serving time)",
     "sc_lap_127": "as sc_big_lap at 127 leaves (current export size)",
     "sc_big_lr08": "as dtcat_stopcat_big",

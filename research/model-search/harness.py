@@ -278,6 +278,12 @@ def main():
     arm = arms.ARMS[args.arm]
     pred, info = arm(tr, te, seed=args.seed)
     m = metrics(te, pred)
+    if os.environ.get("MS_SAVE_PRED"):   # run 20: per-row test predictions for route diagnostics
+        keep = [c for c in te.columns if te[c].dtype != object or c in ("route_id", "stop_id", "trip_id",
+                                                                         "vehicle_id", "date")]
+        out = te[keep].copy()
+        out["pred"] = pred
+        out.to_parquet(os.environ["MS_SAVE_PRED"], index=False)
     m.update(arm=args.arm, info=info, train_days=[train_days[0], train_days[-1]],
              test_days=test_days, keep_pct=args.keep_pct, seed=args.seed,
              n_train=int(len(tr)), secs=round(time.monotonic() - t0))
