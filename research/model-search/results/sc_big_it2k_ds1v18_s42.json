@@ -1,0 +1,109 @@
+{
+ "n": 1414363,
+ "mae": 86.70693271569262,
+ "median_ae": 43.04941416947477,
+ "p90_ae": 177.9271173627144,
+ "bias": -11.871157258895131,
+ "mae_by_stops_ahead": {
+  "1": 60.26379694535412,
+  "2": 61.495639815437436,
+  "3": 70.24422295132396,
+  "4": 79.05849191057546,
+  "5": 86.81288453286395,
+  "6": 94.49505262515135,
+  "7": 100.82958844115912,
+  "8": 107.0293011767247,
+  "9": 114.00790536967335,
+  "10": 121.32511784070604
+ },
+ "worst_routes": {
+  "122": 327.8,
+  "133": 208.7,
+  "106": 161.1,
+  "125": 154.8,
+  "129": 138.3,
+  "881": 128.0,
+  "111": 127.4,
+  "137": 127.3,
+  "113": 125.4,
+  "131": 124.0
+ },
+ "mae_by_day": {
+  "2026-09-19": 81.25619866895367,
+  "2026-09-20": 84.67768174389904,
+  "2026-09-21": 92.00421671209403
+ },
+ "n_by_day": {
+  "2026-09-19": 422033,
+  "2026-09-20": 403501,
+  "2026-09-21": 588829
+ },
+ "arm": "sc_big_it2k",
+ "info": {
+  "n_iter": 2400,
+  "cols": [
+   "route_id",
+   "stops_ahead",
+   "hour",
+   "is_weekend",
+   "is_holiday",
+   "remaining_dist_m",
+   "progress_speed_mps",
+   "stops_remaining",
+   "trip_progress_frac",
+   "dist_per_stop_m",
+   "speed_eta_warm",
+   "hist_speed_mps",
+   "hist_travel_time_est",
+   "stationary_sec",
+   "live_path_sec_m3",
+   "live_path_cov",
+   "live_path_age",
+   "live_speed_mps",
+   "own_speed_60",
+   "own_speed_180",
+   "own_speed_300",
+   "live_path_sec_m5",
+   "hist_path_sec",
+   "hist_path_cov",
+   "hist_path_sec_dt",
+   "cur_link_live",
+   "cur_link_hist",
+   "cur_link_frac",
+   "lap_path_sec",
+   "lap_path_cov",
+   "lap_path_age",
+   "lap_fill_path_sec",
+   "veh_hist_ratio60",
+   "veh_hist_n60",
+   "dwell_rem_med",
+   "dwell_rem_p75",
+   "dwell_p_more120",
+   "dwell_n",
+   "dwell_long_share",
+   "stop_cat"
+  ],
+  "hp": {
+   "categorical_features": [
+    0,
+    39
+   ],
+   "max_leaf_nodes": 255,
+   "min_samples_leaf": 50,
+   "max_iter": 2400
+  }
+ },
+ "train_days": [
+  "2026-09-07",
+  "2026-09-18"
+ ],
+ "test_days": [
+  "2026-09-19",
+  "2026-09-20",
+  "2026-09-21"
+ ],
+ "keep_pct": 1,
+ "seed": 42,
+ "n_train": 2178139,
+ "secs": 1275
+}
