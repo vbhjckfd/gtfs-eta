@@ -50,6 +50,11 @@ export of categorical bitsets / missing_go_to_left; static hist + dwell tables a
 Timing (run 11): 255 leaves + bitsets = 1.55 s per 3000-row batch single-threaded (baseline
 0.75 s), export ~29 MB — fits the 10 s cycle. Productionising is the owner's call.
 
+**Capacity variant (run 18, needs serving work):** `sc_big_511_it2k` = the same features with 511 leaves /
+min_samples_leaf 100 / up to 2400 iterations: −0.51% (ds1) / −0.62% (shift) vs sc_big_dwell, every bucket
+better. Not a protocol win over the leader; it costs ~2x trees (the cap binds again) and ~2x leaves. Worth it
+only if the served daemon has headroom after hand-off.
+
 ### What won (in order; each Δ is vs the previous leader, both splits)
 - live link path times (latest traversal per link): −7 to −9% vs baseline (run 1).
 - + own speed, − headway / since_last_at_target: −8.3% / −9.0% (run 2).
@@ -91,9 +96,13 @@ Timing (run 11): 255 leaves + bitsets = 1.55 s per 3000-row batch single-threade
   sc_lap_127, sc_big_nxt, path_own_s_drop(_cold); the lap6_* and V9 (net / ratio20 / ratio60c) cols in
   features_live.py. Their results JSON stay; the code is in git history (before run 18).
 
+- Monotone +1 constraints on remaining_dist / stops_ahead / prior ETAs: +0.24% (run 18). Live/hist
+  path cols can't be constrained (−1 sentinel).
+
 ### Open next steps
 1. Longer window / more rows help both models equally (run 16), and production already trains on all days.
-   The model-side search has saturated. The remaining open item is hand-off.
+   The model-side search has saturated (capacity: −0.5% at 2x serving cost, run 18). The remaining open item
+   is hand-off.
 2. Route 133 trip-structure diagnostic (headway cols moved only this route).
 3. Hand-off of sc_big_dwell is the owner's call. Keep the 14-day lookback for its static tables (run 17).
 
@@ -137,3 +146,52 @@ The ds1h21 / ds1h7 baseline rows are copies of the ds1v10f baseline: the rows ar
    next work is hand-off (a serving prototype of sc_big_dwell), and that is the owner's decision.
 2. If the search continues without a hand-off, the only untested lever is recency weighting inside the tables (for
    example a 14-day table with the last 3 days weighted up, aimed at drifting routes such as 133 and 122). Expect ±0.3%.
+
+## 2026-09-28 — run 18 (housekeeping; monotone constraints, tree capacity)
+
+Lock taken at 04:17 UTC. Housekeeping was due (journal 401 lines), commit "model-search: housekeeping": runs 13–16
+moved to `archive/JOURNAL-runs-13-16.md`; LEADERBOARD.md shows the current tags only (old tag definitions now in
+`archive/LEADERBOARD-old.md`, written by report.py); run13/13b/14/14b/15b.sh deleted; arms that lost on both splits
+removed (sc_big_net, sc_big_v9, sc_big_lap6, sc_big_v8, sc_lap_127, sc_big_nxt, path_own_s_drop(_cold)), plus the
+lap6_* and V9 cols in features_live.py. The leader's cols are untouched, and it reproduced exactly afterwards.
+
+Rebuild: `pipeline_lite.py --parallel 4 --days 2026-08-31..2026-09-21` (04:18–~06:40), then `sh research/model-search/run18.sh`
+(prep chain into `ms_features_v10`, tag `v18`; the 09-06 prep was OOM-killed next to the pipeline, and the retry
+wrapper resumed with cached days skipped). Follow-up fits with
+`ARMS_A=... ARMS_B=... PREP_DIR= FEAT_DIR=ms_features_v10 RUN=18 TAG=v18 sh research/model-search/run.sh`.
+
+Arms (arms.py, no new cols; all = sc_big_dwell's features):
+- `sc_big_mono`: `monotonic_cst` +1 on remaining_dist_m, stops_ahead, speed_eta_warm, hist_travel_time_est
+  (the never-missing ones; the −1 sentinel rules out the live/hist path cols).
+- `sc_big_511`: 511 leaves, min_samples_leaf 100. `sc_big_it2k`: max_iter 2400. `sc_big_511_it2k`: both.
+
+### Results (MAE / median / p90 / bias; Δ vs the leader sc_big_dwell; rows train 2.18M / 1.98M, test 1.41M / 1.42M)
+| arm | ds1v18 (s42) | ΔL | sa1 / sa5 / sa10 | ds1shiftv18 (s7) | ΔL | sa1 / sa5 / sa10 | iters, fit |
+|---|---|---|---|---|---|---|---|
+| baseline | 110.6 / 56.0 / 230.9 / −28.2 | | 72.6 / 112.0 / 153.5 | 113.0 / 59.5 / 241.1 / −14.2 | | 71.2 / 114.3 / 159.7 | 1200, 7 min |
+| sc_big_dwell | 87.0 / 43.1 / 178.2 / −12.6 | | 60.7 / 87.1 / 121.6 | 87.0 / 43.9 / 179.5 / −14.6 | | 59.7 / 87.1 / 122.3 | 1200, 12 min |
+| sc_big_mono | 87.2 / 43.2 / 178.1 / −13.2 | +0.24% | 61.0 / 87.1 / 121.7 | — | | | 1200, 12 min |
+| sc_big_511 | 86.7 / 43.1 / 177.4 / −12.7 | −0.28% | 60.3 / 86.8 / 121.4 | 86.5 / 43.8 / 178.7 / −14.4 | −0.51% | 59.1 / 86.7 / 122.0 | 1200, 14 min |
+| sc_big_it2k | 86.7 / 43.0 / 177.9 / −11.9 | −0.32% | 60.3 / 86.8 / 121.3 | 86.6 / 43.9 / 179.2 / −13.9 | −0.37% | 59.3 / 86.8 / 121.9 | 2400, 21 min |
+| sc_big_511_it2k | 86.5 / 43.1 / 177.3 / −11.6 | −0.51% | 59.9 / 86.6 / 121.2 | 86.4 / 43.8 / 178.8 / −13.8 | −0.62% | 59.0 / 86.6 / 121.8 | 2400, 25 min |
+
+- Baseline and leader reproduced exactly (110.6 / 113.0; 87.0 / 87.0).
+- Monotone constraints lose a little (sa1 +0.6%); the trees already learn the monotone shape, the constraint only
+  blocks useful local splits.
+- Capacity helps a little and consistently: every bucket (−0.3% to −1.3%), every test day (ds1 Sat 81.5→81.1,
+  Sun 84.9→84.5, Mon 92.3→91.8; shift Fri 91.9→91.2, Sat 81.8→81.2, Sun 85.1→84.8), p90 not worse. The 2400 cap
+  binds again, so the recipe is still under-fit at lr 0.05 on 2.2M rows. vs baseline: −21.8% / −23.5%.
+- Worst routes (511_it2k): ds1 122 327, 133 210, 106 162, 125 155, 129 137, 137 129, 881 128, 111 127, 131 124,
+  113 124; shift 122 241, 106 164, 125 142, 98 137, 133 137, 137 132, 111 132, 2302 129, 129 128, 88 120.
+
+**Conclusion: no new leader under the protocol (needs ≥ 3% vs the current best to be worth a notification; this is
+−0.5 to −0.6%). `sc_big_511_it2k` is recorded as a capacity option: the same serving work as sc_big_dwell plus ~2x
+trees and ~2x leaves (≈ 3 s per 3000-row batch single-threaded from the run-11 timing, still inside the 10 s cycle
+but with less headroom; export ≈ 4x, ~120 MB). Monotone constraints are ruled out.**
+
+### Next steps
+1. Search is saturated on features, lookbacks and now capacity. The useful next step is hand-off of sc_big_dwell,
+   which is the owner's call; if headroom allows, serve the 511/2400 variant.
+2. If the search continues: time the 511/2400 export with `timing.py` (the run-11 script) to replace the 2x
+   estimate with a measurement; and a 3x-rows check of sc_big_511_it2k (capacity may pay more with more rows).
+
