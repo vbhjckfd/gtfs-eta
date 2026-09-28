@@ -60,6 +60,7 @@ SERVING = {
     "sc_big_mono": "as sc_big_dwell (monotone constraints live inside the trees; export unchanged)",
     "sc_big_it2k": "as sc_big_dwell with up to 2x the trees (~2400; serving time scales ~2x, ~3 s per 3000 rows)",
     "sc_big_511": "as sc_big_dwell with 511-leaf trees (deeper walk, ~2x export size)",
+    "sc_big_hold": "as sc_big_dwell + trip x location dwell table and trip -> per-day hold list (static, built at export); ~+0.5 day",
     "sc_big_nw": "as sc_big_dwell (training-only change)",
     "sc_big_511_it2k": "as sc_big_dwell with 511-leaf trees and up to ~2400 of them (~4x export size, ~2x serving time)",
     "sc_lap_127": "as sc_big_lap at 127 leaves (current export size)",
@@ -84,7 +85,7 @@ SERVING = {
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);
 # every other tag goes to archive/LEADERBOARD-old.md.
 CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds1v10f", "ds2w", "ds2",
-                "ds1v18", "ds1shiftv18", "ds1v19", "ds1v19t", "ds1v20", "ds1shiftv20"}
+                "ds1v18", "ds1shiftv18", "ds1v19", "ds1v19t", "ds1v20", "ds1shiftv20", "ds1v13", "ds1shiftv13"}
 OLD_TAGS = """`ds1h21` / `ds1h7` = run 17, ds1 with the history link / dwell tables built from the prior 21 / 7 days (MS_HIST_DAYS; 14 d is ds1v10f); baseline row copied from ds1v10f.
 `ds1r32` / `ds1r72` = run 19, ds1 with the history tables recency-weighted (MS_HIST_RECENT=3 / 7 prior days counted twice); baseline row copied from ds1v19.
 `ds1v11` / `ds1shiftv11` = run 14 add-on: v10 rows + V11 cols (hour-banded dwell, live same-location dwell; MS_FEAT_DIR=ms_features_v11); baselines identical.
@@ -109,7 +110,7 @@ Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1v9k3, ds1v11,
 ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72 and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
 their baselines are identical to the ds1 / ds1shift ones below.
 
-Tags: `ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19).
+Tags: `ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19). `ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, MS_FEAT_DIR=ms_features_v13); baselines identical.
 `ds1v19` = run 19, v10 features rebuilt (baseline + leader reproduce ds1v18). `ds1v19t` = run 19 timing refits (same data as ds1v19, models saved).
 `ds1v18` / `ds1shiftv18` = run 18, v10 features rebuilt (V8/V9 losers pruned; the leader's cols are unchanged), hyper-parameter / monotone arms.
 `ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).

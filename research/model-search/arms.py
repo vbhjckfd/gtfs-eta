@@ -658,3 +658,13 @@ def sc_big_nw(tr, te, seed=42):
     """sc_big_dwell without the production hour sample weights (the protocol scores
     unweighted MAE; the weights were a bias fix for the old feature set)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, weights=np.ones(len(tr)))
+
+
+# ---- run 20 add-on (V13 cols, MS_FEAT_DIR=ms_features_v13): trip-keyed holds --
+_HOLD = ["dwell_t_rem_med", "dwell_t_p_more120", "dwell_t_n", "hold_ahead_med", "hold_ahead_days"]
+
+
+@arm
+def sc_big_hold(tr, te, seed=42):
+    """sc_big_dwell + trip-keyed remaining dwell and prior days' holds between here and the target."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _HOLD)
