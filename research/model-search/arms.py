@@ -656,3 +656,10 @@ def sc_big_it2k(tr, te, seed=42):
 def sc_big_511(tr, te, seed=42):
     """sc_big_dwell with 511 leaves / min_samples_leaf 100."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_leaf_nodes=511, min_samples_leaf=100)
+
+
+@arm
+def sc_big_511_it2k(tr, te, seed=42):
+    """sc_big_511 with the 2400-iteration cap (both capacity levers together)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_leaf_nodes=511,
+                             min_samples_leaf=100, max_iter=2400)
