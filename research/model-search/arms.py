@@ -150,9 +150,6 @@ def live_all_s_cold(tr, te, seed=42):
 
 
 _PO = _PATH + _OWN
-DROP_FRAC = 0.15
-
-
 def _cold(d, cols, mask=None):
     d = d.copy()
     m = slice(None) if mask is None else mask
@@ -160,33 +157,6 @@ def _cold(d, cols, mask=None):
     if "live_path_cov" in cols:
         d.loc[m, "live_path_cov"] = 0.0
     return d
-
-
-def _drop_mask(d, frac, seed):
-    key = pd.util.hash_pandas_object(
-        d[["vehicle_id", "snapshot_ts"]].astype(str), index=False).to_numpy()
-    return ((key + seed) % 10007) < 10007 * frac
-
-
-def _po_drop(tr, te, seed, cold_test):
-    tr, te = _sentinel(tr, te, _PO)
-    tr = _cold(tr, _PO, _drop_mask(tr, DROP_FRAC, seed))
-    if cold_test:
-        te = _cold(te, _PO)
-    return _fit_predict(tr, te, FEATURE_COLS + _PO, seed)
-
-
-@arm
-def path_own_s_drop(tr, te, seed=42):
-    """path_own_s trained with 15% of snapshots forced to cold-start values
-    (live-feature dropout) so a restarted daemon degrades gracefully."""
-    return _po_drop(tr, te, seed, cold_test=False)
-
-
-@arm
-def path_own_s_drop_cold(tr, te, seed=42):
-    """path_own_s_drop evaluated with every live feature cold."""
-    return _po_drop(tr, te, seed, cold_test=True)
 
 
 @arm
@@ -534,7 +504,7 @@ def _topcode(tr, te, src, dst):
         d[dst] = d[src].astype(str).map(code).fillna(254).astype(float)
 
 
-def _stopcat_big_plus(tr, te, seed, extra_num=(), next_cat=False, **hp):
+def _stopcat_big_plus(tr, te, seed, extra_num=(), next_cat=False, mono=(), **hp):
     cols = _STACK + _DT
     tr, te = _sentinel(tr, te, cols + list(extra_num))
     _topcode(tr, te, "stop_id", "stop_cat")
@@ -545,15 +515,10 @@ def _stopcat_big_plus(tr, te, seed, extra_num=(), next_cat=False, **hp):
         allc.append("next_cat")
         cats.append(len(allc) - 1)
     params = dict(max_leaf_nodes=255, min_samples_leaf=50)
+    if mono:   # run 18: +1 constraints; the transformed order equals allc (route_id is first)
+        params["monotonic_cst"] = [1 if c in mono else 0 for c in allc]
     params.update(hp)
     return _fit_predict(tr, te, allc, seed, categorical_features=cats, **params)
-
-
-@arm
-def sc_big_nxt(tr, te, seed=42):
-    """dtcat_stopcat_big + the vehicle's next stop as a native categorical
-    (dwell / signal at the current location)."""
-    return _stopcat_big_plus(tr, te, seed, next_cat=True)
 
 
 @arm
@@ -600,51 +565,14 @@ def sc_big_lap_reg(tr, te, seed=42):
                              l2_regularization=1.0)
 
 
-@arm
-def sc_lap_127(tr, te, seed=42):
-    """sc_big_lap at 127 leaves / min_samples_leaf 20 (half the export size)."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP, max_leaf_nodes=127,
-                             min_samples_leaf=20)
-
-
 # ---- run 12 (V8 cols: 6 h previous lap, vehicle-level own/hist ratio) -------
-_LAP6 = ["lap6_path_sec", "lap6_path_cov", "lap6_path_age", "lap6_fill_path_sec"]
 _VEH = ["veh_hist_ratio60", "veh_hist_n60"]
-
-
-@arm
-def sc_big_lap6(tr, te, seed=42):
-    """sc_big_lap with the previous-lap window widened from 3 h to 6 h."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP6)
 
 
 @arm
 def sc_big_veh(tr, te, seed=42):
     """sc_big_lap + vehicle-level (any trip) own/historical ratio over the last hour."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH)
-
-
-@arm
-def sc_big_v8(tr, te, seed=42):
-    """sc_big_lap6 + vehicle-level ratio."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP6 + _VEH)
-
-
-# ---- run 13 (V9 cols: network ratio, short / clipped vehicle ratios) --------
-_NET = ["net_ratio15", "net_n15"]
-_VEH2 = ["veh_hist_ratio20", "veh_hist_ratio60c"]
-
-
-@arm
-def sc_big_net(tr, te, seed=42):
-    """sc_big_veh + network-wide live/historical ratio over the last 15 min."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH + _NET)
-
-
-@arm
-def sc_big_v9(tr, te, seed=42):
-    """sc_big_net + 20 min and clipped 60 min vehicle-level ratios."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH + _NET + _VEH2)
 
 
 # ---- run 14 (V10 cols: dwell at the vehicle's current location) -------------
@@ -704,3 +632,27 @@ def sc_big_dwc(tr, te, seed=42):
 def sc_big_v12(tr, te, seed=42):
     """sc_big_dwell + headway + coarse dwell."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _HW + _DWELL_C)
+
+
+# ---- run 18 (no new cols: constraints / capacity on the leader) -------------
+# Only never-missing cols can be constrained: the live / hist path cols use the
+# -1 sentinel for "missing", which a +1 constraint would force to the lowest ETA.
+_MONO = ["remaining_dist_m", "stops_ahead", "speed_eta_warm", "hist_travel_time_est"]
+
+
+@arm
+def sc_big_mono(tr, te, seed=42):
+    """sc_big_dwell with ETA monotone increasing in distance / stops ahead / prior ETAs."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, mono=_MONO)
+
+
+@arm
+def sc_big_it2k(tr, te, seed=42):
+    """sc_big_dwell with the 1200-iteration cap raised to 2400 (the cap binds)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_iter=2400)
+
+
+@arm
+def sc_big_511(tr, te, seed=42):
+    """sc_big_dwell with 511 leaves / min_samples_leaf 100."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_leaf_nodes=511, min_samples_leaf=100)

@@ -58,6 +58,9 @@ SERVING = {
     "sc_big_lap": "as sc_big_cur + per-vehicle last traversal of each link (3 h window; the link store already sees every traversal, keyed also by vehicle); ~2.5 days total",
     "sc_big_cur_reg": "as sc_big_cur",
     "sc_big_lap_reg": "as sc_big_lap",
+    "sc_big_mono": "as sc_big_dwell (monotone constraints live inside the trees; export unchanged)",
+    "sc_big_it2k": "as sc_big_dwell with up to 2x the trees (~2400; serving time scales ~2x, ~3 s per 3000 rows)",
+    "sc_big_511": "as sc_big_dwell with 511-leaf trees (deeper walk, ~2x export size)",
     "sc_lap_127": "as sc_big_lap at 127 leaves (current export size)",
     "sc_big_lr08": "as dtcat_stopcat_big",
     "dtcat_big": "as stack_hist_dt_cat; 255-leaf trees ~2x export size",
@@ -79,21 +82,10 @@ SERVING = {
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);
 # every other tag goes to archive/LEADERBOARD-old.md.
-CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v11", "ds1shiftv11", "ds1v9k3",
-                "ds1v12", "ds1shiftv12", "ds1v12k3", "ds1v10f", "ds2w", "ds2", "ds1h21", "ds1h7"}
-HEAD = """# Leaderboard
-
-Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
-(day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
-worse by > 5%. Regenerate with `python research/model-search/report.py`.
-
-Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1lag90w15) are in
-`archive/LEADERBOARD-old.md`; their baselines are identical to the ones below.
-
-Tags: `ds1h21` / `ds1h7` = run 17, ds1 split with the history link / dwell tables built from the prior 21 / 7 days (MS_HIST_DAYS; ds1v10f is the 14-day case); the baseline row is the ds1v10f baseline (it uses no history cols).
-`ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).
+CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds1v10f", "ds2w", "ds2", "ds1h21", "ds1h7",
+                "ds1v18", "ds1shiftv18"}
+OLD_TAGS = """`ds1v11` / `ds1shiftv11` = run 14 add-on: v10 rows + V11 cols (hour-banded dwell, live same-location dwell; MS_FEAT_DIR=ms_features_v11); baselines identical.
 `ds1v12` / `ds1shiftv12` = rebuilt in run 15 (v10 files + V12 add-on cols from `addon_v12.py`: same-route headway / bunching, coarse dwell fallback; MS_FEAT_DIR=ms_features_v12); baselines identical. `ds1v12k3` = 3x train rows.
-`ds1v10` / `ds1shiftv10` = rebuilt in run 14 (+ V10 cols: conditional remaining dwell at the current location from prior days' stationary runs; MS_FEAT_DIR=ms_features_v10); `ds1v11` / `ds1shiftv11` = same rows + V11 add-on cols (hour-banded dwell, live same-location dwell; MS_FEAT_DIR=ms_features_v11); baselines identical.
 `ds1v9` / `ds1shiftv9` = rebuilt in run 13 (+ V9 cols: network ratio net_ratio15 / net_n15, veh_hist_ratio20, clipped veh_hist_ratio60c; MS_FEAT_DIR=ms_features_v9); baselines identical. `ds1v9k3` = ds1v9 with train rows at 3% of snapshots (3x).
 `ds1v8` / `ds1shiftv8` = rebuilt in run 12 (+ V8 cols: 6 h previous lap lap6_*, vehicle-level own/hist ratio veh_hist_ratio60 / veh_hist_n60; MS_FEAT_DIR=ms_features_v8); baselines identical.
 `ds1v7` / `ds1shiftv7` = rebuilt in run 11 (+ V7 own previous-lap cols: lap_path_sec / cov / age, lap_fill_path_sec; MS_FEAT_DIR=ms_features_v7); baselines identical.
@@ -103,6 +95,21 @@ Tags: `ds1h21` / `ds1h7` = run 17, ds1 split with the history link / dwell table
 `ds1v3` / `ds1shiftv3` = same splits, features v3 (MS_FEAT_DIR=ms_features_v3: + m7, EWMA, historical link table from prior days); baselines identical.
 `ds1v2` / `ds1shiftv2` = same splits, features prepped with the run-3 median-of-5 column (MS_FEAT_DIR=ms_features_v2); baselines identical.
 `ds1lag90w15` = ds1 with live features rebuilt at 90 s detection lag, 15-min link window.
+"""
+HEAD = """# Leaderboard
+
+Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
+(day set / split) and seed. Win = MAE ≤ −3%, p90 not worse, no stops_ahead bucket
+worse by > 5%. Regenerate with `python research/model-search/report.py`.
+
+Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1v9k3, ds1v11, ds1v12,
+ds1lag90w15 and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
+their baselines are identical to the ds1 / ds1shift ones below.
+
+Tags: `ds1v18` / `ds1shiftv18` = run 18, v10 features rebuilt (V8/V9 losers pruned; the leader's cols are unchanged), hyper-parameter / monotone arms.
+`ds1h21` / `ds1h7` = run 17, ds1 split with the history link / dwell tables built from the prior 21 / 7 days (MS_HIST_DAYS; ds1v10f is the 14-day case); the baseline row is the ds1v10f baseline (it uses no history cols).
+`ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).
+`ds1v10` / `ds1shiftv10` = rebuilt in run 14 (+ V10 cols: conditional remaining dwell at the current location from prior days' stationary runs; MS_FEAT_DIR=ms_features_v10); baselines identical. `ds1v12k3` = run 15, the same v10 cols at 3x train rows (3% of snapshots).
 `ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
 `ds1shift` = train 09-07..09-17, test 09-18 (Fri), 09-19, 09-20. Train rows 1% of
 snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
@@ -141,12 +148,13 @@ def main():
         res[(tag, m["seed"], m["arm"])] = m
     cur = _rows(res, lambda t: t in CURRENT_TAGS)
     old = _rows(res, lambda t: t not in CURRENT_TAGS)
-    (HERE / "LEADERBOARD.md").write_text("\n".join([HEAD] + cur) + "\n")
+    (HERE / "LEADERBOARD.md").write_text("\n".join([HEAD.rstrip("\n")] + cur) + "\n")
     tbl = HEAD[HEAD.index("| tag |"):]
     (HERE / "archive").mkdir(exist_ok=True)
     (HERE / "archive" / "LEADERBOARD-old.md").write_text(
         "# Leaderboard — superseded tags (generated by report.py)\n\n"
-        "Tag definitions: see the header of ../LEADERBOARD.md and archive/JOURNAL-runs-1-12.md.\n\n"
+        "Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs-*.md):\n\n"
+        + OLD_TAGS + "\n"
         + tbl + "\n".join(old) + "\n")
     print("\n".join(cur))
 
