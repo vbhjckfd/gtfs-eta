@@ -2,6 +2,8 @@
 
 Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs-*.md):
 
+`ds1h21` / `ds1h7` = run 17, ds1 with the history link / dwell tables built from the prior 21 / 7 days (MS_HIST_DAYS; 14 d is ds1v10f); baseline row copied from ds1v10f.
+`ds1r32` / `ds1r72` = run 19, ds1 with the history tables recency-weighted (MS_HIST_RECENT=3 / 7 prior days counted twice); baseline row copied from ds1v19.
 `ds1v11` / `ds1shiftv11` = run 14 add-on: v10 rows + V11 cols (hour-banded dwell, live same-location dwell; MS_FEAT_DIR=ms_features_v11); baselines identical.
 `ds1v12` / `ds1shiftv12` = rebuilt in run 15 (v10 files + V12 add-on cols from `addon_v12.py`: same-route headway / bunching, coarse dwell fallback; MS_FEAT_DIR=ms_features_v12); baselines identical. `ds1v12k3` = 3x train rows.
 `ds1v9` / `ds1shiftv9` = rebuilt in run 13 (+ V9 cols: network ratio net_ratio15 / net_n15, veh_hist_ratio20, clipped veh_hist_ratio60c; MS_FEAT_DIR=ms_features_v9); baselines identical. `ds1v9k3` = ds1v9 with train rows at 3% of snapshots (3x).
@@ -37,8 +39,16 @@ Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs
 | ds1 | path_own_s_nocal | 42 | 2,178,139 | 1,414,363 | 100.6 | 50.9 | 206.3 | -19.2 | 68.9 | 140.4 | -9.1% | -10.6% | -5.0% | **yes** | as path_own_s |
 | ds1 | path_own_s_nw | 42 | 2,178,139 | 1,414,363 | 101.4 | 51.9 | 208.4 | -19.7 | 70.6 | 140.5 | -8.3% | -9.7% | -2.8% | **yes** | as path_own_s |
 | ds1 | path_s | 42 | 2,178,139 | 1,414,363 | 104.8 | 53.1 | 218.8 | -19.1 | 73.9 | 143.8 | -5.2% | -5.2% | +1.8% | **yes** | needs serving work (link store) |
+| ds1h21 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1h21 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.2 | 43.1 | 178.3 | -11.8 | 60.7 | 122.2 | -21.2% | -22.8% | -16.4% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds1h7 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1h7 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.8 | 43.5 | 178.8 | -14.2 | 61.6 | 123.0 | -20.6% | -22.6% | -15.2% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds1lag90w15 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
 | ds1lag90w15 | path_own_s | 42 | 2,178,139 | 1,414,363 | 101.9 | 52.2 | 209.6 | -21.1 | 70.4 | 141.5 | -7.8% | -9.2% | -3.0% | **yes** | needs serving work (link store + 5-min position ring, ~1 day), state persisted across the 5-min push-feed restarts |
+| ds1r32 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1r32 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.1 | 43.1 | 178.1 | -13.2 | 60.9 | 122.0 | -21.2% | -22.8% | -16.1% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds1r72 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1r72 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.1 | 43.1 | 177.7 | -13.5 | 60.7 | 121.8 | -21.3% | -23.0% | -16.3% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds1shift | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
 | ds1shift | live_all | 7 | 1,978,242 | 1,424,485 | 103.0 | 54.1 | 212.4 | -14.7 | 69.9 | 144.0 | -8.9% | -11.9% | -1.9% | **yes** | needs serving work (NaN routing + live link store) |
 | ds1shift | live_all_s | 7 | 1,978,242 | 1,424,485 | 102.4 | 53.2 | 211.8 | -16.3 | 68.8 | 143.4 | -9.4% | -12.2% | -3.4% | **yes** | needs serving work (live link store, ~1-2 days) |

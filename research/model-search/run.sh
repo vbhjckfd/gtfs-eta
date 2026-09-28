@@ -4,7 +4,10 @@
 #   ARMS_A="baseline sc_big_dwell ..." ARMS_B="baseline sc_big_dwell ..." sh run.sh
 # 1. prep chain into $PREP_DIR as pipeline_lite days land (skip with PREP_DIR=);
 # 2. optional add-on script ($ADDON --days ...) writing $FEAT_DIR;
-# 3. fits on ds1$TAG (ARMS_A) and ds1shift$TAG (ARMS_B) with $FEAT_DIR.
+# 3. fits on ds1$TAG (ARMS_A) and ds1shift$TAG (ARMS_B) with $FEAT_DIR;
+# 4. optional prep variants (replaces run17/run19.sh): VARIANTS="r32:MS_HIST_RECENT=3,MS_HIST_RECENT_REP=2 ..."
+#    re-preps 09-07..09-21 into ${PREP_DIR}_<name> with those env vars (prior days' links_/runs_ symlinked
+#    from $PREP_DIR) and fits $ARMS_V (default sc_big_dwell) on tag ds1<name>.
 # Results are committed and pushed after every fit so a reclaimed session keeps them.
 echo 1000 > /proc/self/oom_score_adj 2>/dev/null
 D=research/model-search
@@ -39,5 +42,21 @@ done
 for a in $ARMS_B; do
   python $H run --arm $a --train 2026-09-07..2026-09-17 --test 2026-09-18..2026-09-20 --seed 7 --tag ds1shift$TAG
   save "ds1shift$TAG $a"
+done
+for V in $VARIANTS; do
+  NAME=${V%%:*}; ENVS=$(echo "${V#*:}" | tr ',' ' ')
+  FD=${PREP_DIR}_$NAME; mkdir -p data/$FD
+  for f in data/$PREP_DIR/links_*.parquet data/$PREP_DIR/runs_*.parquet; do
+    case $f in *2026-09-0[7-9]*|*2026-09-[12]*) continue;; esac
+    ln -sf "$(pwd)/$f" data/$FD/
+  done
+  for day in $(python -c "import sys;sys.path.insert(0,'$D');from harness import expand_days;print(' '.join(expand_days('2026-09-07..2026-09-21')))"); do
+    [ -f data/$FD/$day.parquet ] && continue
+    env $ENVS MS_FEAT_DIR=$FD python $H prep --days $day || { echo "PREP FAIL $NAME $day"; exit 1; }
+  done
+  for a in ${ARMS_V:-sc_big_dwell}; do
+    MS_FEAT_DIR=$FD python $H run --arm $a --train 2026-09-07..2026-09-18 --test 2026-09-19..2026-09-21 --seed 42 --tag ds1$NAME
+    save "ds1$NAME $a"
+  done
 done
 echo "RUN $RUN DONE"

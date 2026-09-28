@@ -528,12 +528,6 @@ def sc_big_cur(tr, te, seed=42):
 
 
 @arm
-def sc_big_v6(tr, te, seed=42):
-    """dtcat_stopcat_big + next-stop categorical + current-link cols."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR, next_cat=True)
-
-
-@arm
 def sc_big_lr08(tr, te, seed=42):
     """dtcat_stopcat_big with learning rate 0.08 (the 1200-iteration cap binds)."""
     return _stopcat_big_plus(tr, te, seed, learning_rate=0.08)
@@ -583,13 +577,6 @@ _DWELL = ["dwell_rem_med", "dwell_rem_p75", "dwell_p_more120", "dwell_n", "dwell
 def sc_big_dwell(tr, te, seed=42):
     """sc_big_veh + historical conditional remaining dwell at the current location."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _VEH + _DWELL)
-
-
-@arm
-def sc_big_dwell2(tr, te, seed=42):
-    """sc_big_veh + remaining-dwell median and P(>120 s more) only."""
-    return _stopcat_big_plus(tr, te, seed,
-                             extra_num=_CUR + _LAP + _VEH + ["dwell_rem_med", "dwell_p_more120"])
 
 
 # ---- run 14 add-on (V11 cols, MS_FEAT_DIR=ms_features_v11) -------------------
