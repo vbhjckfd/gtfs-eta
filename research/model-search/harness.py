@@ -236,7 +236,11 @@ def fit_hgbt(X, y, w, cat_cols, **overrides):
     params.update(overrides)
     pipe = Pipeline([("prep", pre), ("model", HistGradientBoostingRegressor(**params))])
     pipe.fit(X, y, model__sample_weight=w)
+    _LAST_FIT[:] = [pipe, list(X.columns), X.iloc[:15000].copy()]   # for MS_SAVE_MODEL (timing.py)
     return pipe
+
+
+_LAST_FIT: list = []
 
 
 def main():
@@ -284,6 +288,10 @@ def main():
     print(json.dumps({k: m[k] for k in ("n", "mae", "median_ae", "p90_ae", "bias")}, indent=1))
     print("by stops_ahead:", {k: round(v, 1) for k, v in m["mae_by_stops_ahead"].items()})
     print("worst routes:", m["worst_routes"])
+    last = sys.modules["harness"]._LAST_FIT   # arms.py imports this file as `harness`, not __main__
+    if os.environ.get("MS_SAVE_MODEL") and last:
+        import joblib
+        joblib.dump(tuple(last), os.environ["MS_SAVE_MODEL"])
     if args.arm != "baseline" and base_path.exists():
         print("vs baseline:", judge(json.loads(base_path.read_text()),
                                     json.loads(json.dumps(m))))
