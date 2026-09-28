@@ -110,6 +110,9 @@ def prep_day(day: str, keep_pct: float, client=None) -> Path:
              if (fp := FEAT_DIR / f"links_{(d0 - timedelta(days=k)).isoformat()}.parquet").exists()]
     prior_runs = [pd.read_parquet(fp) for k in range(1, HIST_DAYS + 1)
                   if (fp := FEAT_DIR / f"runs_{(d0 - timedelta(days=k)).isoformat()}.parquet").exists()]
+    if HIST_RECENT > 0:   # run 19: weight the most recent days up by repetition (weighted median)
+        prior = _upweight(prior, d0, "links_")
+        prior_runs = _upweight(prior_runs, d0, "runs_")
     lo, ro = [], []
     live = live_features(cross, pos, raw.iloc[idx].reset_index(drop=True), gtfs,
                          prior_links=prior, links_out=lo, prior_runs=prior_runs, runs_out=ro)
@@ -125,6 +128,19 @@ def prep_day(day: str, keep_pct: float, client=None) -> Path:
 
 
 HIST_DAYS = int(os.environ.get("MS_HIST_DAYS", 14))   # historical link table looks back this many prior days
+HIST_RECENT = int(os.environ.get("MS_HIST_RECENT", 0))   # run 19: the last N prior days count ...
+HIST_RECENT_REP = int(os.environ.get("MS_HIST_RECENT_REP", 2))   # ... this many times in the tables
+
+
+def _upweight(frames: list, d0, prefix: str) -> list:
+    """Repeat the frames of the HIST_RECENT most recent prior days (HIST_RECENT_REP copies in total)."""
+    out = list(frames)
+    for k in range(1, HIST_RECENT + 1):
+        fp = FEAT_DIR / f"{prefix}{(d0 - timedelta(days=k)).isoformat()}.parquet"
+        if fp.exists():
+            f = pd.read_parquet(fp)
+            out.extend([f] * (HIST_RECENT_REP - 1))
+    return out
 PREP_PCT = 3.0   # every day is prepped once at this rate; runs subsample it
 
 
