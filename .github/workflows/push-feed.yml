@@ -77,12 +77,29 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v6
+        id: py
         with:
           python-version: '3.11'
-          cache: pip
+
+      # Cache the whole installed venv, not just pip's wheel cache: `cache: pip`
+      # still queries pypi.org's index on every run, and PyPI read timeouts
+      # failed the install outright. With a venv hit this job never touches
+      # PyPI; it only reinstalls when pyproject.toml or the Python build changes.
+      - name: Restore venv
+        id: venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('pyproject.toml') }}
 
       - name: Install dependencies
-        run: pip install -e .
+        if: steps.venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --timeout 60 --retries 10 -e .
+
+      - name: Activate venv
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       # Load GTFS + model from R2 once, push 33 times at 10 s intervals (~5.5
       # min). The loop is drift-free (the interval includes inference time), so
