@@ -8,6 +8,8 @@
 # 4. optional prep variants (replaces run17/run19.sh): VARIANTS="r32:MS_HIST_RECENT=3,MS_HIST_RECENT_REP=2 ..."
 #    re-preps 09-07..09-21 into ${PREP_DIR}_<name> with those env vars (prior days' links_/runs_ symlinked
 #    from $PREP_DIR) and fits $ARMS_V (default sc_big_dwell) on tag ds1<name>.
+# Split days default to ds1 / ds1shift; override with TRAIN_A/TEST_A/SEED_A, TRAIN_B/TEST_B/SEED_B and the
+# tag prefixes PFX_A (default ds1) / PFX_B (default ds1shift) (run 21: ds3 = train 09-14..09-25, test 09-26..09-28).
 # Results are committed and pushed after every fit so a reclaimed session keeps them.
 echo 1000 > /proc/self/oom_score_adj 2>/dev/null
 D=research/model-search
@@ -36,12 +38,12 @@ fi
 export MS_FEAT_DIR=${FEAT_DIR:-$PREP_DIR}
 mkdir -p data/ms_models
 for a in $ARMS_A; do
-  python $H run --arm $a --train 2026-09-07..2026-09-18 --test 2026-09-19..2026-09-21 --seed 42 --tag ds1$TAG
-  save "ds1$TAG $a"
+  python $H run --arm $a --train ${TRAIN_A:-2026-09-07..2026-09-18} --test ${TEST_A:-2026-09-19..2026-09-21} --seed ${SEED_A:-42} --tag ${PFX_A:-ds1}$TAG
+  save "${PFX_A:-ds1}$TAG $a"
 done
 for a in $ARMS_B; do
-  python $H run --arm $a --train 2026-09-07..2026-09-17 --test 2026-09-18..2026-09-20 --seed 7 --tag ds1shift$TAG
-  save "ds1shift$TAG $a"
+  python $H run --arm $a --train ${TRAIN_B:-2026-09-07..2026-09-17} --test ${TEST_B:-2026-09-18..2026-09-20} --seed ${SEED_B:-7} --tag ${PFX_B:-ds1shift}$TAG
+  save "${PFX_B:-ds1shift}$TAG $a"
 done
 for V in $VARIANTS; do
   NAME=${V%%:*}; ENVS=$(echo "${V#*:}" | tr ',' ' ')
