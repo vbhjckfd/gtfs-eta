@@ -671,3 +671,21 @@ def sc_big_bag2(tr, te, seed=42):
 def sc_big_mf5(tr, te, seed=42):
     """sc_big_dwell with max_features 0.5."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.5)
+
+
+@arm
+def sc_big_mf4(tr, te, seed=42):
+    """sc_big_dwell with max_features 0.4 (run 24)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.4)
+
+
+@arm
+def sc_big_mf3(tr, te, seed=42):
+    """sc_big_dwell with max_features 0.3 (run 24)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.3)
+
+
+@arm
+def sc_big_mf5_msl20(tr, te, seed=42):
+    """sc_big_mf5 with min_samples_leaf 20 (run 24; same tree count, finer leaves)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.5, min_samples_leaf=20)
