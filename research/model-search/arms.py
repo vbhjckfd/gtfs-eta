@@ -633,10 +633,6 @@ def sc_big_mono(tr, te, seed=42):
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, mono=_MONO)
 
 
-
-
-
-
 @arm
 def sc_big_511_it2k(tr, te, seed=42):
     """sc_big_511 with the 2400-iteration cap (both capacity levers together)."""
@@ -652,16 +648,10 @@ def sc_big_nw(tr, te, seed=42):
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, weights=np.ones(len(tr)))
 
 
-# ---- run 23 (no new cols): per-split feature subsampling and a 2-model bag ----
-@arm
-def sc_big_mf7(tr, te, seed=42):
-    """sc_big_dwell with max_features 0.7 (each split sees a random 70% of the columns)."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.7)
-
-
+# ---- runs 23-24 (no new cols): per-split feature subsampling and a 2-model bag ----
 @arm
 def sc_big_bag2(tr, te, seed=42):
-    """Mean of two sc_big_mf7 fits with different seeds (2x the trees at serving)."""
+    """Mean of two max_features-0.7 fits (arm sc_big_mf7, removed in run 25) with different seeds (2x the trees at serving)."""
     p1, i1 = _stopcat_big_plus(tr.copy(), te.copy(), seed, extra_num=_LEAD, max_features=0.7)
     p2, i2 = _stopcat_big_plus(tr.copy(), te.copy(), seed + 1000, extra_num=_LEAD, max_features=0.7)
     return (p1 + p2) / 2, {**i1, "n_iter": i1["n_iter"] + i2["n_iter"]}
@@ -674,24 +664,6 @@ def sc_big_mf5(tr, te, seed=42):
 
 
 @arm
-def sc_big_mf4(tr, te, seed=42):
-    """sc_big_dwell with max_features 0.4 (run 24)."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.4)
-
-
-@arm
 def sc_big_mf3(tr, te, seed=42):
     """sc_big_dwell with max_features 0.3 (run 24)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.3)
-
-
-@arm
-def sc_big_mf5_msl20(tr, te, seed=42):
-    """sc_big_mf5 with min_samples_leaf 20 (run 24; same tree count, finer leaves)."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.5, min_samples_leaf=20)
-
-
-@arm
-def sc_big_mf2(tr, te, seed=42):
-    """sc_big_dwell with max_features 0.2 (run 24)."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.2)
