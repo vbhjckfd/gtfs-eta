@@ -8,3 +8,5 @@ export RUN=23 DAYS=2026-09-07..2026-09-28 TRAIN_A=2026-09-14..2026-09-25 TEST_A=
 PREP_DIR=ms_features_v10 MS_SAVE_PRED=data/pred_ds3_leader.parquet ARMS_A="sc_big_dwell" ARMS_B="" sh $D/run.sh
 PREP_DIR= FEAT_DIR=ms_features_v10 ARMS_A="baseline sc_big_mf7 sc_big_bag2" ARMS_B="sc_big_mf7 sc_big_bag2" sh $D/run.sh
 echo RUN23 ALL DONE
+# run 23, second batch (after mf7 / bag2 came in): max_features 0.5
+PREP_DIR= FEAT_DIR=ms_features_v10 ARMS_A="sc_big_mf5" ARMS_B="sc_big_mf5" sh $D/run.sh
