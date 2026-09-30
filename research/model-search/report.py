@@ -82,6 +82,10 @@ SERVING = {
     "sc_big_v12": "as sc_big_hw + stop-keyed dwell table",
     "sc_big_mf7": "as sc_big_dwell (training-only change: max_features 0.7; export unchanged)",
     "sc_big_mf5": "as sc_big_dwell (training-only change: max_features 0.5; export unchanged)",
+    "sc_big_mf4": "as sc_big_mf5 (max_features 0.4)",
+    "sc_big_mf3": "as sc_big_mf5 (max_features 0.3)",
+    "sc_big_mf2": "as sc_big_mf5 (max_features 0.2)",
+    "sc_big_mf5_msl20": "as sc_big_mf5 (min_samples_leaf 20)",
     "sc_big_bag2": "as sc_big_mf7 x 2 seeds, predictions averaged (2400 trees, ~2x serving time, ~3.8 s per 3000 rows)",
     "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
