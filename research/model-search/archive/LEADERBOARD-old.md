@@ -2,6 +2,9 @@
 
 Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs-*.md):
 
+`ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, removed in run 23; MS_FEAT_DIR=ms_features_v13); baselines identical to ds1v20.
+`ds1v19` = run 19, v10 features rebuilt (baseline + leader reproduce ds1v18). `ds1v19t` = run 19 timing refits (same data as ds1v19, models saved).
+`ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).
 `ds1h21` / `ds1h7` = run 17, ds1 with the history link / dwell tables built from the prior 21 / 7 days (MS_HIST_DAYS; 14 d is ds1v10f); baseline row copied from ds1v10f.
 `ds1r32` / `ds1r72` = run 19, ds1 with the history tables recency-weighted (MS_HIST_RECENT=3 / 7 prior days counted twice); baseline row copied from ds1v19.
 `ds1v11` / `ds1shiftv11` = run 14 add-on: v10 rows + V11 cols (hour-banded dwell, live same-location dwell; MS_FEAT_DIR=ms_features_v11); baselines identical.
@@ -57,6 +60,9 @@ Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs
 | ds1shift | path_own_s | 7 | 1,978,242 | 1,424,485 | 102.8 | 53.6 | 214.2 | -14.8 | 69.6 | 144.0 | -9.0% | -11.2% | -2.2% | **yes** | needs serving work (link store + 5-min position ring, ~1 day), state persisted across the 5-min push-feed restarts |
 | ds1shift | path_own_s_big | 7 | 1,978,242 | 1,424,485 | 100.7 | 52.4 | 208.8 | -14.5 | 67.7 | 141.7 | -10.9% | -13.4% | -4.9% | **yes** | as path_own_s; 255-leaf trees ~2x export size |
 | ds1shift | path_own_s_drop | 7 | 1,978,242 | 1,424,485 | 104.2 | 54.5 | 216.4 | -13.7 | 71.4 | 144.9 | -7.8% | -10.3% | +0.2% | **yes** | as path_own_s; degrades less when cold |
+| ds1shiftv13 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
+| ds1shiftv13 | sc_big_dwell | 7 | 1,978,242 | 1,424,485 | 87.0 | 43.9 | 179.5 | -14.6 | 59.7 | 122.3 | -23.1% | -25.6% | -16.1% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds1shiftv13 | sc_big_hold | 7 | 1,978,242 | 1,424,485 | 86.5 | 43.9 | 179.4 | -13.7 | 59.0 | 122.0 | -23.5% | -25.6% | -17.1% | **yes** | as sc_big_dwell + trip x location dwell table and trip -> per-day hold list (static, built at export); ~+0.5 day |
 | ds1shiftv2 | baseline | 7 | 1,978,242 | 1,424,485 | 113.0 | 59.5 | 241.1 | -14.2 | 71.2 | 159.7 | — | — | — | — | prod |
 | ds1shiftv2 | stack | 7 | 1,978,242 | 1,424,485 | 96.7 | 48.7 | 196.9 | -21.3 | 66.6 | 134.7 | -14.5% | -18.3% | -6.5% | **yes** | link store (last 5 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
 | ds1shiftv2 | stack_big | 7 | 1,978,242 | 1,424,485 | 95.9 | 48.5 | 196.1 | -20.1 | 66.0 | 133.9 | -15.1% | -18.7% | -7.2% | **yes** | as stack; 255-leaf trees ~2x export size |
@@ -92,6 +98,8 @@ Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs
 | ds1shiftv9 | sc_big_net | 7 | 1,978,242 | 1,424,485 | 87.5 | 43.9 | 179.8 | -15.9 | 61.2 | 122.2 | -22.5% | -25.4% | -14.1% | **yes** | as sc_big_veh + one global 15-min ring of (link time, hist) sums |
 | ds1shiftv9 | sc_big_v9 | 7 | 1,978,242 | 1,424,485 | 87.5 | 43.9 | 179.4 | -15.8 | 61.3 | 122.2 | -22.6% | -25.6% | -13.9% | **yes** | as sc_big_net + 20 min and clipped 60 min vehicle ratios |
 | ds1shiftv9 | sc_big_veh | 7 | 1,978,242 | 1,424,485 | 87.7 | 44.1 | 180.6 | -16.0 | 60.7 | 123.2 | -22.4% | -25.1% | -14.7% | **yes** | as sc_big_lap + per-vehicle 1 h deque of (own link time, hist link time) from the same crossing events; ~2.7 days total |
+| ds1v10f | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v10f | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.0 | 43.2 | 178.2 | -12.1 | 60.6 | 122.0 | -21.3% | -22.8% | -16.6% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds1v11 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
 | ds1v11 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.0 | 43.1 | 178.2 | -12.6 | 60.7 | 121.6 | -21.3% | -22.8% | -16.4% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds1v11 | sc_big_dwell_h | 42 | 2,178,139 | 1,414,363 | 87.1 | 43.0 | 177.9 | -13.5 | 60.4 | 122.1 | -21.2% | -22.9% | -16.8% | **yes** | as sc_big_dwell with the table also keyed by 3-hour band |
@@ -101,6 +109,14 @@ Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs
 | ds1v12 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.0 | 43.1 | 178.2 | -12.6 | 60.7 | 121.6 | -21.3% | -22.8% | -16.4% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds1v12 | sc_big_hw | 42 | 2,178,139 | 1,414,363 | 87.2 | 43.1 | 178.1 | -13.5 | 60.9 | 121.9 | -21.1% | -22.8% | -16.1% | **yes** | as sc_big_dwell + (route, dir, stop) -> last 2 arrivals dict fed by the crossing events; ~+0.2 day |
 | ds1v12 | sc_big_v12 | 42 | 2,178,139 | 1,414,363 | 87.3 | 43.1 | 178.2 | -12.9 | 60.8 | 122.2 | -21.1% | -22.8% | -16.2% | **yes** | as sc_big_hw + stop-keyed dwell table |
+| ds1v13 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v13 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.0 | 43.1 | 178.2 | -12.6 | 60.7 | 121.6 | -21.3% | -22.8% | -16.4% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds1v13 | sc_big_hold | 42 | 2,178,139 | 1,414,363 | 87.0 | 43.2 | 178.6 | -11.6 | 60.4 | 122.0 | -21.4% | -22.7% | -16.8% | **yes** | as sc_big_dwell + trip x location dwell table and trip -> per-day hold list (static, built at export); ~+0.5 day |
+| ds1v19 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v19 | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.0 | 43.1 | 178.2 | -12.6 | 60.7 | 121.6 | -21.3% | -22.8% | -16.4% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds1v19t | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
+| ds1v19t | sc_big_511_it2k | 42 | 2,178,139 | 1,414,363 | 86.5 | 43.1 | 177.3 | -11.6 | 59.9 | 121.2 | -21.7% | -23.2% | -17.4% | **yes** | as sc_big_dwell with 511-leaf trees and up to ~2400 of them (~4x export size, ~2x serving time) |
+| ds1v19t | sc_big_dwell | 42 | 2,178,139 | 1,414,363 | 87.0 | 43.1 | 178.2 | -12.6 | 60.7 | 121.6 | -21.3% | -22.8% | -16.4% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds1v2 | baseline | 42 | 2,178,139 | 1,414,363 | 110.6 | 56.0 | 230.9 | -28.2 | 72.6 | 153.5 | — | — | — | — | prod |
 | ds1v2 | m3_nocal | 42 | 2,178,139 | 1,414,363 | 98.0 | 48.8 | 198.4 | -20.7 | 68.9 | 135.8 | -11.3% | -14.1% | -5.1% | **yes** | link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day |
 | ds1v2 | path_own_m3 | 42 | 2,178,139 | 1,414,363 | 98.4 | 49.8 | 199.2 | -19.9 | 69.9 | 136.1 | -11.1% | -13.7% | -3.7% | **yes** | as path_own_s; store keeps last 3 traversals per link |
@@ -162,3 +178,7 @@ Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs
 | ds1v9 | sc_big_veh | 42 | 2,178,139 | 1,414,363 | 87.7 | 43.3 | 179.1 | -14.0 | 62.0 | 122.3 | -20.7% | -22.4% | -14.6% | **yes** | as sc_big_lap + per-vehicle 1 h deque of (own link time, hist link time) from the same crossing events; ~2.7 days total |
 | ds1v9k3 | baseline | 42 | 6,510,353 | 1,414,363 | 108.1 | 54.4 | 226.9 | -27.5 | 70.4 | 149.9 | — | — | — | — | prod |
 | ds1v9k3 | sc_big_veh | 42 | 6,510,353 | 1,414,363 | 85.4 | 42.4 | 174.3 | -14.7 | 60.2 | 119.2 | -21.0% | -23.2% | -14.5% | **yes** | as sc_big_lap + per-vehicle 1 h deque of (own link time, hist link time) from the same crossing events; ~2.7 days total |
+| ds2 | baseline | 42 | 3,373,426 | 1,414,363 | 107.4 | 53.6 | 224.3 | -31.1 | 70.6 | 149.1 | — | — | — | — | prod |
+| ds2 | sc_big_dwell | 42 | 3,373,426 | 1,414,363 | 85.3 | 42.5 | 175.1 | -13.2 | 59.3 | 119.4 | -20.5% | -21.9% | -16.1% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds2w | baseline | 42 | 2,126,692 | 1,414,363 | 108.9 | 54.3 | 227.7 | -31.0 | 71.5 | 151.1 | — | — | — | — | prod |
+| ds2w | sc_big_dwell | 42 | 2,126,692 | 1,414,363 | 86.3 | 43.0 | 177.3 | -11.8 | 59.9 | 120.8 | -20.7% | -22.2% | -16.2% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |

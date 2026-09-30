@@ -84,10 +84,12 @@ SERVING = {
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);
 # every other tag goes to archive/LEADERBOARD-old.md.
-CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds1v10f", "ds2w", "ds2",
-                "ds1v18", "ds1shiftv18", "ds1v19", "ds1v19t", "ds1v20", "ds1shiftv20", "ds1v13", "ds1shiftv13",
+CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds1v18", "ds1shiftv18", "ds1v20", "ds1shiftv20",
                 "ds3v13", "ds3shiftv13"}
-OLD_TAGS = """`ds1h21` / `ds1h7` = run 17, ds1 with the history link / dwell tables built from the prior 21 / 7 days (MS_HIST_DAYS; 14 d is ds1v10f); baseline row copied from ds1v10f.
+OLD_TAGS = """`ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, removed in run 23; MS_FEAT_DIR=ms_features_v13); baselines identical to ds1v20.
+`ds1v19` = run 19, v10 features rebuilt (baseline + leader reproduce ds1v18). `ds1v19t` = run 19 timing refits (same data as ds1v19, models saved).
+`ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).
+`ds1h21` / `ds1h7` = run 17, ds1 with the history link / dwell tables built from the prior 21 / 7 days (MS_HIST_DAYS; 14 d is ds1v10f); baseline row copied from ds1v10f.
 `ds1r32` / `ds1r72` = run 19, ds1 with the history tables recency-weighted (MS_HIST_RECENT=3 / 7 prior days counted twice); baseline row copied from ds1v19.
 `ds1v11` / `ds1shiftv11` = run 14 add-on: v10 rows + V11 cols (hour-banded dwell, live same-location dwell; MS_FEAT_DIR=ms_features_v11); baselines identical.
 `ds1v12` / `ds1shiftv12` = rebuilt in run 15 (v10 files + V12 add-on cols from `addon_v12.py`: same-route headway / bunching, coarse dwell fallback; MS_FEAT_DIR=ms_features_v12); baselines identical. `ds1v12k3` = 3x train rows.
@@ -108,14 +110,12 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
 Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1v9k3, ds1v11, ds1v12,
-ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72 and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
+ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72, ds1v10f / ds2w / ds2, ds1v19 / ds1v19t, ds1v13 and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
 their baselines are identical to the ds1 / ds1shift ones below.
 
 Tags: `ds3v13` / `ds3shiftv13` = runs 21–22, a later day set (data 09-07..09-28, v10 + V13 cols): ds3 = train 09-14..09-25, test 09-26 (Sat) / 09-27 (Sun) / 09-28 (Mon), seed 42; ds3shift = train 09-14..09-24, test 09-25 (Fri) / 09-26 / 09-27, seed 7. Its baselines differ from ds1 (different days).
-`ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19). `ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, MS_FEAT_DIR=ms_features_v13); baselines identical.
-`ds1v19` = run 19, v10 features rebuilt (baseline + leader reproduce ds1v18). `ds1v19t` = run 19 timing refits (same data as ds1v19, models saved).
+`ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19), + the no-hour-weights arm.
 `ds1v18` / `ds1shiftv18` = run 18, v10 features rebuilt (V8/V9 losers pruned; the leader's cols are unchanged), hyper-parameter / monotone arms.
-`ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).
 `ds1v10` / `ds1shiftv10` = rebuilt in run 14 (+ V10 cols: conditional remaining dwell at the current location from prior days' stationary runs; MS_FEAT_DIR=ms_features_v10); baselines identical. `ds1v12k3` = run 15, the same v10 cols at 3x train rows (3% of snapshots).
 `ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
 `ds1shift` = train 09-07..09-17, test 09-18 (Fri), 09-19, 09-20. Train rows 1% of
