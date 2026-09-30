@@ -7,3 +7,5 @@ export RUN=24 DAYS=2026-09-07..2026-09-28 TRAIN_A=2026-09-14..2026-09-25 TEST_A=
 PREP_DIR=ms_features_v10 ARMS_A="baseline sc_big_mf4 sc_big_mf3" ARMS_B="sc_big_mf4 sc_big_mf3" sh $D/run.sh
 PREP_DIR= FEAT_DIR=ms_features_v10 ARMS_A="sc_big_mf5_msl20 sc_big_mf5" ARMS_B="sc_big_mf5_msl20" sh $D/run.sh
 echo RUN24 ALL DONE
+# run 24, second batch (mf3 best so far): max_features 0.2
+PREP_DIR= FEAT_DIR=ms_features_v10 ARMS_A="sc_big_mf2" ARMS_B="sc_big_mf2" sh $D/run.sh
