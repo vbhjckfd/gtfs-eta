@@ -7,7 +7,7 @@ feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed b
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOURNAL-runs-13-16.md`, `archive/JOURNAL-runs-17-18.md`, `archive/JOURNAL-runs-19-20.md`.
 
-## State of the search (updated run 23)
+## State of the search (updated run 24)
 
 ### Protocol set-up (fixed)
 - Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
@@ -64,6 +64,9 @@ so only viable with vectorised/compiled serving or smaller batches. Not recommen
 **Free tweak (run 23, ds3 only): `sc_big_mf5`** = sc_big_dwell with `max_features=0.5` (per-split column subsampling):
 ds3 86.87 → 86.43 (−0.50%), p90 175.7 → 174.8; ds3shift 88.42 → 88.03 (−0.45%), p90 180.9 → 180.3; every bucket better.
 Training-only, export and serving unchanged, so if sc_big_dwell is handed off, ship it with max_features 0.5.
+**Run 24 sweep (ds3, both splits):** max_features 0.3 (`sc_big_mf3`) is the best setting: ds3 86.87 → 86.30 (−0.65%), p90 175.7 → 174.7;
+ds3shift 88.42 → 87.85 (−0.64%), p90 180.9 → 180.4; every bucket better. 0.4 and 0.2 land between 0.5 and 0.3, and min_samples_leaf 20 is neutral.
+**Hand-off recipe: sc_big_dwell with max_features 0.3.**
 Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs the leader, but it doubles the trees (~3.8 s per 3000 rows). Optional.
 
 ### What won (in order; each Δ is vs the previous leader, both splits)
@@ -125,8 +128,8 @@ Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs t
   66% of its AE (bias −473 s); stationary > 900 s rows MAE 340. These are driver holds, not traffic.
 
 ### Open next steps
-0. Run 23: max_features 0.5 is a free −0.5% on the leader (ds3, both splits). Not yet checked on ds1; a ds1 re-check or
-   mf 0.3 / 0.4 would be the next cheap step. Add it to the hand-off recipe either way; it can't hurt serving.
+0. Run 24: the max_features sweep is done (0.3 is best, −0.65% on both ds3 splits). The one open check is ds1, which needs
+   the 08-31..09-21 rebuild. It is optional; the setting can't hurt serving.
 1. The model-side search has saturated: runs 16–20 all land within ±0.6% of sc_big_dwell (capacity, lookback,
    recency, weights, trip-keyed holds). The open item is hand-off of sc_big_dwell, which is the owner's call. Keep
    the 14-day lookback for its static tables (run 17).
@@ -218,3 +221,42 @@ driver-hold class as 133 / 122, and no feature family has touched these.
 2. Hand-off of sc_big_dwell + max_features 0.5 (owner's call). The search on this feature family is saturated. The remaining large errors
    (133 / 137 / 122) are driver holds, which need operator break data.
 3. Tip for the next run: start run.sh only after pipeline_lite has exited (the prep OOM repeated), run.sh's memory gate was raised from 6 to 9 GB at the end of run 23.
+
+## 2026-09-30 — run 24 (max_features sweep: 0.4 / 0.3 / 0.2, min_samples_leaf 20)
+
+Lock taken at 12:19 UTC. Main was already merged. No housekeeping (journal 220 lines; the 5th-run housekeeping falls on run 25).
+Rebuild: `pipeline_lite.py --parallel 4 --days 2026-09-07..2026-09-28` (12:20–14:39, ≈ 25 min/day/worker). This time `run24.sh` was
+started by a waiter after pipeline_lite exited, and prep had no OOM. Prep ran 14:40–15:40, then fits (`sh research/model-search/run24.sh`,
+features ms_features_v10, tag ds3v13 / ds3shiftv13). Baseline (109.3996) and mf5 (86.427) reproduce run 23 bit-for-bit.
+Pitfall: the tool shell that launched pipeline_lite with `setsid nohup ... &` stays alive, and its command line contains
+"pipeline_lite.py", so run.sh's `pgrep -f pipeline_lite.py` would wait forever. Kill that shell by pid (or use `pgrep -x -f` with the full command).
+`pkill -f <script>` from a tool shell kills that shell too (known pitfall). Use pids.
+
+New arms (arms.py, no new cols): `sc_big_mf4` / `sc_big_mf3` / `sc_big_mf2` = the leader with max_features 0.4 / 0.3 / 0.2;
+`sc_big_mf5_msl20` = mf5 with min_samples_leaf 20.
+
+### Results (MAE / median / p90 / bias; Δ vs the leader sc_big_dwell; ds3 s42 train 2.25M / test 1.42M; ds3shift s7 train 2.04M / test 1.44M)
+| arm | ds3 | ΔL | sa1 / sa5 / sa10 | Sat / Sun / Mon | ds3shift | ΔL | sa1 / sa5 / sa10 | Fri / Sat / Sun | fit s |
+|---|---|---|---|---|---|---|---|---|---|
+| baseline | 109.40 / 55.1 / 227.4 / −28.0 | | 73.0 / 111.1 / 152.0 | 103.4 / 106.6 / 115.4 | 111.44 / 57.0 / 233.3 / −27.5 | | 71.5 / 113.8 / 154.6 | 119.4 / 103.9 / 107.0 | |
+| sc_big_dwell (run 23) | 86.87 / 43.0 / 175.7 / −15.9 | | 61.6 / 87.5 / 120.6 | 85.1 / 85.1 / 89.2 | 88.42 / 43.7 / 180.9 / −18.8 | | 59.9 / 89.2 / 123.6 | 92.4 / 85.3 / 85.5 | 747 / 684 |
+| sc_big_mf5 | 86.43 / 42.8 / 174.8 / −15.8 | −0.50% | 61.1 / 87.0 / 120.0 | 84.5 / 84.6 / 88.9 | 88.03 / 43.6 / 180.3 / −18.4 | −0.45% | 59.6 / 88.5 / 123.4 | 92.1 / 85.0 / 84.8 | 860 / 751 |
+| sc_big_mf4 | 86.48 / 42.7 / 175.0 / −15.6 | −0.45% | 61.2 / 87.0 / 120.0 | 84.7 / 84.5 / 89.0 | 87.96 / 43.5 / 180.6 / −18.7 | −0.52% | 59.5 / 88.6 / 123.3 | 92.0 / 84.9 / 84.9 | 894 / 764 |
+| **sc_big_mf3** | 86.30 / 42.7 / 174.7 / −15.3 | **−0.65%** | 61.0 / 86.9 / 119.7 | 84.6 / 84.5 / 88.7 | 87.85 / 43.5 / 180.4 / −18.5 | **−0.64%** | 59.5 / 88.6 / 122.9 | 91.9 / 84.8 / 84.8 | 850 / 746 |
+| sc_big_mf2 | 86.49 / 42.7 / 174.7 / −15.9 | −0.43% | 61.2 / 87.1 / 119.7 | 84.6 / 84.7 / 89.0 | 87.92 / 43.6 / 180.2 / −18.7 | −0.56% | 59.7 / 88.5 / 123.1 | 92.0 / 84.6 / 85.1 | 808 / 769 |
+| sc_big_mf5_msl20 | 86.46 / 42.8 / 175.4 / −15.1 | −0.47% | 61.1 / 87.1 / 120.1 | 84.5 / 84.8 / 88.9 | 88.18 / 43.5 / 180.5 / −18.9 | −0.27% | 59.7 / 88.8 / 123.5 | 92.2 / 85.2 / 85.1 | 844 / 757 |
+
+vs baseline, sc_big_mf3 is −21.1% (ds3) / −21.2% (ds3shift), p90 227.4 → 174.7 / 233.3 → 180.4, and every bucket is better (the protocol win carries over from the leader).
+Worst routes, mf3 ds3: 133 254.5, 137 215.3, 122 175.3, 143 153.9, 106 151.6, 2460 131.2, 1630 128.2, 111 123.1, 2302 122.9, 125 116.4.
+mf3 ds3shift: 133 334.1, 137 203.1, 143 200.5, 106 165.8, 2460 146.9, 129 146.3, 2302 137.0, 122 136.0, 1630 125.1, 1062 119.5.
+
+**Conclusion: no protocol win vs the leader (< 3%) and no notification.** max_features 0.3 is the best column-subsampling setting,
+−0.65% on both splits with every bucket and p90 better and the same serving cost. 0.2–0.5 all fall within 0.2% of each other, so the exact
+value matters little. Finer leaves (min_samples_leaf 20) add nothing.
+
+### Next steps
+1. Run 25 = housekeeping: archive runs 21–23 and remove the mf/msl arms that only lost (mf7, mf4, mf2, mf5_msl20 once they're marked twice).
+   Delete run22.sh / run23.sh.
+2. Hand-off of sc_big_dwell + max_features 0.3 (owner's call). This hyper-parameter family is now saturated too.
+3. Recommend pausing the schedule: runs 16–24 moved the leader by < 1%. The remaining large errors (133 / 137 / 122 driver holds) need
+   operator break data. A later day set (ending ≥ 10-07) would allow a proper re-test of trip-keyed holds.
