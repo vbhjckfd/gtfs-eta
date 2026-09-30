@@ -650,3 +650,18 @@ def sc_big_nw(tr, te, seed=42):
     """sc_big_dwell without the production hour sample weights (the protocol scores
     unweighted MAE; the weights were a bias fix for the old feature set)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, weights=np.ones(len(tr)))
+
+
+# ---- run 23 (no new cols): per-split feature subsampling and a 2-model bag ----
+@arm
+def sc_big_mf7(tr, te, seed=42):
+    """sc_big_dwell with max_features 0.7 (each split sees a random 70% of the columns)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.7)
+
+
+@arm
+def sc_big_bag2(tr, te, seed=42):
+    """Mean of two sc_big_mf7 fits with different seeds (2x the trees at serving)."""
+    p1, i1 = _stopcat_big_plus(tr.copy(), te.copy(), seed, extra_num=_LEAD, max_features=0.7)
+    p2, i2 = _stopcat_big_plus(tr.copy(), te.copy(), seed + 1000, extra_num=_LEAD, max_features=0.7)
+    return (p1 + p2) / 2, {**i1, "n_iter": i1["n_iter"] + i2["n_iter"]}
