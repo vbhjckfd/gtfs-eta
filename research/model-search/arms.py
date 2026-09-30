@@ -667,3 +667,16 @@ def sc_big_mf5(tr, te, seed=42):
 def sc_big_mf3(tr, te, seed=42):
     """sc_big_dwell with max_features 0.3 (run 24)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.3)
+
+
+# ---- run 25 (no new cols): cheaper-to-serve variants of the hand-off recipe ----
+@arm
+def sc_big_mf3_fast(tr, te, seed=42):
+    """sc_big_mf3 at learning rate 0.1 with a 600-tree cap: half the trees to walk at serving."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.3, learning_rate=0.1, max_iter=600)
+
+
+@arm
+def sc_big_mf3_127(tr, te, seed=42):
+    """sc_big_mf3 with 127-leaf trees (the production export size per tree)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.3, max_leaf_nodes=127)
