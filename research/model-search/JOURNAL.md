@@ -7,7 +7,7 @@ feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed b
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOURNAL-runs-13-16.md`, `archive/JOURNAL-runs-17-18.md`.
 
-## State of the search (updated run 20)
+## State of the search (updated run 22)
 
 ### Protocol set-up (fixed)
 - Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
@@ -46,6 +46,9 @@ min_samples_leaf 50, lr 0.05, 1200 iters (cap binds), sentinel −1 for missing 
 6. vehicle-level own/hist link-time ratio over the last hour, across trips (`_VEH`);
 7. conditional remaining dwell at the current location (last passed stop, 50 m bin) given
    stationary_sec, from the prior 14 days' stationary runs (`_DWELL`).
+**Later day set (runs 21–22, ds3 = train 09-14..09-25, test 09-26..09-28; ds3shift = train 09-14..09-24, test 09-25..09-27):**
+109.4 → 86.9 (−20.6%), p90 227.4 → 175.7; shift 111.4 → 88.4 (−20.7%), p90 233.3 → 180.9; every bucket better. The gain holds
+on unseen later weeks.
 **Serving status: needs serving work, ≈ 3 days** (live link store + position ring + per-vehicle
 crossing log persisted in `feed/tracker_state.json` across the 5-min push-feed restarts;
 export of categorical bitsets / missing_go_to_left; static hist + dwell tables at export).
@@ -108,6 +111,10 @@ so only viable with vectorised/compiled serving or smaller batches. Not recommen
 - Trip-keyed holds (`sc_big_hold`, V13: trip × location remaining dwell + prior days' holds between here and the target):
   −0.02% (ds1) / −0.52% (shift) (run 20). Helps only where it applies (6–11% of rows, −0.7 to −1.4% there). Routes 133
   and 122 barely move: their timetabled breaks are real, but the recurring trip ids are too new (133 since 09-16).
+
+- Trip-keyed holds again on ds3, where the route-133 trip ids have 10+ days of history (`sc_big_hold`): +0.15% (ds3) /
+  −0.17% (ds3shift), p90 worse on both, and route 133 doesn't move (258 → 260 / 342 → 338) (run 22). Ruled out twice; its code
+  (addon_v13.py, arm sc_big_hold) can go at the next housekeeping.
 
 ### Open next steps
 1. The model-side search has saturated: runs 16–20 all land within ±0.6% of sc_big_dwell (capacity, lookback,
@@ -232,3 +239,41 @@ rows and ~1% on weekends. Serving: two static tables at export (~+0.5 day).
 ### Next steps
 See "Open next steps" above. The search is saturated; the useful work is hand-off. At a 4-hour cadence with ~5 h runs,
 most firings will find the lock and exit.
+
+## 2026-09-29/30 — runs 21–22 (later day set ds3; trip-keyed holds with longer history)
+
+Run 21 (lock 00:13 UTC on 09-29) parameterised the split days in run.sh (TRAIN_A/TEST_A/PFX_A, TRAIN_B/TEST_B/PFX_B) and wrote run21.sh
+(new day set ds3, data 09-07..09-28). It pushed the ds3 baseline and leader fits, then the session died (no journal entry).
+Run 22 (lock 20:13 UTC) finished it with `run22.sh`. It rebuilt `pipeline_lite.py --parallel 4 --days 2026-09-07..2026-09-28`
+(≈ 30 min/day/worker, 20:14–23:10), then prep, the V13 add-on and the fits.
+Pitfalls hit this run (the ds3 baseline still reproduced run 21 bit-for-bit, 109.3996):
+- A prep started next to the running pipeline was OOM-killed, so start run22.sh only after the pipeline has finished.
+- A waiter or pkill using `-f <pattern>` matches its own shell's command line (a pkill killed its own shell); use pids instead.
+- A worker restart killed every background job. Start long jobs with `setsid nohup ... < /dev/null`. Prep skips finished days.
+
+Note: ds3's train days 09-14..09-20 have < 14 prior days for the history tables (data starts 09-07). This is the same for every arm.
+
+### Results (MAE / median / p90 / bias; Δ vs the leader)
+| arm | ds3 (s42; train 2.25M, test 1.42M) | ΔL | sa1 / sa5 / sa10 | Sat / Sun / Mon | ds3shift (s7; train 2.04M, test 1.44M) | ΔL | sa1 / sa5 / sa10 | Fri / Sat / Sun |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 109.4 / 55.1 / 227.4 / −28.0 | | 73.0 / 111.1 / 152.0 | 103.4 / 106.6 / 115.4 | 111.4 / 57.0 / 233.3 / −27.5 | | 71.5 / 113.8 / 154.6 | 119.4 / 103.9 / 107.0 |
+| sc_big_dwell | 86.9 / 43.0 / 175.7 / −15.9 (−20.6% vs base) | | 61.6 / 87.5 / 120.6 | 85.1 / 85.1 / 89.2 | 88.4 / 43.7 / 180.9 / −18.8 (−20.7%) | | 59.9 / 89.2 / 123.6 | 92.4 / 85.3 / 85.5 |
+| sc_big_hold | 87.0 / 43.1 / 176.6 / −14.4 | +0.15% | 61.4 / 87.8 / 120.9 | 85.3 / 85.0 / 89.5 | 88.3 / 43.8 / 181.2 / −17.5 | −0.17% | 59.7 / 88.9 / 123.7 | 91.9 / 85.5 / 85.5 |
+
+Worst routes:
+- baseline ds3: 133 300, 137 290, 106 206, 122 193, 2302 179, 143 178, 131 169, 2460 169, 94 167, 1630 167.
+- Leader ds3: 133 258, 137 218, 122 179, 143 163, 106 158, 1630 131, 2460 130, 2302 128, 111 125, 125 116.
+- Leader ds3shift: 133 342, 137 203, 143 201, 106 168, 2460 153, 129 147, 122 137, 2302 135, 1630 131, 1062 121.
+- Hold ds3: 133 260, 137 231, 122 181, 143 158, 106 157. Hold ds3shift: 133 338, 137 204, 143 196, 106 169, 2460 157.
+
+**Conclusion: no new leader and no notification.**
+- sc_big_dwell keeps its −21% on two later splits it was never tuned on, which answers the drift question.
+- Trip-keyed holds don't help even with 10+ days of trip history. Route 133 is now the worst route by far (258–342 s), and its
+  error is the driver breaks. Only operator break times or a real-time "vehicle is on break" signal can fix it; more history
+  of the same kind can't.
+
+### Next steps
+1. Hand-off of sc_big_dwell (owner's call). ds3 confirms it on newer data.
+2. Next housekeeping (run 25, or sooner): archive runs 19–22, delete addon_v13.py / arm sc_big_hold / run19*.sh / run20*.sh / run21.sh,
+   and add the ds1*v13 tags to the old leaderboard.
+3. Pausing the schedule is still the recommendation: runs 16–22 moved the leader by 0%.

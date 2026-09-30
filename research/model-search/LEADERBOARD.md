@@ -8,7 +8,8 @@ Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1v9k3, ds1v11,
 ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72 and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
 their baselines are identical to the ds1 / ds1shift ones below.
 
-Tags: `ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19). `ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, MS_FEAT_DIR=ms_features_v13); baselines identical.
+Tags: `ds3v13` / `ds3shiftv13` = runs 21–22, a later day set (data 09-07..09-28, v10 + V13 cols): ds3 = train 09-14..09-25, test 09-26 (Sat) / 09-27 (Sun) / 09-28 (Mon), seed 42; ds3shift = train 09-14..09-24, test 09-25 (Fri) / 09-26 / 09-27, seed 7. Its baselines differ from ds1 (different days).
+`ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19). `ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, MS_FEAT_DIR=ms_features_v13); baselines identical.
 `ds1v19` = run 19, v10 features rebuilt (baseline + leader reproduce ds1v18). `ds1v19t` = run 19 timing refits (same data as ds1v19, models saved).
 `ds1v18` / `ds1shiftv18` = run 18, v10 features rebuilt (V8/V9 losers pruned; the leader's cols are unchanged), hyper-parameter / monotone arms.
 `ds1v10f` / `ds2w` / `ds2` = run 16, v10 features rebuilt from 08-17 (full 14-day history for every train day); ds1v10f = ds1 split; ds2w = train 08-31..09-18 at 0.63% (same rows as ds1); ds2 = same 19 days at 1%; test 09-19..09-21. Baselines differ between these tags (different training data).
@@ -63,3 +64,9 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds2 | sc_big_dwell | 42 | 3,373,426 | 1,414,363 | 85.3 | 42.5 | 175.1 | -13.2 | 59.3 | 119.4 | -20.5% | -21.9% | -16.1% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds2w | baseline | 42 | 2,126,692 | 1,414,363 | 108.9 | 54.3 | 227.7 | -31.0 | 71.5 | 151.1 | — | — | — | — | prod |
 | ds2w | sc_big_dwell | 42 | 2,126,692 | 1,414,363 | 86.3 | 43.0 | 177.3 | -11.8 | 59.9 | 120.8 | -20.7% | -22.2% | -16.2% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds3shiftv13 | baseline | 7 | 2,040,811 | 1,443,531 | 111.4 | 57.0 | 233.3 | -27.5 | 71.5 | 154.6 | — | — | — | — | prod |
+| ds3shiftv13 | sc_big_dwell | 7 | 2,040,811 | 1,443,531 | 88.4 | 43.7 | 180.9 | -18.8 | 59.9 | 123.6 | -20.7% | -22.4% | -16.1% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds3shiftv13 | sc_big_hold | 7 | 2,040,811 | 1,443,531 | 88.3 | 43.8 | 181.2 | -17.5 | 59.7 | 123.7 | -20.8% | -22.3% | -16.5% | **yes** | as sc_big_dwell + trip x location dwell table and trip -> per-day hold list (static, built at export); ~+0.5 day |
+| ds3v13 | baseline | 42 | 2,250,172 | 1,423,357 | 109.4 | 55.1 | 227.4 | -28.0 | 73.0 | 152.0 | — | — | — | — | prod |
+| ds3v13 | sc_big_dwell | 42 | 2,250,172 | 1,423,357 | 86.9 | 43.0 | 175.7 | -15.9 | 61.6 | 120.6 | -20.6% | -22.7% | -15.6% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds3v13 | sc_big_hold | 42 | 2,250,172 | 1,423,357 | 87.0 | 43.1 | 176.6 | -14.4 | 61.4 | 120.9 | -20.5% | -22.3% | -15.9% | **yes** | as sc_big_dwell + trip x location dwell table and trip -> per-day hold list (static, built at export); ~+0.5 day |
