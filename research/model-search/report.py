@@ -80,6 +80,9 @@ SERVING = {
     "sc_big_hw": "as sc_big_dwell + (route, dir, stop) -> last 2 arrivals dict fed by the crossing events; ~+0.2 day",
     "sc_big_dwc": "as sc_big_dwell + stop-keyed dwell table (same export step)",
     "sc_big_v12": "as sc_big_hw + stop-keyed dwell table",
+    "sc_big_mf7": "as sc_big_dwell (training-only change: max_features 0.7; export unchanged)",
+    "sc_big_mf5": "as sc_big_dwell (training-only change: max_features 0.5; export unchanged)",
+    "sc_big_bag2": "as sc_big_mf7 x 2 seeds, predictions averaged (2400 trees, ~2x serving time, ~3.8 s per 3000 rows)",
     "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);

@@ -24,7 +24,7 @@ if [ -n "$PREP_DIR" ]; then
   for day in $(python -c "import sys;sys.path.insert(0,'$D');from harness import expand_days;print(' '.join(expand_days('$DAYS')))"); do
     while [ ! -f data/ms_lite/$day.pos.parquet ] || [ ! -f data/ms_lite/$day.parquet ]; do sleep 30; done
     sleep 20
-    while [ $(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo) -lt 6 ]; do sleep 30; done
+    while [ $(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo) -lt 9 ]; do sleep 30; done
     MS_FEAT_DIR=$PREP_DIR python $H prep --days $day || { echo "PREP FAIL $day"; exit 1; }
     echo "PREP OK $day $(date -u +%H:%M)"
   done
