@@ -67,6 +67,11 @@ Training-only, export and serving unchanged, so if sc_big_dwell is handed off, s
 **Run 24 sweep (ds3, both splits):** max_features 0.3 (`sc_big_mf3`) is the best setting: ds3 86.87 → 86.30 (−0.65%), p90 175.7 → 174.7;
 ds3shift 88.42 → 87.85 (−0.64%), p90 180.9 → 180.4; every bucket better. 0.4 and 0.2 land between 0.5 and 0.3, and min_samples_leaf 20 is neutral.
 **Hand-off recipe: sc_big_dwell with max_features 0.3.**
+**Run 25, newest day set ds4 (train 09-15..09-26, test 09-27 Sun / 09-28 Mon / 09-29 Tue):** baseline 113.9 → leader 88.1 (−22.7%) → mf3 87.8
+(−23.0%, p90 241.6 → 180.8); ds4shift (seed 11) baseline 110.0 → mf3 86.7 (−21.1%). mf3 beats the leader on a third split (−0.41%), every bucket.
+Cheaper serving options (ds4): `sc_big_mf3_127` (127-leaf trees, ~half the export) gives 88.3 (+0.6% vs mf3, about the same as the leader). `sc_big_mf3_fast`
+(600 trees at lr 0.1, ~half the tree walks) gives 88.7 / 87.3 (+1.1% / +0.7% vs mf3). Both still beat the baseline by more than 20%, so either is a
+safe fallback if serving time binds.
 Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs the leader, but it doubles the trees (~3.8 s per 3000 rows). Optional.
 
 ### What won (in order; each Δ is vs the previous leader, both splits)
@@ -128,7 +133,8 @@ Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs t
   66% of its AE (bias −473 s); stationary > 900 s rows MAE 340. These are driver holds, not traffic.
 
 ### Open next steps
-0. Run 24: the max_features sweep is done (0.3 is best, −0.65% on both ds3 splits). The one open check is ds1, which needs
+0. (run 25) mf3 is confirmed on ds4/ds4shift, so the ds1 check is moot. Open: time the serving cost of sc_big_mf3_127 / _fast (timing.py, MS_SAVE_MODEL) on the GH-runner-sized box.
+   Old note: the max_features sweep (run 24) left a ds1 check open, which needed
    the 08-31..09-21 rebuild. It is optional; the setting can't hurt serving.
 1. The model-side search has saturated: runs 16–20 all land within ±0.6% of sc_big_dwell (capacity, lookback,
    recency, weights, trip-keyed holds). The open item is hand-off of sc_big_dwell, which is the owner's call. Keep
@@ -178,3 +184,46 @@ value matters little. Finer leaves (min_samples_leaf 20) add nothing.
 2. Hand-off of sc_big_dwell + max_features 0.3 (owner's call). This hyper-parameter family is now saturated too.
 3. Recommend pausing the schedule: runs 16–24 moved the leader by < 1%. The remaining large errors (133 / 137 / 122 driver holds) need
    operator break data. A later day set (ending ≥ 10-07) would allow a proper re-test of trip-keyed holds.
+
+## 2026-09-30/10-01 — run 25 (housekeeping; newest day set ds4; cheaper-to-serve mf3 variants)
+
+Lock taken at 20:13 UTC. Main (aeb652a) was already merged. Housekeeping commit 7b94c24: runs 21–23 went to `archive/JOURNAL-runs-21-23.md`,
+the ds1v18 / ds1v20 tags moved to the old leaderboard, the arms mf7 / mf4 / mf2 / mf5_msl20 (dominated by mf3 on both ds3 splits) were removed,
+and run22/23.sh were deleted.
+Rebuild: `pipeline_lite.py --parallel 4 --days 2026-09-08..2026-09-29`. The container restarted at about 22:10 with 14 days done (≈ 32 min/day/worker),
+which killed every background job. A re-run skipped the finished days and finished at 22:59. Then `sh research/model-search/run25.sh` ran
+(prep into ms_features_v10, fits tagged ds4v25 / ds4shiftv25), chained after the pipeline in one script so they can't overlap.
+New arms (no new cols): `sc_big_mf3_fast` = mf3 with lr 0.1 and a 600-tree cap; `sc_big_mf3_127` = mf3 with 127 leaves.
+Note: ds4's train days 09-15..09-21 have < 14 prior days for the history tables (data starts 09-08). This is the same for every arm.
+
+### Results (MAE / median / p90 / bias; Δ vs the baseline of the same split)
+| arm | ds4 (s42; train 2.21M, test 1.61M) | Δ | sa1 / sa5 / sa10 | Sun / Mon / Tue | ds4shift (s11; train 2.06M, test 1.42M) | Δ | sa1 / sa5 / sa10 | Sat / Sun / Mon | fit s |
+|---|---|---|---|---|---|---|---|---|---|
+| baseline | 113.95 / 60.4 / 241.6 / −19.3 | | 73.4 / 116.2 / 157.8 | 104.5 / 115.5 / 118.5 | 109.95 / 55.9 / 228.7 / −23.5 | | 73.3 / 111.8 / 152.7 | 103.6 / 106.8 / 116.5 | 509 / 418 |
+| sc_big_dwell | 88.13 / 44.9 / 181.3 / −12.4 | −22.7% | 61.1 / 89.2 / 122.7 | 82.9 / 88.9 / 90.8 | — | | | | 819 |
+| **sc_big_mf3** | 87.77 / 44.7 / 180.8 / −12.7 | −23.0% | 61.0 / 88.6 / 122.3 | 82.4 / 88.4 / 90.6 | 86.71 / 42.9 / 175.5 / −14.9 | −21.1% | 61.4 / 87.2 / 120.4 | 84.7 / 84.6 / 89.5 | 781 / 727 |
+| sc_big_mf3_127 | 88.30 / 44.8 / 181.4 / −13.7 | −22.5% | 61.4 / 89.1 / 122.9 | 83.0 / 89.0 / 91.1 | — | | | | 668 |
+| sc_big_mf3_fast | 88.71 / 45.0 / 182.6 / −13.1 | −22.1% | 61.7 / 89.5 / 123.5 | 83.8 / 89.3 / 91.4 | 87.34 / 43.2 / 177.0 / −14.9 | −20.6% | 61.7 / 88.0 / 121.2 | 85.7 / 85.2 / 89.9 | 449 / 401 |
+
+Every arm wins the protocol vs the baseline on its split (every bucket better by ≥ 15.8%, p90 better by ≥ 22%).
+Worst routes, ds4:
+- baseline: 137 339, 133 248, 2302 199, 106 197, 122 194, 131 188, 143 179, 2460 175, 111 167, 118 164.
+- mf3: 137 242, 133 200, 122 169, 118 165, 106 144, 131 135, 2302 134, 2460 133, 111 130, 143 130.
+- mf3_127: 137 250, 133 194, 122 170, 118 166, 106 150.
+
+Worst routes, ds4shift:
+- baseline: 133 300, 137 288, 106 204, 2302 193, 122 193.
+- mf3: 133 252, 137 223, 122 173, 143 156, 106 156, 2460 133, 2302 131, 1630 128, 111 124, 125 119.
+
+Route 118 joins the worst list on ds4 (~165 for every arm). The 09-29 test day is new there, which is worth a look if it persists.
+
+**Conclusion: no new protocol win vs the leader and no notification.**
+- On the newest days the leader family holds (−22.7% / −23.0%), and max_features 0.3 helps on a third split (−0.41% vs the leader). The hand-off recipe stays sc_big_dwell + max_features 0.3.
+- Two cheaper-to-serve versions cost little:
+  - 127-leaf trees: +0.6% vs mf3, about the same as the unsubsampled leader. It is the production per-tree size, so the export stays ~15 MB rather than ~29 MB.
+  - 600 trees at lr 0.1: +0.7 to +1.1%, with about half the tree walks per prediction.
+
+### Next steps
+1. Hand-off of sc_big_dwell + max_features 0.3 (owner's call). If the serving budget is tight, 127 leaves is the first thing to give up (≈ +0.6%).
+2. Optional: measure the serving time of mf3_127 / mf3_fast with timing.py (needs `MS_SAVE_MODEL` refits).
+3. Still recommend pausing the schedule. The model-side search is saturated; runs 16–25 moved the leader by < 1%.
