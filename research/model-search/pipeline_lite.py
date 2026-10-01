@@ -11,6 +11,10 @@ Also writes two compact full-day side tables for features_live.py:
   data/ms_lite/<day>.cross.parquet  unique stop arrivals (vehicle, trip, stop, t)
   data/ms_lite/<day>.pos.parquet    per-snapshot vehicle positions along the trip
 
+Run 26: also writes data/ms_lite/<day>.age.parquet (vehicle_id, timestamp = feed
+time, vehicle_ts = the vehicle's own GPS fix time, epoch s) for addon_v26.py; the
+rows fed to infer_trips are unchanged.
+
 Usage: python research/model-search/pipeline_lite.py --parallel 4 --days 2026-09-07..2026-09-21
 """
 
@@ -39,10 +43,51 @@ def sample_mask(df: pd.DataFrame, keep_pct: float) -> np.ndarray:
     return (key % 10000) < keep_pct * 100
 
 
+def _parse_with_vts(client, key: str) -> list[dict]:
+    """Copy of src.snapshots._fetch_and_parse that also keeps the per-vehicle
+    GPS timestamp as vehicle_ts (run 26); every other field is identical."""
+    from datetime import datetime, timezone
+    from google.transit import gtfs_realtime_pb2
+    from src.snapshots import R2_BUCKET
+    try:
+        data = client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read()
+    except Exception:
+        return []
+    if not data:
+        return []
+    feed = gtfs_realtime_pb2.FeedMessage()
+    try:
+        feed.ParseFromString(data)
+    except Exception:
+        return []
+    feed_ts = datetime.fromtimestamp(feed.header.timestamp, tz=timezone.utc)
+    rows = []
+    for entity in feed.entity:
+        if not entity.HasField("vehicle"):
+            continue
+        v = entity.vehicle
+        pos = v.position if v.HasField("position") else None
+        trip = v.trip if v.HasField("trip") else None
+        rows.append({
+            "timestamp": feed_ts,
+            "vehicle_id": v.vehicle.id if v.HasField("vehicle") else entity.id,
+            "trip_id": trip.trip_id if trip else None,
+            "route_id": trip.route_id if trip else None,
+            "lat": pos.latitude if pos else None,
+            "lon": pos.longitude if pos else None,
+            "bearing": pos.bearing if pos else None,
+            "speed": pos.speed if pos else None,
+            "stop_id": str(v.stop_id) if v.stop_id else None,
+            "current_status": v.current_status,
+            "vehicle_ts": int(v.timestamp) if v.HasField("timestamp") else None,
+        })
+    return rows
+
+
 def process_day(day: str) -> dict:
     from src.gtfs_static import get_gtfs_for_date
     from src.labeling import training_rows_for_trajectory
-    from src.snapshots import _fetch_and_parse, _make_client, list_snapshot_keys
+    from src.snapshots import _make_client, list_snapshot_keys
     from src.trip_inference import infer_trips
 
     out = OUT / f"{day}.parquet"
@@ -56,12 +101,15 @@ def process_day(day: str) -> dict:
         return {"day": day, "status": "no_keys"}
     rows = []
     with ThreadPoolExecutor(max_workers=12) as ex:
-        for r in ex.map(lambda k: _fetch_and_parse(client, k), keys):
+        for r in ex.map(lambda k: _parse_with_vts(client, k), keys):
             rows.extend(r)
     df = pd.DataFrame(rows)
     del rows
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.dropna(subset=["lat", "lon"])
+    OUT.mkdir(parents=True, exist_ok=True)
+    df[["vehicle_id", "timestamp", "vehicle_ts"]].to_parquet(OUT / f"{day}.age.parquet", index=False)
+    df = df.drop(columns=["vehicle_ts"])
     df = infer_trips(df, gtfs)
     if "off_route" in df.columns:
         df = df[~df["off_route"]]

@@ -680,3 +680,13 @@ def sc_big_mf3_fast(tr, te, seed=42):
 def sc_big_mf3_127(tr, te, seed=42):
     """sc_big_mf3 with 127-leaf trees (the production export size per tree)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD, max_features=0.3, max_leaf_nodes=127)
+
+
+# ---- run 26 add-on (V26 cols, MS_FEAT_DIR=ms_features_v26) -------------------
+_AGE = ["pos_age_s", "pos_age_med600", "pos_age_dist"]
+
+
+@arm
+def sc_big_mf3_age(tr, te, seed=42):
+    """sc_big_mf3 + age of the vehicle's GPS fix at the snapshot (feed ts - vehicle ts)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE, max_features=0.3)
