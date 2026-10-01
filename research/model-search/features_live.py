@@ -85,6 +85,22 @@ DWELL_BIN_M = 50.0
 DWELL_MIN_N = 5
 VEH_WINDOW_SEC = 3600
 OWN_WINDOW_SEC = 1800
+# run 27: MS_AGE_CORR=1 times link traversals and own speed on the vehicle's GPS
+# fix clock (feed ts - fix age) instead of the feed clock. Availability gating
+# (DETECT_LAG_SEC, windows) stays on the feed clock. Ages clipped to [0, AGE_CLIP]
+# (serving drops vehicles with fixes older than 180 s).
+AGE_CORR = os.environ.get("MS_AGE_CORR", "") == "1"
+AGE_CLIP = 180.0
+
+
+def _age_lookup(age: pd.DataFrame, vid: np.ndarray, t: np.ndarray, tol: float) -> np.ndarray:
+    """Fix age of vehicle vid at (or nearest to) feed time t; 0 where unknown."""
+    q = pd.DataFrame({"rid": np.arange(len(t)), "vehicle_id": vid.astype(str).astype(object),
+                      "t": t.astype(float)}).sort_values("t")
+    m = pd.merge_asof(q, age, on="t", by="vehicle_id", direction="nearest", tolerance=tol)
+    out = np.zeros(len(t))
+    out[m["rid"].to_numpy()] = np.nan_to_num(m["age"].to_numpy(dtype=float), nan=0.0)
+    return out
 
 
 def _epoch(s: pd.Series) -> np.ndarray:
@@ -235,9 +251,14 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
                   gtfs, prior_links: list[pd.DataFrame] | None = None,
                   links_out: list | None = None,
                   prior_runs: list[pd.DataFrame] | None = None,
-                  runs_out: list | None = None) -> pd.DataFrame:
-    """cross/pos: full-day side tables from pipeline_lite; rows: sampled rows."""
+                  runs_out: list | None = None,
+                  age: pd.DataFrame | None = None) -> pd.DataFrame:
+    """cross/pos: full-day side tables from pipeline_lite; rows: sampled rows.
+    age (run 27, MS_AGE_CORR): vehicle_id / t (feed, epoch s) / age (s) per snapshot."""
     arr_t = _epoch(cross["actual_arrival"])
+    if age is not None:
+        age = age.assign(vehicle_id=age["vehicle_id"].astype(str).astype(object),
+                         t=age["t"].astype(float)).sort_values("t")
     rows_t = _epoch(rows["snapshot_ts"])
     profs = _profiles(gtfs, pd.unique(cross["trip_id"]))
 
@@ -247,6 +268,8 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
         "stop_id": cross["stop_id"].astype(str).to_numpy(),
         "sd": cross["stop_dist_along_m"].to_numpy(dtype=float), "t": arr_t,
     }).drop_duplicates(["vehicle_id", "trip_id", "sd", "t"])
+    cr["tc"] = (cr["t"] - _age_lookup(age, cr["vehicle_id"].to_numpy(), cr["t"].to_numpy(), 60)
+                if age is not None else cr["t"])
     cr["pidx"] = -1
     for tid, g in cr.groupby("trip_id", sort=False):
         if tid in profs:
@@ -255,7 +278,7 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     same = (cr["vehicle_id"].eq(cr["vehicle_id"].shift())
             & cr["trip_id"].eq(cr["trip_id"].shift()))
     prev_stop = cr["stop_id"].shift()
-    dt = cr["t"] - cr["t"].shift()
+    dt = cr["tc"] - cr["tc"].shift()   # == t diff unless MS_AGE_CORR
     ok = same & (cr["pidx"] == cr["pidx"].shift() + 1) & (dt > 0) & (dt < 1800)
     vt_cr = cr["vehicle_id"].astype(str) + "|" + cr["trip_id"].astype(str)
     links = pd.DataFrame({"vt": vt_cr[ok].to_numpy(),
@@ -497,11 +520,11 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
                       "d": dv, "t": rows_t})
     for W in (60, 180, 300):
         qq = q.assign(tw=q["t"] - W).sort_values("tw")
-        mm = pd.merge_asof(qq, pos_df[["vt", "t", "d"]].rename(columns={"t": "tp", "d": "dp"}),
+        mm = pd.merge_asof(qq, pos_df[["vt", "t", "d", "a"]].rename(columns={"t": "tp", "d": "dp", "a": "ap"}),
                            left_on="tw", right_on="tp", by="vt", direction="backward",
                            tolerance=60)
         adv = mm["d"] - mm["dp"]
-        el = mm["t"] - mm["tp"]
+        el = (mm["t"] - mm["a"]) - (mm["tp"] - mm["ap"])   # fix-clock elapsed (run 27)
         spd = np.where((adv > -30) & (el > 0), np.maximum(adv, 0) / el, np.nan)
         out.loc[mm["rid"].to_numpy(), f"own_speed_{W}"] = spd
     return out[LIVE_COLS + EXTRA_COLS + V3_COLS + V4_COLS + V5_COLS + V6_COLS + V7_COLS + V8_COLS + V10_COLS].reset_index(drop=True)

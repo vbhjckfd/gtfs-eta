@@ -36,8 +36,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from features_live import _epoch  # noqa: E402
 from harness import TRAIN_DIR, expand_days  # noqa: E402
 
-SRC = REPO / "data" / "ms_features_v10"
-DST = REPO / "data" / "ms_features_v26"
+import os  # noqa: E402
+SRC = REPO / "data" / os.environ.get("MS_ADDON_SRC", "ms_features_v10")   # run 27: overridable
+DST = REPO / "data" / os.environ.get("MS_ADDON_DST", "ms_features_v26")
 V26_COLS = ["pos_age_s", "pos_age_med600", "pos_age_dist"]
 
 

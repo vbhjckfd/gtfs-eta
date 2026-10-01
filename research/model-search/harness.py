@@ -128,8 +128,16 @@ def prep_day(day: str, keep_pct: float, client=None) -> Path:
         prior = _upweight(prior, d0, "links_")
         prior_runs = _upweight(prior_runs, d0, "runs_")
     lo, ro = [], []
+    from features_live import AGE_CORR, AGE_CLIP
+    age = None
+    if AGE_CORR:   # run 27: fix-clock link / speed times (needs pipeline_lite .age.parquet)
+        a = pd.read_parquet(TRAIN_DIR / f"{day}.age.parquet")
+        ft = (pd.to_datetime(a["timestamp"], utc=True) - pd.Timestamp("1970-01-01", tz="UTC")).dt.total_seconds()
+        age = pd.DataFrame({"vehicle_id": a["vehicle_id"].astype(str).to_numpy(), "t": ft.to_numpy(),
+                            "age": np.clip(ft.to_numpy() - pd.to_numeric(a["vehicle_ts"]).to_numpy(dtype=float),
+                                           0.0, AGE_CLIP)}).dropna().drop_duplicates(["vehicle_id", "t"])
     live = live_features(cross, pos, raw.iloc[idx].reset_index(drop=True), gtfs,
-                         prior_links=prior, links_out=lo, prior_runs=prior_runs, runs_out=ro)
+                         prior_links=prior, links_out=lo, prior_runs=prior_runs, runs_out=ro, age=age)
     FEAT_DIR.mkdir(parents=True, exist_ok=True)
     lo[0].to_parquet(FEAT_DIR / f"links_{day}.parquet", index=False)
     ro[0].to_parquet(FEAT_DIR / f"runs_{day}.parquet", index=False)

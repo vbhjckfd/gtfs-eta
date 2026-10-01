@@ -690,3 +690,10 @@ _AGE = ["pos_age_s", "pos_age_med600", "pos_age_dist"]
 def sc_big_mf3_age(tr, te, seed=42):
     """sc_big_mf3 + age of the vehicle's GPS fix at the snapshot (feed ts - vehicle ts)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE, max_features=0.3)
+
+
+# ---- run 27: same arms on fix-clock features (MS_AGE_CORR prep -> ms_features_v27) ----
+@arm
+def sc_big_mf3_age1(tr, te, seed=42):
+    """sc_big_mf3 + pos_age_s only (ablation of the V26 cols)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + ["pos_age_s"], max_features=0.3)
