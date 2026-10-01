@@ -76,6 +76,9 @@ safe fallback if serving time binds.
 feed time). Fix age is p50 12 s, p90 ~41 s, and 16–17% of training rows are > 30 s old. Adding pos_age_s / the vehicle's 600 s median age / age × own speed to mf3 gives
 ds4 87.77 → 87.22 (−0.63%), ds4shift 86.71 → 86.47 (−0.28%), with every day, every bucket and p90 better on both. Serving is cheap (inference already reads vehicle_ts).
 Ship it with the hand-off if the age ring is easy; not a protocol win on its own.
+**Run 27: fix-clock link / speed timing (MS_AGE_CORR=1 prep).** Alone it gives mf3 −0.38% (ds4), every bucket better, but it does not stack with the
+age cols (mf3_age 87.22 → 87.34 on ds4, 86.47 → 86.43 on ds4shift). The age cols already capture it; keep the feed clock (simpler serving).
+pos_age_s alone gives the same result as all 3 age cols on fix-clock features (87.336 vs 87.341).
 Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs the leader, but it doubles the trees (~3.8 s per 3000 rows). Optional.
 
 ### What won (in order; each Δ is vs the previous leader, both splits)
@@ -137,6 +140,7 @@ Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs t
   66% of its AE (bias −473 s); stationary > 900 s rows MAE 340. These are driver holds, not traffic.
 
 ### Open next steps
+-2. (run 27) The GPS-fix-age signal is exhausted: the fix-clock correction and the col ablation are done. The hand-off recipe is unchanged (mf3 + V26 age cols).
 -1. (run 26) Box memcg limit is now 14 GB: pipeline_lite OOMs at `--parallel 4`; use 3 (22 days ≈ 3.9 h).
 0. (run 25) mf3 is confirmed on ds4/ds4shift, so the ds1 check is moot. Open: time the serving cost of sc_big_mf3_127 / _fast (timing.py, MS_SAVE_MODEL) on the GH-runner-sized box.
    Old note: the max_features sweep (run 24) left a ds1 check open, which needed
@@ -276,3 +280,48 @@ median needs a small per-vehicle ring. Add it to the hand-off recipe as "mf3 + a
 2. Not done: an ablation of the 3 age cols, and age-correcting the live link-store crossing times (crossings are timed with the feed ts, so they lag by the fix age). The
    latter changes labels as well as features, which needs care. It is the one untested idea left from this signal.
 3. Still recommend pausing the schedule; runs 16–26 moved the leader by < 1.3% in total.
+
+## 2026-10-01 — run 27 (GPS fix clock for live link times and own speed)
+
+Lock taken at 12:20 UTC. Main (aeb652a) was already merged. No housekeeping this run (journal 278 lines; the next 5th-run housekeeping falls on run 30).
+**Idea (run 26, next step 2).** Crossing times in the live link store and the own-speed windows are measured on the feed clock, so every link traversal carries the
+difference of two fix ages as noise (fix age p50 12 s, p90 ~40 s). Labels are unchanged.
+- `MS_AGE_CORR=1` (features_live.py + harness.py prep):
+  - Each crossing's fix-clock time is `t − age` (nearest snapshot of the vehicle within 60 s; age clipped to [0, 180] s). Link `lt` is the difference of fix-clock times.
+  - Availability (`t`, the 30 s detect lag, windows) stays on the feed clock, so nothing peeks ahead.
+  - Own speed divides by fix-clock elapsed time. When the fix didn't change between snapshots, el ≤ 0, so the value is NaN: own_speed_60 coverage drops from 96.7% to 95.5%.
+  - The historical link tables (links_*.parquet) are corrected too, because they are built from the same links.
+- On 09-08, link-time features moved by a median of 5–10 s (p90 19–35 s), and own_speed_60 by a median of 0.23 m/s.
+- `addon_v26.py` SRC/DST can now be set with MS_ADDON_SRC / MS_ADDON_DST. New arm `sc_big_mf3_age1` = mf3 + pos_age_s only.
+
+Commands: `sh research/model-search/run27.sh`.
+- pipeline 09-08..09-29 at `--parallel 3` took 12:25–14:58, much faster than run 26 (≈ 23 min/day/worker).
+- prep (MS_AGE_CORR=1) → ms_features_v27c, then addon_v26 → ms_features_v27, tags ds4v27 / ds4shiftv27.
+- The first prep attempt failed on two bugs: a pandas-3 str-vs-object merge key, and an own-speed edit that hadn't applied. Both were fixed and re-run at 15:05.
+  run.sh exits on PREP FAIL, but run27.sh still printed "RUN27 ALL DONE"; check for PREP FAIL in the log.
+Reproduction: the ds4v27 baseline is 113.9459, bit-for-bit equal to ds4v25/v26, so the v27 rows are comparable with the run 26 rows.
+
+### Results (MAE / median / p90 / bias; ds4 s42 train 2.21M / test 1.61M; ds4shift s11 train 2.06M / test 1.42M)
+| arm | features | ds4 | sa1 / sa5 / sa10 | Sun / Mon / Tue | ds4shift | Sat / Sun / Mon |
+|---|---|---|---|---|---|---|
+| baseline | — | 113.95 / 60.4 / 241.6 / −19.3 | 73.4 / 116.2 / 157.8 | 104.5 / 115.5 / 118.5 | 109.95 (v25) | |
+| sc_big_mf3 | feed clock (v26) | 87.77 / 44.7 / 180.8 / −12.7 | 61.0 / 88.6 / 122.3 | 82.4 / 88.4 / 90.6 | 86.71 (v25) | 84.7 / 84.6 / 89.5 |
+| sc_big_mf3 | **fix clock (v27)** | 87.43 / 44.5 / 179.9 / −12.7 (−0.38%) | 60.7 / 88.2 / 122.0 | 82.2 / 88.1 / 90.2 | — | |
+| sc_big_mf3_age | feed clock (v26) | **87.22** / 44.3 / 180.3 / −12.8 | 60.4 / 88.2 / 121.5 | 81.8 / 88.0 / 89.9 | 86.47 / 42.5 / 174.7 / −15.0 | 84.4 / 84.3 / 89.4 |
+| sc_big_mf3_age | fix clock (v27) | 87.34 / 44.3 / 180.3 / −12.8 (+0.14% vs v26) | 60.6 / 88.1 / 122.0 | 82.0 / 88.2 / 90.0 | 86.43 / 42.5 / 174.5 / −15.4 (−0.05%) | 84.2 / 84.5 / 89.3 |
+| sc_big_mf3_age1 | fix clock (v27) | 87.34 / 44.3 / 179.8 / −13.1 | 60.7 / 88.0 / 121.8 | 82.0 / 88.2 / 90.0 | — | |
+
+Bucket Δ (sa1..10), mf3 v27 vs v26: −0.45 −0.48 −0.42 −0.48 −0.46 −0.33 −0.24 −0.26 −0.42 −0.32% (all better).
+mf3_age v27 vs v26: ds4 +0.23 −0.04 +0.01 +0.15 −0.03 +0.09 −0.03 +0.29 +0.33 +0.38%; ds4shift +0.13 −0.10 −0.09 +0.08 −0.04 +0.03 −0.24 −0.01 −0.12 −0.09%.
+Worst routes, mf3_age v27 ds4: 137 244, 133 188, 122 172, 118 166, 106 146, 2302 136, 2460 132, 131 129, 111 129, 143 125.
+Worst routes, ds4shift: 133 253, 137 226, 122 174, 143 157, 106 157, 2460 133, 2302 132, 1630 129, 111 122, 149 114.
+
+**Conclusion: no protocol win, no notification.**
+- Timing on the fix clock recovers most of what the age cols give (−0.38% vs −0.63% on ds4), but the two don't stack. With the age cols present it is neutral to slightly worse (+0.14% / −0.05%).
+- Fix-clock timing also needs vehicle_ts carried into the serving link store. The feed-clock recipe + V26 age cols stays the hand-off.
+- Ablation: on v27, pos_age_s alone equals all 3 age cols. The 600 s median ring may be unnecessary, but that is only tested on fix-clock features; on the feed clock it is untested.
+
+### Next steps
+1. Hand-off recipe unchanged: sc_big_dwell + max_features 0.3 + V26 age cols (feed clock). Owner's call.
+2. Optional, cheap: ablate pos_age_med600 / pos_age_dist on the feed-clock v26 features (needs a v10 prep, +1 h). If pos_age_s alone holds there, serving needs no age ring.
+3. Still recommend pausing the schedule: runs 16–27 moved the leader by < 1.3% in total. The largest remaining errors (133 / 137 / 122 driver holds) need operator break data.
