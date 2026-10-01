@@ -32,7 +32,9 @@ if [ -n "$PREP_DIR" ]; then
 fi
 while pgrep -f pipeline_lite.py >/dev/null; do sleep 30; done
 if [ -n "$ADDON" ]; then
-  python $D/$ADDON --days ${ADDON_DAYS:-2026-09-07..2026-09-21} || { echo "ADDON FAIL"; exit 1; }
+  for ad in $ADDON; do   # run 28: space-separated list, applied in order
+    python $D/$ad --days ${ADDON_DAYS:-2026-09-07..2026-09-21} || { echo "ADDON FAIL $ad"; exit 1; }
+  done
   echo ADDON DONE
 fi
 export MS_FEAT_DIR=${FEAT_DIR:-$PREP_DIR}

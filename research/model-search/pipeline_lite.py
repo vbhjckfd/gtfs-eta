@@ -12,7 +12,8 @@ Also writes two compact full-day side tables for features_live.py:
   data/ms_lite/<day>.pos.parquet    per-snapshot vehicle positions along the trip
 
 Run 26: also writes data/ms_lite/<day>.age.parquet (vehicle_id, timestamp = feed
-time, vehicle_ts = the vehicle's own GPS fix time, epoch s) for addon_v26.py; the
+time, vehicle_ts = the vehicle's own GPS fix time, epoch s; run 28 adds the feed's
+reported speed (m/s) and odometer (km)) for addon_v26.py; the
 rows fed to infer_trips are unchanged.
 
 Usage: python research/model-search/pipeline_lite.py --parallel 4 --days 2026-09-07..2026-09-21
@@ -80,6 +81,7 @@ def _parse_with_vts(client, key: str) -> list[dict]:
             "stop_id": str(v.stop_id) if v.stop_id else None,
             "current_status": v.current_status,
             "vehicle_ts": int(v.timestamp) if v.HasField("timestamp") else None,
+            "odometer": pos.odometer if pos is not None and pos.HasField("odometer") else None,
         })
     return rows
 
@@ -108,8 +110,9 @@ def process_day(day: str) -> dict:
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.dropna(subset=["lat", "lon"])
     OUT.mkdir(parents=True, exist_ok=True)
-    df[["vehicle_id", "timestamp", "vehicle_ts"]].to_parquet(OUT / f"{day}.age.parquet", index=False)
-    df = df.drop(columns=["vehicle_ts"])
+    df[["vehicle_id", "timestamp", "vehicle_ts", "speed", "odometer"]].to_parquet(
+        OUT / f"{day}.age.parquet", index=False)
+    df = df.drop(columns=["vehicle_ts", "odometer"])
     df = infer_trips(df, gtfs)
     if "off_route" in df.columns:
         df = df[~df["off_route"]]

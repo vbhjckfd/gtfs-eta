@@ -697,3 +697,26 @@ def sc_big_mf3_age(tr, te, seed=42):
 def sc_big_mf3_age1(tr, te, seed=42):
     """sc_big_mf3 + pos_age_s only (ablation of the V26 cols)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + ["pos_age_s"], max_features=0.3)
+
+
+# ---- run 28 add-on (V28 cols: feed-reported speed / odometer, MS_FEAT_DIR=ms_features_v28) ----
+_FS = ["fs_now", "fs_mean60"]
+_ODO = ["odo_spd_60", "odo_spd_180", "odo_m_300"]
+
+
+@arm
+def sc_big_mf3_age_spd(tr, te, seed=42):
+    """sc_big_mf3_age + the feed's reported speed (now, 60 s mean)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS, max_features=0.3)
+
+
+@arm
+def sc_big_mf3_age_odo(tr, te, seed=42):
+    """sc_big_mf3_age + odometer speed over 60 / 180 s and metres in 300 s."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _ODO, max_features=0.3)
+
+
+@arm
+def sc_big_mf3_age_fo(tr, te, seed=42):
+    """sc_big_mf3_age + all V28 cols (reported speed + odometer)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO, max_features=0.3)
