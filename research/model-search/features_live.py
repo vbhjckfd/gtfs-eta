@@ -97,6 +97,7 @@ def _age_lookup(age: pd.DataFrame, vid: np.ndarray, t: np.ndarray, tol: float) -
     """Fix age of vehicle vid at (or nearest to) feed time t; 0 where unknown."""
     q = pd.DataFrame({"rid": np.arange(len(t)), "vehicle_id": vid.astype(str).astype(object),
                       "t": t.astype(float)}).sort_values("t")
+    q["vehicle_id"] = q["vehicle_id"].astype(age["vehicle_id"].dtype)   # pandas 3 infers str dtype
     m = pd.merge_asof(q, age, on="t", by="vehicle_id", direction="nearest", tolerance=tol)
     out = np.zeros(len(t))
     out[m["rid"].to_numpy()] = np.nan_to_num(m["age"].to_numpy(dtype=float), nan=0.0)
@@ -518,6 +519,9 @@ def live_features(cross: pd.DataFrame, pos: pd.DataFrame, rows: pd.DataFrame,
     q = pd.DataFrame({"rid": np.arange(n),
                       "vt": rows["vehicle_id"].astype(str).to_numpy() + "|" + rt.astype(str),
                       "d": dv, "t": rows_t})
+    pos_df["a"] = (_age_lookup(age, pos_df["vehicle_id"].to_numpy(), pos_df["t"].to_numpy(), 5)
+                   if age is not None else 0.0)
+    q["a"] = (_age_lookup(age, rows["vehicle_id"].to_numpy(), rows_t, 5) if age is not None else 0.0)
     for W in (60, 180, 300):
         qq = q.assign(tw=q["t"] - W).sort_values("tw")
         mm = pd.merge_asof(qq, pos_df[["vt", "t", "d", "a"]].rename(columns={"t": "tp", "d": "dp", "a": "ap"}),
