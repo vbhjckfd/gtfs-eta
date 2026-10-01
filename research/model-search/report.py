@@ -88,12 +88,15 @@ SERVING = {
     "sc_big_mf5_msl20": "as sc_big_mf5 (min_samples_leaf 20)",
     "sc_big_mf3_fast": "as sc_big_mf3 with at most 600 trees (lr 0.1): ~half the serving time and export size",
     "sc_big_mf3_127": "as sc_big_mf3 with 127-leaf trees (production per-tree size, ~half the export)",
+    "sc_big_mf3_age": "as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day)",
     "sc_big_bag2": "as sc_big_mf7 x 2 seeds, predictions averaged (2400 trees, ~2x serving time, ~3.8 s per 3000 rows)",
     "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);
 # every other tag goes to archive/LEADERBOARD-old.md.
-CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds3v13", "ds3shiftv13", "ds4v25", "ds4shiftv25"}
+CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds3v13", "ds3shiftv13", "ds4v25", "ds4shiftv25", "ds4v26", "ds4shiftv26"}
+# tags without their own baseline row (same rows as another tag, verified bit-for-bit)
+BASE_ALIAS = {"ds4shiftv26": "ds4shiftv25"}
 OLD_TAGS = """`ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19), + the no-hour-weights arm.
 `ds1v18` / `ds1shiftv18` = run 18, v10 features rebuilt (V8/V9 losers pruned; the leader's cols are unchanged), hyper-parameter / monotone arms.
 `ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, removed in run 23; MS_FEAT_DIR=ms_features_v13); baselines identical to ds1v20.
@@ -123,7 +126,8 @@ Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1v9k3, ds1v11,
 ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72, ds1v10f / ds2w / ds2, ds1v19 / ds1v19t, ds1v13, ds1v18, ds1v20 and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
 their baselines are identical to the ds1 / ds1shift ones below.
 
-Tags: `ds4v25` / `ds4shiftv25` = run 25, the newest day set (data 09-08..09-29, v10 features): ds4 = train 09-15..09-26, test 09-27 (Sun) / 09-28 (Mon) / 09-29 (Tue), seed 42; ds4shift = train 09-15..09-25, test 09-26 (Sat) / 09-27 / 09-28, seed 11.
+Tags: `ds4v26` / `ds4shiftv26` = run 26, the ds4 day set rebuilt with the GPS-fix age side table (MS_FEAT_DIR=ms_features_v26 = v10 + addon_v26.py cols); ds4v26 baseline / mf3 reproduce ds4v25 bit-for-bit, so ds4shiftv26 (age arm only) is judged against the ds4shiftv25 baseline.
+`ds4v25` / `ds4shiftv25` = run 25, the newest day set (data 09-08..09-29, v10 features): ds4 = train 09-15..09-26, test 09-27 (Sun) / 09-28 (Mon) / 09-29 (Tue), seed 42; ds4shift = train 09-15..09-25, test 09-26 (Sat) / 09-27 / 09-28, seed 11.
 `ds3v13` / `ds3shiftv13` = runs 21–22, a later day set (data 09-07..09-28, v10 + V13 cols): ds3 = train 09-14..09-25, test 09-26 (Sat) / 09-27 (Sun) / 09-28 (Mon), seed 42; ds3shift = train 09-14..09-24, test 09-25 (Fri) / 09-26 / 09-27, seed 7. Its baselines differ from ds1 (different days).
 `ds1v10` / `ds1shiftv10` = rebuilt in run 14 (+ V10 cols: conditional remaining dwell at the current location from prior days' stationary runs; MS_FEAT_DIR=ms_features_v10); baselines identical. `ds1v12k3` = run 15, the same v10 cols at 3x train rows (3% of snapshots).
 `ds1` = train 2026-09-07..09-18, test 09-19 (Sat), 09-20 (Sun), 09-21 (Mon).
@@ -140,7 +144,7 @@ def _rows(res, keep):
     for (tag, seed, arm_name), m in sorted(res.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] != "baseline", kv[0][2])):
         if keep(tag) is False:
             continue
-        base = res.get((tag, seed, "baseline"))
+        base = res.get((tag, seed, "baseline")) or res.get((BASE_ALIAS.get(tag), seed, "baseline"))
         if base and arm_name != "baseline":
             j = judge(base, m)
             d = (f"{j['mae_change_pct']:+.1f}%", f"{j['p90_change_pct']:+.1f}%",

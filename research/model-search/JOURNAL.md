@@ -7,7 +7,7 @@ feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed b
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOURNAL-runs-13-16.md`, `archive/JOURNAL-runs-17-18.md`, `archive/JOURNAL-runs-19-20.md`, `archive/JOURNAL-runs-21-23.md`.
 
-## State of the search (updated run 25)
+## State of the search (updated run 26)
 
 ### Protocol set-up (fixed)
 - Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
@@ -72,6 +72,10 @@ ds3shift 88.42 → 87.85 (−0.64%), p90 180.9 → 180.4; every bucket better. 0
 Cheaper serving options (ds4): `sc_big_mf3_127` (127-leaf trees, ~half the export) gives 88.3 (+0.6% vs mf3, about the same as the leader). `sc_big_mf3_fast`
 (600 trees at lr 0.1, ~half the tree walks) gives 88.7 / 87.3 (+1.1% / +0.7% vs mf3). Both still beat the baseline by more than 20%, so either is a
 safe fallback if serving time binds.
+**Run 26: GPS-fix age (`sc_big_mf3_age`, addon_v26.py).** The feed carries a per-vehicle fix time, which training has always ignored (rows anchor on the
+feed time). Fix age is p50 12 s, p90 ~41 s, and 16–17% of training rows are > 30 s old. Adding pos_age_s / the vehicle's 600 s median age / age × own speed to mf3 gives
+ds4 87.77 → 87.22 (−0.63%), ds4shift 86.71 → 86.47 (−0.28%), with every day, every bucket and p90 better on both. Serving is cheap (inference already reads vehicle_ts).
+Ship it with the hand-off if the age ring is easy; not a protocol win on its own.
 Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs the leader, but it doubles the trees (~3.8 s per 3000 rows). Optional.
 
 ### What won (in order; each Δ is vs the previous leader, both splits)
@@ -133,6 +137,7 @@ Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs t
   66% of its AE (bias −473 s); stationary > 900 s rows MAE 340. These are driver holds, not traffic.
 
 ### Open next steps
+-1. (run 26) Box memcg limit is now 14 GB: pipeline_lite OOMs at `--parallel 4`; use 3 (22 days ≈ 3.9 h).
 0. (run 25) mf3 is confirmed on ds4/ds4shift, so the ds1 check is moot. Open: time the serving cost of sc_big_mf3_127 / _fast (timing.py, MS_SAVE_MODEL) on the GH-runner-sized box.
    Old note: the max_features sweep (run 24) left a ds1 check open, which needed
    the 08-31..09-21 rebuild. It is optional; the setting can't hurt serving.
@@ -227,3 +232,47 @@ Route 118 joins the worst list on ds4 (~165 for every arm). The 09-29 test day i
 1. Hand-off of sc_big_dwell + max_features 0.3 (owner's call). If the serving budget is tight, 127 leaves is the first thing to give up (≈ +0.6%).
 2. Optional: measure the serving time of mf3_127 / mf3_fast with timing.py (needs `MS_SAVE_MODEL` refits).
 3. Still recommend pausing the schedule. The model-side search is saturated; runs 16–25 moved the leader by < 1%.
+
+## 2026-10-01 — run 26 (GPS-fix age features on ds4)
+
+Lock taken at 04:13 UTC. Main (aeb652a) was already merged. No housekeeping this run (journal 229 lines; run 25 was the 5th-run housekeeping). Deleted run24.sh.
+**New signal.** I sampled raw snapshots from 2026-09-29: feed ts − vehicle.timestamp is p50 14 s, p75 29 s, p90 62 s. 24% of rows are > 30 s and 3% are > 300 s (the
+> 180 s ones are dropped at serving, STALE_VEHICLE_MAX_AGE_SEC). Training and src/features ignore the per-vehicle timestamp, and every row is anchored at the feed time.
+- `pipeline_lite.py` now parses with a copy of `_fetch_and_parse` that also keeps vehicle_ts. It writes `data/ms_lite/<day>.age.parquet` (vehicle, feed ts, vehicle_ts) and drops the
+  col before infer_trips, so the training rows are unchanged.
+- `addon_v26.py` joins onto the v10 features (ms_features_v26):
+  - `pos_age_s`;
+  - `pos_age_med600` (the vehicle's rolling 600 s median age, i.e. its reporting cadence);
+  - `pos_age_dist` = age × own_speed_180.
+- Arm `sc_big_mf3_age` = mf3 + these cols.
+
+Rebuild: `sh research/model-search/run26.sh` (pipeline 09-08..09-29, prep → ms_features_v10, addon → ms_features_v26, fits tagged ds4v26 / ds4shiftv26). First attempt at
+`--parallel 4` was OOM-killed after 6 min (memcg limit 14.0 GB now; each worker ~3.7 GB while downloading). `--parallel 3` took 04:25–07:20, prep finished at 08:10, and the fits finished at 09:05.
+In the 15 train/test days, 16–17% of rows have age > 30 s (p50 12 s, p90 40–44 s); coverage is 100%.
+Reproduction: the ds4v26 baseline (113.95) and mf3 (87.7685) equal run 25 bit-for-bit. So I fit only the age arm on ds4shift and judged it against the ds4shiftv25 rows (report.py BASE_ALIAS).
+
+### Results (MAE / median / p90 / bias)
+| arm | ds4 (s42; train 2.21M, test 1.61M) | Δ vs mf3 | sa1 / sa5 / sa10 | Sun / Mon / Tue | ds4shift (s11; train 2.06M, test 1.42M) | Δ vs mf3 | sa1 / sa5 / sa10 | Sat / Sun / Mon | fit s |
+|---|---|---|---|---|---|---|---|---|---|
+| baseline | 113.95 / 60.4 / 241.6 / −19.3 | | 73.4 / 116.2 / 157.8 | 104.5 / 115.5 / 118.5 | 109.95 / 55.9 / 228.7 / −23.5 (v25) | | 73.3 / 111.8 / 152.7 | 103.6 / 106.8 / 116.5 | 579 |
+| sc_big_mf3 | 87.77 / 44.7 / 180.8 / −12.7 | | 61.0 / 88.6 / 122.3 | 82.4 / 88.4 / 90.6 | 86.71 / 42.9 / 175.5 / −14.9 (v25) | | 61.4 / 87.2 / 120.4 | 84.7 / 84.6 / 89.5 | 894 |
+| **sc_big_mf3_age** | 87.22 / 44.3 / 180.3 / −12.8 | **−0.63%** | 60.4 / 88.2 / 121.5 | 81.8 / 88.0 / 89.9 | 86.47 / 42.5 / 174.7 / −15.0 | **−0.28%** | 61.1 / 87.0 / 120.0 | 84.4 / 84.3 / 89.4 | 888 / 857 |
+
+Bucket Δ vs mf3 (sa1..10):
+- ds4: −0.94 −0.71 −0.59 −0.75 −0.55 −0.46 −0.41 −0.60 −0.70 −0.67%.
+- ds4shift: −0.50 −0.34 −0.23 −0.40 −0.21 −0.23 −0.08 −0.17 −0.33 −0.34%.
+
+vs baseline: −23.5% (ds4) / −21.4% (ds4shift), p90 241.6 → 180.3 / 228.7 → 174.7.
+Worst routes, age arm:
+- ds4: 137 239, 133 183 (mf3 200), 118 171, 122 169, 106 145, 2302 134, 2460 130, 111 129, 131 129, 143 128.
+- ds4shift: 133 253, 137 224, 122 177, 143 156, 106 156, 2460 134, 2302 132, 1630 126, 111 123, 125 114.
+
+**Conclusion: a small, consistent gain, but no protocol win vs the leader (< 3%), so no notification.** Every test day, every stops_ahead bucket and p90 improve on both splits.
+The gain is largest at sa1 (−0.9%), where a 40 s-old fix matters most. Serving cost is low: src/inference.py already reads vehicle_ts per vehicle, and the 600 s
+median needs a small per-vehicle ring. Add it to the hand-off recipe as "mf3 + age" (≈ −0.3 to −0.6%).
+
+### Next steps
+1. Hand-off recipe is now sc_big_dwell + max_features 0.3 + V26 age cols. The owner decides.
+2. Not done: an ablation of the 3 age cols, and age-correcting the live link-store crossing times (crossings are timed with the feed ts, so they lag by the fix age). The
+   latter changes labels as well as features, which needs care. It is the one untested idea left from this signal.
+3. Still recommend pausing the schedule; runs 16–26 moved the leader by < 1.3% in total.
