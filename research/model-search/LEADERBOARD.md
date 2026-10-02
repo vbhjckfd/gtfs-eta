@@ -57,6 +57,7 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4shiftv27 | sc_big_mf3_age | 11 | 2,064,786 | 1,423,357 | 86.4 | 42.5 | 174.5 | -15.4 | 61.2 | 119.9 | -21.4% | -23.7% | -16.5% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
 | ds4shiftv28 | sc_big_mf3_age1 | 11 | 2,064,786 | 1,423,357 | 86.4 | 42.7 | 174.5 | -15.1 | 61.1 | 119.7 | -21.4% | -23.7% | -16.7% | **yes** | as sc_big_mf3 + pos_age_s only (no ring needed) |
 | ds4shiftv28 | sc_big_mf3_age_fo | 11 | 2,064,786 | 1,423,357 | 85.1 | 41.9 | 172.3 | -15.1 | 59.6 | 118.9 | -22.6% | -24.7% | -18.8% | **yes** | ? |
+| ds4shiftv28b | sc_big_mf3_age_fo2 | 11 | 2,064,786 | 1,423,357 | 85.0 | 41.7 | 171.9 | -15.0 | 59.7 | 118.5 | -22.7% | -24.9% | -18.6% | **yes** | ? |
 | ds4v25 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
 | ds4v25 | sc_big_dwell | 42 | 2,205,756 | 1,607,392 | 88.1 | 44.9 | 181.3 | -12.4 | 61.1 | 122.7 | -22.7% | -24.9% | -16.7% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds4v25 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.8 | 44.7 | 180.8 | -12.7 | 61.0 | 122.3 | -23.0% | -25.1% | -16.9% | **yes** | as sc_big_mf5 (max_features 0.3) |
@@ -75,3 +76,4 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4v28 | sc_big_mf3_age_fo | 42 | 2,205,756 | 1,607,392 | 86.3 | 43.8 | 178.3 | -13.0 | 59.2 | 120.9 | -24.3% | -26.2% | -19.3% | **yes** | ? |
 | ds4v28 | sc_big_mf3_age_odo | 42 | 2,205,756 | 1,607,392 | 86.8 | 44.2 | 179.1 | -13.0 | 59.9 | 121.3 | -23.8% | -25.9% | -18.4% | **yes** | ? |
 | ds4v28 | sc_big_mf3_age_spd | 42 | 2,205,756 | 1,607,392 | 86.8 | 43.8 | 179.3 | -13.2 | 59.8 | 121.5 | -23.8% | -25.8% | -18.5% | **yes** | ? |
+| ds4v28b | sc_big_mf3_age_fo2 | 42 | 2,205,756 | 1,607,392 | 86.1 | 43.6 | 177.9 | -13.2 | 59.3 | 120.6 | -24.4% | -26.4% | -19.1% | **yes** | ? |

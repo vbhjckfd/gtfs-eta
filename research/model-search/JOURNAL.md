@@ -7,7 +7,7 @@ feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed b
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOURNAL-runs-13-16.md`, `archive/JOURNAL-runs-17-18.md`, `archive/JOURNAL-runs-19-20.md`, `archive/JOURNAL-runs-21-23.md`.
 
-## State of the search (updated run 26)
+## State of the search (updated run 28)
 
 ### Protocol set-up (fixed)
 - Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
@@ -79,6 +79,15 @@ Ship it with the hand-off if the age ring is easy; not a protocol win on its own
 **Run 27: fix-clock link / speed timing (MS_AGE_CORR=1 prep).** Alone it gives mf3 −0.38% (ds4), every bucket better, but it does not stack with the
 age cols (mf3_age 87.22 → 87.34 on ds4, 86.47 → 86.43 on ds4shift). The age cols already capture it; keep the feed clock (simpler serving).
 pos_age_s alone gives the same result as all 3 age cols on fix-clock features (87.336 vs 87.341).
+**Run 28: feed-reported speed + odometer (`sc_big_mf3_age_fo`, addon_v28.py) — the biggest gain since run 12.** The feed carries the GPS speed (m/s, 1 km/h steps)
+and an odometer (km) on 100% of rows, and both were unused. Adding fs_now, fs_mean60, odo_spd_60, odo_spd_180 and odo_m_300 on top of mf3_age gives:
+- ds4 87.22 → 86.28 (−1.08%), p90 180.3 → 178.3; ds4shift 86.47 → 85.05 (−1.64%), p90 174.7 → 172.3.
+- Every bucket and every day is better on both splits; sa1 improves by −2.0% / −2.6%.
+- vs plain mf3: −1.70% / −1.92%. vs baseline: −24.3% / −22.7%.
+Serving is cheap: both fields come straight from the feed entity, and the windows need a small per-vehicle ring. Not a protocol win vs the leader (< 3%).
+Speed-trajectory extras (V28b: lag, 30 s accel, 120 s max, time since moving, 30 s odometer speed) add only −0.19% / −0.07%, with sa1 worse: not worth it.
+Feed-clock ablation of the age cols: pos_age_s alone is +0.17% / −0.08% vs all 3 (neutral), so the 600 s age ring is optional.
+**Hand-off recipe (run 28): sc_big_dwell + max_features 0.3 + V26 age cols + V28 feed speed / odometer cols.**
 Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs the leader, but it doubles the trees (~3.8 s per 3000 rows). Optional.
 
 ### What won (in order; each Δ is vs the previous leader, both splits)
@@ -140,6 +149,8 @@ Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs t
   66% of its AE (bias −473 s); stationary > 900 s rows MAE 340. These are driver holds, not traffic.
 
 ### Open next steps
+-3. (run 28) Feed speed / odometer won −1.1 to −1.6% and are cheap to serve. Untested: the odometer as a projection-free progress signal for the live link store
+   (crossing detection), and odometer-based stationary time. Both would need prep changes.
 -2. (run 27) The GPS-fix-age signal is exhausted: the fix-clock correction and the col ablation are done. The hand-off recipe is unchanged (mf3 + V26 age cols).
 -1. (run 26) Box memcg limit is now 14 GB: pipeline_lite OOMs at `--parallel 4`; use 3 (22 days ≈ 3.9 h).
 0. (run 25) mf3 is confirmed on ds4/ds4shift, so the ds1 check is moot. Open: time the serving cost of sc_big_mf3_127 / _fast (timing.py, MS_SAVE_MODEL) on the GH-runner-sized box.
@@ -325,3 +336,55 @@ Worst routes, ds4shift: 133 253, 137 226, 122 174, 143 157, 106 157, 2460 133, 2
 1. Hand-off recipe unchanged: sc_big_dwell + max_features 0.3 + V26 age cols (feed clock). Owner's call.
 2. Optional, cheap: ablate pos_age_med600 / pos_age_dist on the feed-clock v26 features (needs a v10 prep, +1 h). If pos_age_s alone holds there, serving needs no age ring.
 3. Still recommend pausing the schedule: runs 16–27 moved the leader by < 1.3% in total. The largest remaining errors (133 / 137 / 122 driver holds) need operator break data.
+
+## 2026-10-01/02 — run 28 (feed-reported speed + odometer; feed-clock age ablation)
+
+Lock taken at 20:15 UTC. Main was already merged. No housekeeping (journal 327 lines; the next 5th-run housekeeping falls on run 30). Deleted run26.sh.
+**New signal.** I sampled 2026-09-29 raw snapshots. Each vehicle entity carries `position.speed` and `position.odometer` on 100% of rows. Neither is used by training,
+src/features or the model search.
+- The odometer is in km. Its deltas match the GPS chord distance (ratio p50 1.007), it never decreases, and it doesn't move while stopped (dgps < 5 m → Δodo 0).
+- Reported speed is quantised to 1 km/h and correlates only 0.61 with the 60 s position speed, so it is an instantaneous reading.
+- `pipeline_lite.py` now also keeps speed + odometer in `<day>.age.parquet`. The training rows are unchanged: baseline 113.946 and mf3_age 87.217 reproduce ds4v26 bit-for-bit.
+- `addon_v28.py` (v26 → ms_features_v28):
+  - fs_now and fs_mean60 (reported speed);
+  - odo_spd_60 and odo_spd_180 (odometer m / fix-clock s);
+  - odo_m_300.
+- `addon_v28b.py` (v28 → v28b): fs_lag1, fs_acc30, fs_max120, fs_zero_sec, odo_spd_30.
+- Arms: sc_big_mf3_age_spd / _odo / _fo (both groups) / _fo2 (+ V28b).
+- `run.sh` ADDON now takes a space-separated list.
+
+Commands: `sh research/model-search/run28.sh` (pipeline 09-08..09-29 `--parallel 3`, prep v10, addons v26 + v28, fits), then `sh research/model-search/run28b.sh`.
+The container restarted twice, once during the pipeline and once during prep. Re-launching run28.sh resumed both (pipeline and prep skip finished days).
+Note: editing run.sh while it runs is unsafe (sh reads scripts incrementally), so fits are not resumable yet. Prune ARMS_A/ARMS_B by hand after a restart.
+
+### Results (MAE / median / p90 / bias; ds4 s42 train 2.21M / test 1.61M; ds4shift s11 train 2.06M / test 1.42M)
+| arm | ds4 | Δ vs mf3_age | sa1 / sa5 / sa10 | Sun / Mon / Tue | ds4shift | Δ vs mf3_age | sa1 / sa5 / sa10 | Sat / Sun / Mon |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 113.95 / 60.4 / 241.6 / −19.3 | | 73.4 / 116.2 / 157.8 | 104.5 / 115.5 / 118.5 | 109.95 / 55.9 / 228.7 / −23.5 (v25) | | 73.3 / 111.8 / 152.7 | 103.6 / 106.8 / 116.5 |
+| sc_big_mf3_age | 87.22 / 44.3 / 180.3 / −12.8 | | 60.4 / 88.2 / 121.5 | 81.8 / 88.0 / 89.9 | 86.47 / 42.5 / 174.7 / −15.0 (v26) | | 61.1 / 87.0 / 120.0 | 84.4 / 84.3 / 89.4 |
+| sc_big_mf3_age1 | 87.37 / 44.5 / 180.3 / −12.9 | +0.17% | 60.7 / 88.3 / 121.9 | 82.1 / 88.2 / 90.0 | 86.40 / 42.7 / 174.5 / −15.1 | −0.08% | 61.1 / 87.0 / 119.7 | 84.4 / 84.2 / 89.2 |
+| sc_big_mf3_age_spd | 86.82 / 43.8 / 179.3 / −13.2 | −0.46% | 59.8 / 87.7 / 121.5 | 81.3 / 87.7 / 89.5 | — | | | |
+| sc_big_mf3_age_odo | 86.81 / 44.2 / 179.1 / −13.0 | −0.47% | 59.9 / 87.7 / 121.3 | 81.0 / 87.8 / 89.5 | — | | | |
+| **sc_big_mf3_age_fo** | **86.28** / 43.8 / 178.3 / −13.0 | **−1.08%** | 59.2 / 87.2 / 120.9 | 80.6 / 87.3 / 89.0 | **85.05** / 41.9 / 172.3 / −15.1 | **−1.64%** | 59.6 / 85.7 / 118.9 | 83.0 / 82.5 / 88.2 |
+| sc_big_mf3_age_fo2 (v28b) | 86.12 / 43.6 / 177.9 / −13.2 | −1.26% | 59.3 / 86.9 / 120.6 | 80.1 / 87.3 / 88.9 | 84.99 / 41.7 / 171.9 / −15.0 | −1.71% | 59.7 / 85.6 / 118.5 | 82.7 / 82.5 / 88.3 |
+
+Bucket Δ (sa1..10), fo vs mf3_age:
+- ds4: −2.00 −1.83 −1.50 −1.00 −1.13 −0.93 −0.94 −0.67 −0.66 −0.54%.
+- ds4shift: −2.58 −2.47 −2.30 −1.72 −1.57 −1.54 −1.48 −1.20 −1.12 −0.91%.
+
+fo vs mf3 (the previous hand-off without age): −1.70% / −1.92%. fo vs baseline: −24.3% / −22.7%, every bucket at least −18.8% better, p90 241.6 → 178.3 / 228.7 → 172.3.
+fo2 vs fo: −0.19% / −0.07%, sa1 +0.20% / +0.28% (worse), so V28b is not worth the extra cols.
+spd and odo each give about half of fo, and they stack almost additively.
+Worst routes, fo:
+- ds4: 137 233, 118 189, 133 187, 122 163, 106 141, 2302 132, 2460 131, 131 129, 111 128, 143 126.
+- ds4shift: 133 251, 137 216, 122 171, 106 156, 143 151, 2460 131, 1630 125, 2302 124, 111 121, 125 114.
+
+**Conclusion: no protocol win vs the leader (< 3%), so no notification. This is the largest single gain since run 12 (vehicle ratio) and it is cheap to serve.**
+- Both fields are read straight from the feed entity. odo_* needs a per-vehicle ring of (feed ts, vehicle ts, odometer) covering 300 s; fs_mean60 needs the last ~6 speeds.
+- The new hand-off recipe is mf3 + V26 age cols + V28. Of the age cols, pos_age_s alone is enough (feed-clock ablation neutral: +0.17% / −0.08%).
+
+### Next steps
+1. Hand-off: sc_big_dwell + max_features 0.3 + pos_age_s (+ optional age ring) + V28 cols. The owner decides.
+2. The odometer is a projection-free distance. Untested: odometer-based stationary_sec (no GPS jitter), and odometer progress between snapshots to sharpen crossing times in
+   the live link store. Both need prep changes (features_live.py), so +1 h prep on the next run.
+3. Run 30 = housekeeping (journal > 400 lines after this entry or 5th run, whichever comes first).
