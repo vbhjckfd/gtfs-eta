@@ -42,6 +42,8 @@ across the 5-min push-feed restarts; export of categorical bitsets / missing_go_
 of (feed ts, vehicle ts, speed, odometer)). Timing (run 19): 255 leaves + bitsets = 1.90 s per 3000-row batch single-threaded (baseline 0.87 s),
 export ~29 MB, fits the 10 s cycle. Cheaper fallbacks (ds4, mf3 base): 127 leaves +0.6%, 600 trees at lr 0.1 +1.1% — both still > 20% better than baseline.
 Productionising is the owner's call.
+**Run 30 optional add-on: `sc_big_fo_pa`** = fo_long + other vehicles on the path links right now (addon_v30): ds4 85.65 → 85.20 (−0.53%), ds4shift 84.20 → 83.95 (−0.30%),
+every bucket better; cheap to serve (one per-cycle link → vehicles dict). Ablation: dropping `_LAP` + `_VEH` costs +1.7 / +2.0%, so the crossing log stays.
 
 ### What won (in order; each Δ is vs the previous leader)
 - live link path times: −7 to −9% vs baseline (run 1). + own speed, − headway: −8.3 / −9.0% (run 2).
@@ -50,7 +52,7 @@ Productionising is the owner's call.
 - target-stop categorical + 255 leaves: −1.6% (run 7). current-link cols: −0.6 to −1.1% (run 8).
 - own previous lap: −1.2 to −1.5% (run 11). vehicle own/hist ratio: −1.0 to −1.2% (run 12). location dwell table: −0.8% (run 14).
 - max_features 0.3: −0.4 to −0.65% (runs 23–25). fix-age cols: −0.3 to −0.6% (run 26).
-- feed speed + odometer: −1.1 / −1.6% (run 28). odometer 600/1200 s windows: −0.7 / −1.0% (run 29).
+- feed speed + odometer: −1.1 / −1.6% (run 28). odometer 600/1200 s windows: −0.7 / −1.0% (run 29). vehicles on the path now: −0.5 / −0.3% (run 30).
 
 ### Ruled out (one line each)
 - Segment-additive link-time model: loses to direct HGBT at every horizon (repo history). Lookup-table bias correction: hurts MAE.
@@ -72,10 +74,11 @@ Productionising is the owner's call.
 - Fix-clock link timing (MS_AGE_CORR=1, run 27): −0.38% alone but does not stack with the age cols.
 - Reported-speed trajectory (V28b: lag, accel, max, time since moving, 30 s odometer speed): −0.19 / −0.07%, sa1 worse (run 28).
 - Odometer-vs-shape progress gap (V29 `_ODOG`): −0.29% alone, doesn't stack with `_ODOL` (run 29).
+- Dropping the per-vehicle crossing log (`_LAP` / `_VEH`) now that the odometer exists: +0.6 / +1.1%, both +1.7 / +2.0% (run 30). Keep them.
 
 ### Open next steps
-1. Hand-off of `sc_big_fo_long` is the owner's call. Recommend pausing the schedule: runs 16–29 moved the leader by ≈ 3.5% in total.
-2. Serving simplification: ablate the expensive per-vehicle state (`_LAP`, `_VEH`) now that the odometer carries vehicle speed (run 30).
+1. Hand-off of `sc_big_fo_long` (+ optional V30 `sc_big_fo_pa`) is the owner's call. Recommend pausing the schedule: runs 16–30 moved the leader by ≈ 4% in total.
+2. V30 extensions (path time "now" from occupied links; vehicles that just left the path): likely ≤ 0.3%.
 3. Untested, needs prep changes: odometer-based crossing times in the live link store.
 
 ## 2026-10-01/02 — run 28 (feed-reported speed + odometer; feed-clock age ablation)
@@ -174,3 +177,51 @@ Worst routes, fo_long:
    sc_big_fo_gap / _ODOG (lost on ds4, not stacked on either split), run27.sh, run28.sh, run28b.sh (keep the last 2 runners: run28*, run29).
 2. Odometer ideas are close to exhausted (instant, 60–1200 s windows, trajectory, shape gap). Untested: an even longer window (2400–3600 s), but the 600 → 1200 step was already small.
 3. Still recommend pausing the schedule. Runs 16–29 moved the leader by ≈ 3.5% in total (sc_big_dwell 88.1 → fo_long 85.65 on ds4), and the hand-off is the owner's call.
+
+## 2026-10-02 — run 30 (housekeeping; vehicles on the path right now; serving ablations of fo_long)
+
+Lock taken at 12:19 UTC. Main had not moved. **Housekeeping** (journal 439 lines) as its own commit: runs 24–27 → `archive/JOURNAL-runs-24-27.md`, state section rewritten,
+leaderboard tags ds4v26 / v27 / v28b moved to the archive (report.py CURRENT_TAGS), run27.sh deleted. Arms sc_big_fo_gap / fo_v29 kept (run29.sh still names them).
+**Idea.** The live link store only sees completed traversals (30 s detect lag, ≤ 30 min old). Other vehicles that are on the links between this vehicle and its target
+right now are fresher evidence. `addon_v30.py` (v29 → ms_features_v30) places every vehicle in `.pos` on its current stop-pair link at each feed snapshot. Feed
+timestamps are shared by all vehicles in a snapshot (~500 per snapshot), so the join on t is exact. It then takes the other vehicles on this row's path links, ahead of it
+(any route, same link keys as the store). Cols: pa_n, pa_spd_mean / pa_spd_min (120 s odometer speed), pa_stop_frac (reported speed 0), pa_gap_m / pa_gap_spd (the nearest
+one), pa_cov (occupied share of the path length). Coverage: 76% of weekday rows have ≥ 1 vehicle on the path (68% weekend), mean 3.8, nearest gap p50 ~400 m.
+**Serving ablations** (run 29 next step): does the odometer make the per-vehicle crossing log (`_LAP`, `_VEH`) redundant? Arms sc_big_fo_nolap / _noveh / _novl.
+
+Commands: `ARMS_A=" " ARMS_B=" " sh run28.sh` (pipeline 12:20–≈15:15 `--parallel 3`, prep v10, addons v26 + v28; done ≈ 16:30), smoke test
+`addon_v29.py --days 2026-09-20 && addon_v30.py --days 2026-09-20`, then `sh run30.sh` (addons v29 + v30 ≈ 85 s/day, fits until ≈ 19:30).
+Reproduction: the ds4v30 baseline (113.946) and sc_big_fo_long (85.650) equal ds4v29 bit-for-bit.
+
+### Results (MAE / median / p90 / bias; ds4 s42 train 2.21M / test 1.61M; ds4shift s11 train 2.06M / test 1.42M)
+| arm | ds4 | Δ vs fo_long | sa1 / sa5 / sa10 | Sun / Mon / Tue | ds4shift | Δ vs fo_long | sa1 / sa5 / sa10 | Sat / Sun / Mon |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 113.95 / 60.4 / 241.6 / −19.3 | | 73.4 / 116.2 / 157.8 | 104.5 / 115.5 / 118.5 | 109.95 / 55.9 / 228.7 / −23.5 (v25) | | 73.3 / 111.8 / 152.7 | 103.6 / 106.8 / 116.5 |
+| sc_big_fo_long | 85.65 / 43.6 / 177.1 / −13.5 | | 58.8 / 86.7 / 120.1 | 79.3 / 86.9 / 88.5 | 84.20 / 41.8 / 170.6 / −14.7 (v29) | | 59.1 / 84.9 / 117.7 | 81.8 / 81.3 / 87.8 |
+| **sc_big_fo_pa** | **85.20** / 43.4 / 175.4 / −13.7 | **−0.53%** | 58.5 / 86.2 / 119.6 | 79.0 / 86.5 / 88.0 | **83.95** / 41.6 / 169.1 / −15.7 | **−0.30%** | 58.8 / 84.6 / 117.5 | 81.9 / 81.1 / 87.2 |
+| sc_big_fo_nolap | 86.14 / 43.9 / 177.6 / −13.5 | +0.57% | 59.0 / 87.2 / 120.8 | 79.9 / 87.4 / 89.0 | — | | | |
+| sc_big_fo_noveh | 86.56 / 43.7 / 178.2 / −14.0 | +1.06% | 59.8 / 87.4 / 121.2 | 80.1 / 87.9 / 89.4 | — | | | |
+| sc_big_fo_novl | 87.10 / 44.0 / 179.1 / −13.6 | +1.69% | 59.7 / 88.2 / 122.1 | 80.9 / 88.3 / 89.9 | 85.85 / 42.3 / 173.3 / −16.2 | +1.96% | 59.8 / 86.4 / 120.1 | 83.5 / 83.1 / 89.3 |
+
+Bucket Δ (sa1..10), fo_pa vs fo_long:
+- ds4: −0.36 −0.62 −0.62 −0.66 −0.61 −0.37 −0.48 −0.60 −0.55 −0.44%.
+- ds4shift: −0.44 −0.52 −0.44 −0.35 −0.40 −0.28 −0.18 −0.14 −0.19 −0.18%.
+
+fo_pa vs baseline: −25.2% / −23.6%, p90 241.6 → 175.4 / 228.7 → 169.1.
+Worst routes, fo_pa:
+- ds4: 137 221, 133 185, 118 168, 122 161, 106 139, 2460 132, 2302 129, 131 128, 111 126, 143 125.
+- ds4shift: 133 258, 137 210, 122 167, 143 152, 106 150, 2460 129, 1630 125, 2302 122, 111 118, 125 113.
+
+**Conclusion: no protocol win vs the leader (< 3%), so no notification.**
+- Vehicles on the path now: a small, consistent gain (−0.53% / −0.30%). Every bucket and p90 improve on both splits; 5 of 6 test days improve (ds4shift Sat 81.8 → 81.9).
+- It is cheap to serve. The daemon already places every vehicle on its trip, so this is one link → [(vehicle, fraction, odometer speed)] dict per 10 s cycle (< 0.5 day).
+  It is optional in the hand-off.
+- Ablations: the per-vehicle crossing log still pays. Without `_LAP` and `_VEH` the cost is +1.7% / +2.0%, every bucket worse; `_LAP` alone +0.57%, `_VEH` alone +1.06%.
+  The odometer does not replace them, so the serving work for the crossing log stays in the hand-off.
+- **Hand-off recipe (run 30): sc_big_fo_long, optionally + V30 (`sc_big_fo_pa`).**
+
+### Next steps
+1. Hand-off is the owner's call. Recommend pausing the schedule: runs 16–30 moved the leader by ≈ 4% in total (sc_big_dwell 88.1 → fo_pa 85.2 on ds4).
+2. Possible extensions of V30, each likely ≤ 0.3%: weight the occupancy by link (span / speed per occupied link, summed into a "now" path time), or use the
+   vehicles that just left the path (last 120 s). Untested.
+3. Untested, needs prep changes: odometer-based crossing times in the live link store.
