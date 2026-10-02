@@ -6,6 +6,6 @@ D=research/model-search
 export RUN=29 TRAIN_A=2026-09-15..2026-09-26 TEST_A=2026-09-27..2026-09-29 PFX_A=ds4 \
   TRAIN_B=2026-09-15..2026-09-25 TEST_B=2026-09-26..2026-09-28 PFX_B=ds4shift SEED_B=11 TAG=v29
 PREP_DIR= FEAT_DIR=ms_features_v29 ADDON=addon_v29.py ADDON_DAYS=2026-09-15..2026-09-29 \
-  ARMS_A="${ARMS_A:-baseline sc_big_mf3_age_fo sc_big_fo_v29 sc_big_fo_long sc_big_fo_gap}" \
-  ARMS_B="${ARMS_B:-sc_big_fo_v29}" sh $D/run.sh
+  ARMS_A="${ARMS_A-baseline sc_big_mf3_age_fo sc_big_fo_v29 sc_big_fo_long sc_big_fo_gap}" \
+  ARMS_B="${ARMS_B-sc_big_fo_v29}" sh $D/run.sh
 echo RUN29 ALL DONE
