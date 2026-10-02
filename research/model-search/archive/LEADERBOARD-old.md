@@ -2,6 +2,9 @@
 
 Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs-*.md):
 
+`ds4v28b` / `ds4shiftv28b` = + addon_v28b speed-trajectory cols (ms_features_v28b), judged against the ds4v28 / ds4shiftv25 baselines.
+`ds4v27` / `ds4shiftv27` = run 27, ds4 rebuilt with MS_AGE_CORR=1 prep (link traversal times and own speed on the GPS fix clock; ms_features_v27c) + addon_v26 cols (ms_features_v27); ds4v27 baseline reproduces 113.95, ds4shiftv27 is judged against the ds4shiftv25 baseline.
+`ds4v26` / `ds4shiftv26` = run 26, the ds4 day set rebuilt with the GPS-fix age side table (MS_FEAT_DIR=ms_features_v26 = v10 + addon_v26.py cols); ds4v26 baseline / mf3 reproduce ds4v25 bit-for-bit, so ds4shiftv26 (age arm only) is judged against the ds4shiftv25 baseline.
 `ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19), + the no-hour-weights arm.
 `ds1v18` / `ds1shiftv18` = run 18, v10 features rebuilt (V8/V9 losers pruned; the leader's cols are unchanged), hyper-parameter / monotone arms.
 `ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, removed in run 23; MS_FEAT_DIR=ms_features_v13); baselines identical to ds1v20.
@@ -201,3 +204,14 @@ Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs
 | ds2 | sc_big_dwell | 42 | 3,373,426 | 1,414,363 | 85.3 | 42.5 | 175.1 | -13.2 | 59.3 | 119.4 | -20.5% | -21.9% | -16.1% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds2w | baseline | 42 | 2,126,692 | 1,414,363 | 108.9 | 54.3 | 227.7 | -31.0 | 71.5 | 151.1 | — | — | — | — | prod |
 | ds2w | sc_big_dwell | 42 | 2,126,692 | 1,414,363 | 86.3 | 43.0 | 177.3 | -11.8 | 59.9 | 120.8 | -20.7% | -22.2% | -16.2% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
+| ds4shiftv26 | sc_big_mf3_age | 11 | 2,064,786 | 1,423,357 | 86.5 | 42.5 | 174.7 | -15.0 | 61.1 | 120.0 | -21.4% | -23.6% | -16.6% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
+| ds4shiftv27 | sc_big_mf3_age | 11 | 2,064,786 | 1,423,357 | 86.4 | 42.5 | 174.5 | -15.4 | 61.2 | 119.9 | -21.4% | -23.7% | -16.5% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
+| ds4shiftv28b | sc_big_mf3_age_fo2 | 11 | 2,064,786 | 1,423,357 | 85.0 | 41.7 | 171.9 | -15.0 | 59.7 | 118.5 | -22.7% | -24.9% | -18.6% | **yes** | as sc_big_mf3_age_fo + 5 speed-trajectory cols (same ring) |
+| ds4v26 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
+| ds4v26 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.8 | 44.7 | 180.8 | -12.7 | 61.0 | 122.3 | -23.0% | -25.1% | -16.9% | **yes** | as sc_big_mf5 (max_features 0.3) |
+| ds4v26 | sc_big_mf3_age | 42 | 2,205,756 | 1,607,392 | 87.2 | 44.3 | 180.3 | -12.8 | 60.4 | 121.5 | -23.5% | -25.4% | -17.6% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
+| ds4v27 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
+| ds4v27 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.4 | 44.5 | 179.9 | -12.7 | 60.7 | 122.0 | -23.3% | -25.5% | -17.2% | **yes** | as sc_big_mf5 (max_features 0.3) |
+| ds4v27 | sc_big_mf3_age | 42 | 2,205,756 | 1,607,392 | 87.3 | 44.3 | 180.3 | -12.8 | 60.6 | 122.0 | -23.3% | -25.4% | -17.4% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
+| ds4v27 | sc_big_mf3_age1 | 42 | 2,205,756 | 1,607,392 | 87.3 | 44.3 | 179.8 | -13.1 | 60.7 | 121.8 | -23.4% | -25.6% | -17.2% | **yes** | as sc_big_mf3 + pos_age_s only (no ring needed) |
+| ds4v28b | sc_big_mf3_age_fo2 | 42 | 2,205,756 | 1,607,392 | 86.1 | 43.6 | 177.9 | -13.2 | 59.3 | 120.6 | -24.4% | -26.4% | -19.1% | **yes** | as sc_big_mf3_age_fo + 5 speed-trajectory cols (same ring) |
