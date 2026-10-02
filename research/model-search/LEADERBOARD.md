@@ -8,7 +8,8 @@ Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1v9k3, ds1v11,
 ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72, ds1v10f / ds2w / ds2, ds1v19 / ds1v19t, ds1v13, ds1v18, ds1v20 and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
 their baselines are identical to the ds1 / ds1shift ones below.
 
-Tags: `ds4v27` / `ds4shiftv27` = run 27, ds4 rebuilt with MS_AGE_CORR=1 prep (link traversal times and own speed on the GPS fix clock; ms_features_v27c) + addon_v26 cols (ms_features_v27); ds4v27 baseline reproduces 113.95, ds4shiftv27 is judged against the ds4shiftv25 baseline.
+Tags: `ds4v28` / `ds4shiftv28` = run 28, ds4 rebuilt on feed-clock prep (v10) + addon_v26 age cols + addon_v28 feed-reported speed / odometer cols (ms_features_v28); ds4v28 baseline / mf3_age reproduce 113.95 / 87.22; ds4shiftv28 is judged against the ds4shiftv25 baseline. `ds4v28b` / `ds4shiftv28b` = + addon_v28b speed-trajectory cols (ms_features_v28b), judged against the ds4v28 / ds4shiftv25 baselines.
+`ds4v27` / `ds4shiftv27` = run 27, ds4 rebuilt with MS_AGE_CORR=1 prep (link traversal times and own speed on the GPS fix clock; ms_features_v27c) + addon_v26 cols (ms_features_v27); ds4v27 baseline reproduces 113.95, ds4shiftv27 is judged against the ds4shiftv25 baseline.
 `ds4v26` / `ds4shiftv26` = run 26, the ds4 day set rebuilt with the GPS-fix age side table (MS_FEAT_DIR=ms_features_v26 = v10 + addon_v26.py cols); ds4v26 baseline / mf3 reproduce ds4v25 bit-for-bit, so ds4shiftv26 (age arm only) is judged against the ds4shiftv25 baseline.
 `ds4v25` / `ds4shiftv25` = run 25, the newest day set (data 09-08..09-29, v10 features): ds4 = train 09-15..09-26, test 09-27 (Sun) / 09-28 (Mon) / 09-29 (Tue), seed 42; ds4shift = train 09-15..09-25, test 09-26 (Sat) / 09-27 / 09-28, seed 11.
 `ds3v13` / `ds3shiftv13` = runs 21–22, a later day set (data 09-07..09-28, v10 + V13 cols): ds3 = train 09-14..09-25, test 09-26 (Sat) / 09-27 (Sun) / 09-28 (Mon), seed 42; ds3shift = train 09-14..09-24, test 09-25 (Fri) / 09-26 / 09-27, seed 7. Its baselines differ from ds1 (different days).
@@ -54,6 +55,8 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4shiftv25 | sc_big_mf3_fast | 11 | 2,064,786 | 1,423,357 | 87.3 | 43.2 | 177.0 | -14.9 | 61.7 | 121.2 | -20.6% | -22.6% | -15.9% | **yes** | as sc_big_mf3 with at most 600 trees (lr 0.1): ~half the serving time and export size |
 | ds4shiftv26 | sc_big_mf3_age | 11 | 2,064,786 | 1,423,357 | 86.5 | 42.5 | 174.7 | -15.0 | 61.1 | 120.0 | -21.4% | -23.6% | -16.6% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
 | ds4shiftv27 | sc_big_mf3_age | 11 | 2,064,786 | 1,423,357 | 86.4 | 42.5 | 174.5 | -15.4 | 61.2 | 119.9 | -21.4% | -23.7% | -16.5% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
+| ds4shiftv28 | sc_big_mf3_age1 | 11 | 2,064,786 | 1,423,357 | 86.4 | 42.7 | 174.5 | -15.1 | 61.1 | 119.7 | -21.4% | -23.7% | -16.7% | **yes** | as sc_big_mf3 + pos_age_s only (no ring needed) |
+| ds4shiftv28 | sc_big_mf3_age_fo | 11 | 2,064,786 | 1,423,357 | 85.1 | 41.9 | 172.3 | -15.1 | 59.6 | 118.9 | -22.6% | -24.7% | -18.8% | **yes** | ? |
 | ds4v25 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
 | ds4v25 | sc_big_dwell | 42 | 2,205,756 | 1,607,392 | 88.1 | 44.9 | 181.3 | -12.4 | 61.1 | 122.7 | -22.7% | -24.9% | -16.7% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds4v25 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.8 | 44.7 | 180.8 | -12.7 | 61.0 | 122.3 | -23.0% | -25.1% | -16.9% | **yes** | as sc_big_mf5 (max_features 0.3) |
@@ -66,3 +69,9 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4v27 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.4 | 44.5 | 179.9 | -12.7 | 60.7 | 122.0 | -23.3% | -25.5% | -17.2% | **yes** | as sc_big_mf5 (max_features 0.3) |
 | ds4v27 | sc_big_mf3_age | 42 | 2,205,756 | 1,607,392 | 87.3 | 44.3 | 180.3 | -12.8 | 60.6 | 122.0 | -23.3% | -25.4% | -17.4% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
 | ds4v27 | sc_big_mf3_age1 | 42 | 2,205,756 | 1,607,392 | 87.3 | 44.3 | 179.8 | -13.1 | 60.7 | 121.8 | -23.4% | -25.6% | -17.2% | **yes** | as sc_big_mf3 + pos_age_s only (no ring needed) |
+| ds4v28 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
+| ds4v28 | sc_big_mf3_age | 42 | 2,205,756 | 1,607,392 | 87.2 | 44.3 | 180.3 | -12.8 | 60.4 | 121.5 | -23.5% | -25.4% | -17.6% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
+| ds4v28 | sc_big_mf3_age1 | 42 | 2,205,756 | 1,607,392 | 87.4 | 44.5 | 180.3 | -12.9 | 60.7 | 121.9 | -23.3% | -25.4% | -17.2% | **yes** | as sc_big_mf3 + pos_age_s only (no ring needed) |
+| ds4v28 | sc_big_mf3_age_fo | 42 | 2,205,756 | 1,607,392 | 86.3 | 43.8 | 178.3 | -13.0 | 59.2 | 120.9 | -24.3% | -26.2% | -19.3% | **yes** | ? |
+| ds4v28 | sc_big_mf3_age_odo | 42 | 2,205,756 | 1,607,392 | 86.8 | 44.2 | 179.1 | -13.0 | 59.9 | 121.3 | -23.8% | -25.9% | -18.4% | **yes** | ? |
+| ds4v28 | sc_big_mf3_age_spd | 42 | 2,205,756 | 1,607,392 | 86.8 | 43.8 | 179.3 | -13.2 | 59.8 | 121.5 | -23.8% | -25.8% | -18.5% | **yes** | ? |

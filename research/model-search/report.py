@@ -95,9 +95,10 @@ SERVING = {
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);
 # every other tag goes to archive/LEADERBOARD-old.md.
-CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds3v13", "ds3shiftv13", "ds4v25", "ds4shiftv25", "ds4v26", "ds4shiftv26", "ds4v27", "ds4shiftv27"}
+CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds3v13", "ds3shiftv13", "ds4v25", "ds4shiftv25", "ds4v26", "ds4shiftv26", "ds4v27", "ds4shiftv27", "ds4v28", "ds4shiftv28", "ds4v28b", "ds4shiftv28b"}
 # tags without their own baseline row (same rows as another tag, verified bit-for-bit)
-BASE_ALIAS = {"ds4shiftv26": "ds4shiftv25", "ds4shiftv27": "ds4shiftv25"}
+BASE_ALIAS = {"ds4shiftv26": "ds4shiftv25", "ds4shiftv27": "ds4shiftv25", "ds4shiftv28": "ds4shiftv25",
+              "ds4v28b": "ds4v28", "ds4shiftv28b": "ds4shiftv25"}
 OLD_TAGS = """`ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19), + the no-hour-weights arm.
 `ds1v18` / `ds1shiftv18` = run 18, v10 features rebuilt (V8/V9 losers pruned; the leader's cols are unchanged), hyper-parameter / monotone arms.
 `ds1v13` / `ds1shiftv13` = run 20 add-on: v10 rows + V13 trip-keyed hold cols (addon_v13.py, removed in run 23; MS_FEAT_DIR=ms_features_v13); baselines identical to ds1v20.
@@ -127,7 +128,8 @@ Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1v9k3, ds1v11,
 ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72, ds1v10f / ds2w / ds2, ds1v19 / ds1v19t, ds1v13, ds1v18, ds1v20 and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
 their baselines are identical to the ds1 / ds1shift ones below.
 
-Tags: `ds4v27` / `ds4shiftv27` = run 27, ds4 rebuilt with MS_AGE_CORR=1 prep (link traversal times and own speed on the GPS fix clock; ms_features_v27c) + addon_v26 cols (ms_features_v27); ds4v27 baseline reproduces 113.95, ds4shiftv27 is judged against the ds4shiftv25 baseline.
+Tags: `ds4v28` / `ds4shiftv28` = run 28, ds4 rebuilt on feed-clock prep (v10) + addon_v26 age cols + addon_v28 feed-reported speed / odometer cols (ms_features_v28); ds4v28 baseline / mf3_age reproduce 113.95 / 87.22; ds4shiftv28 is judged against the ds4shiftv25 baseline. `ds4v28b` / `ds4shiftv28b` = + addon_v28b speed-trajectory cols (ms_features_v28b), judged against the ds4v28 / ds4shiftv25 baselines.
+`ds4v27` / `ds4shiftv27` = run 27, ds4 rebuilt with MS_AGE_CORR=1 prep (link traversal times and own speed on the GPS fix clock; ms_features_v27c) + addon_v26 cols (ms_features_v27); ds4v27 baseline reproduces 113.95, ds4shiftv27 is judged against the ds4shiftv25 baseline.
 `ds4v26` / `ds4shiftv26` = run 26, the ds4 day set rebuilt with the GPS-fix age side table (MS_FEAT_DIR=ms_features_v26 = v10 + addon_v26.py cols); ds4v26 baseline / mf3 reproduce ds4v25 bit-for-bit, so ds4shiftv26 (age arm only) is judged against the ds4shiftv25 baseline.
 `ds4v25` / `ds4shiftv25` = run 25, the newest day set (data 09-08..09-29, v10 features): ds4 = train 09-15..09-26, test 09-27 (Sun) / 09-28 (Mon) / 09-29 (Tue), seed 42; ds4shift = train 09-15..09-25, test 09-26 (Sat) / 09-27 / 09-28, seed 11.
 `ds3v13` / `ds3shiftv13` = runs 21–22, a later day set (data 09-07..09-28, v10 + V13 cols): ds3 = train 09-14..09-25, test 09-26 (Sat) / 09-27 (Sun) / 09-28 (Mon), seed 42; ds3shift = train 09-14..09-24, test 09-25 (Fri) / 09-26 / 09-27, seed 7. Its baselines differ from ds1 (different days).
