@@ -720,3 +720,13 @@ def sc_big_mf3_age_odo(tr, te, seed=42):
 def sc_big_mf3_age_fo(tr, te, seed=42):
     """sc_big_mf3_age + all V28 cols (reported speed + odometer)."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO, max_features=0.3)
+
+
+# ---- run 28 part 2 (V28b cols, MS_FEAT_DIR=ms_features_v28b) ----
+_FS2 = ["fs_lag1", "fs_acc30", "fs_max120", "fs_zero_sec", "odo_spd_30"]
+
+
+@arm
+def sc_big_mf3_age_fo2(tr, te, seed=42):
+    """sc_big_mf3_age_fo + recent reported-speed trajectory (lag, 30 s accel, 120 s max, time since moving) and 30 s odometer speed."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO + _FS2, max_features=0.3)
