@@ -753,3 +753,33 @@ def sc_big_fo_gap(tr, te, seed=42):
 def sc_big_fo_v29(tr, te, seed=42):
     """sc_big_mf3_age_fo + all V29 cols."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO + _ODOL + _ODOG, max_features=0.3)
+
+
+# ---- run 30 add-on (V30 cols: other vehicles on the path right now, MS_FEAT_DIR=ms_features_v30) ----
+_PA = ["pa_n", "pa_spd_mean", "pa_spd_min", "pa_stop_frac", "pa_gap_m", "pa_gap_spd", "pa_cov"]
+_FOL = _AGE + _FS + _ODO + _ODOL
+
+
+@arm
+def sc_big_fo_pa(tr, te, seed=42):
+    """sc_big_fo_long + vehicles currently on the path links ahead (count, odometer speeds, stopped share, nearest gap)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA, max_features=0.3)
+
+
+# serving-simplification ablations: does the odometer make the per-vehicle crossing log (_LAP / _VEH) redundant?
+@arm
+def sc_big_fo_nolap(tr, te, seed=42):
+    """sc_big_fo_long without the own previous-lap cols."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _VEH + _DWELL + _FOL, max_features=0.3)
+
+
+@arm
+def sc_big_fo_noveh(tr, te, seed=42):
+    """sc_big_fo_long without the vehicle-level own/hist ratio cols."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _DWELL + _FOL, max_features=0.3)
+
+
+@arm
+def sc_big_fo_novl(tr, te, seed=42):
+    """sc_big_fo_long without _LAP and _VEH (no per-vehicle crossing log at serving)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _DWELL + _FOL, max_features=0.3)
