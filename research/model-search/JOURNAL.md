@@ -7,7 +7,7 @@ feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed b
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries are archived in `archive/JOURNAL-runs-1-12.md` and `archive/JOURNAL-runs-13-16.md`, `archive/JOURNAL-runs-17-18.md`, `archive/JOURNAL-runs-19-20.md`, `archive/JOURNAL-runs-21-23.md`.
 
-## State of the search (updated run 28)
+## State of the search (updated run 29)
 
 ### Protocol set-up (fixed)
 - Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
@@ -88,6 +88,9 @@ Serving is cheap: both fields come straight from the feed entity, and the window
 Speed-trajectory extras (V28b: lag, 30 s accel, 120 s max, time since moving, 30 s odometer speed) add only −0.19% / −0.07%, with sa1 worse: not worth it.
 Feed-clock ablation of the age cols: pos_age_s alone is +0.17% / −0.08% vs all 3 (neutral), so the 600 s age ring is optional.
 **Hand-off recipe (run 28): sc_big_dwell + max_features 0.3 + V26 age cols + V28 feed speed / odometer cols.**
+**Run 29: longer odometer windows (`sc_big_fo_long`, addon_v29.py).** odo_spd_600 / odo_spd_1200 / fs_zero_frac600 on top of fo: ds4 86.28 → 85.65 (−0.73%), p90 178.3 → 177.1;
+ds4shift 85.05 → 84.20 (−1.00%), p90 172.3 → 170.6; every bucket and every day better. vs baseline −24.8% / −23.4%. The odometer-vs-shape gap (fo_gap −0.29%) doesn't stack.
+**Hand-off recipe (run 29): sc_big_fo_long = sc_big_dwell + max_features 0.3 + age cols + V28 + 600/1200 s odometer windows (1200 s per-vehicle ring).**
 Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs the leader, but it doubles the trees (~3.8 s per 3000 rows). Optional.
 
 ### What won (in order; each Δ is vs the previous leader, both splits)
@@ -149,6 +152,7 @@ Bagging two max_features=0.7 fits (`sc_big_bag2`) gains −0.76% / −0.98% vs t
   66% of its AE (bias −473 s); stationary > 900 s rows MAE 340. These are driver holds, not traffic.
 
 ### Open next steps
+-4. (run 29) Odometer signal close to exhausted: windows up to 1200 s won −0.7 / −1.0%; shape gap and speed trajectory didn't stack. Run 30 = housekeeping.
 -3. (run 28) Feed speed / odometer won −1.1 to −1.6% and are cheap to serve. Untested: the odometer as a projection-free progress signal for the live link store
    (crossing detection), and odometer-based stationary time. Both would need prep changes.
 -2. (run 27) The GPS-fix-age signal is exhausted: the fix-clock correction and the col ablation are done. The hand-off recipe is unchanged (mf3 + V26 age cols).
@@ -388,3 +392,48 @@ Worst routes, fo:
 2. The odometer is a projection-free distance. Untested: odometer-based stationary_sec (no GPS jitter), and odometer progress between snapshots to sharpen crossing times in
    the live link store. Both need prep changes (features_live.py), so +1 h prep on the next run.
 3. Run 30 = housekeeping (journal > 400 lines after this entry or 5th run, whichever comes first).
+
+## 2026-10-02 — run 29 (odometer: longer windows, odometer vs shape progress)
+
+Lock taken at 04:12 UTC. Main was already merged. No housekeeping (journal 390 lines; run 30 does it, and the journal is now > 400).
+**Idea (run 28, next step 2).** The odometer was used only over ≤ 300 s. This run tests two other uses (`addon_v29.py`, v28 → ms_features_v29; arms in arms.py):
+- Longer windows (`_ODOL`): odo_spd_600, odo_spd_1200 (odometer m / fix-clock s), fs_zero_frac600 (share of the vehicle's snapshots in 600 s with reported speed 0).
+- Odometer vs shape (`_ODOG`): odo_shape_gap300 (odometer m − dist_along_m progress over 300 s, same trip), odo_trip_spd (odometer m / fix-clock s since the vehicle's first
+  snapshot on this trip, ≥ 300 s). These would flag detours, loops and projection jumps.
+- Coverage on 09-20: odo_spd_600 / 1200 97% / 96%, the gap cols ~88% (rows on trips with a 300 s history). Gap mean −15 m, p95 +37 m.
+- Arms: sc_big_fo_long (fo + _ODOL), sc_big_fo_gap (fo + _ODOG), sc_big_fo_v29 (fo + both).
+- `odometer stopped for N s` was not tested: run 28's fs_zero_sec (V28b) already covers it and added nothing.
+
+Commands: pipeline_lite 09-08..09-29 `--parallel 3` (04:13–06:19, ≈ 2 h, the fastest yet), then run.sh prep v10 + addons v26, v28 (done 07:12),
+then `sh research/model-search/run29.sh` (addon_v29 + fits), then sc_big_fo_long on ds4shift via run.sh. Fits finished ≈ 09:00.
+Fix: run29.sh used `${ARMS_A:-…}`, so an empty list meant the defaults. It now uses `${ARMS_A-…}`, so empty means none.
+Reproduction: the ds4v29 baseline (113.946) and sc_big_mf3_age_fo (86.278) equal ds4v28 bit-for-bit. ds4shiftv29 is judged against the ds4shiftv28 fo row / ds4shiftv25 baseline.
+
+### Results (MAE / median / p90 / bias; ds4 s42 train 2.21M / test 1.61M; ds4shift s11 train 2.06M / test 1.42M)
+| arm | ds4 | Δ vs fo | sa1 / sa5 / sa10 | Sun / Mon / Tue | ds4shift | Δ vs fo | sa1 / sa5 / sa10 | Sat / Sun / Mon |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 113.95 / 60.4 / 241.6 / −19.3 | | 73.4 / 116.2 / 157.8 | 104.5 / 115.5 / 118.5 | 109.95 / 55.9 / 228.7 / −23.5 (v25) | | 73.3 / 111.8 / 152.7 | 103.6 / 106.8 / 116.5 |
+| sc_big_mf3_age_fo | 86.28 / 43.8 / 178.3 / −13.0 | | 59.2 / 87.2 / 120.9 | 80.6 / 87.3 / 89.0 | 85.05 / 41.9 / 172.3 / −15.1 (v28) | | 59.6 / 85.7 / 118.9 | 83.0 / 82.5 / 88.2 |
+| sc_big_fo_gap | 86.03 / 43.7 / 178.0 / −13.0 | −0.29% | 59.0 / 86.9 / 120.6 | 80.2 / 87.0 / 88.9 | — | | | |
+| **sc_big_fo_long** | **85.65** / 43.6 / 177.1 / −13.5 | **−0.73%** | 58.8 / 86.7 / 120.1 | 79.3 / 86.9 / 88.5 | **84.20** / 41.8 / 170.6 / −14.7 | **−1.00%** | 59.1 / 84.9 / 117.7 | 81.8 / 81.3 / 87.8 |
+| sc_big_fo_v29 | 85.71 / 43.6 / 177.0 / −13.2 | −0.66% | 58.8 / 86.7 / 120.2 | 79.1 / 87.0 / 88.7 | 84.35 / 41.8 / 170.6 / −14.6 | −0.83% | 59.0 / 85.0 / 118.0 | 82.0 / 81.5 / 87.9 |
+
+Bucket Δ (sa1..10), fo_long vs fo:
+- ds4: −0.76 −0.97 −0.82 −0.83 −0.54 −0.91 −0.72 −0.62 −0.60 −0.60%.
+- ds4shift: −0.78 −1.07 −0.99 −0.95 −0.86 −1.00 −1.16 −1.16 −0.99 −0.99%.
+
+fo_long vs baseline: −24.8% / −23.4%, p90 241.6 → 177.1 / 228.7 → 170.6.
+Worst routes, fo_long:
+- ds4: 137 223, 133 183, 118 178, 122 159, 106 135, 2460 132, 111 128, 2302 127, 131 125, 143 124.
+- ds4shift: 133 245, 137 211, 122 166, 143 161, 106 145, 2460 131, 1630 126, 111 120, 2302 119, 125 115.
+
+**Conclusion: no protocol win vs the leader (< 3%), so no notification.** The longer odometer windows are a small, consistent gain on both splits: every day, every bucket and p90 improve.
+- The odometer-vs-shape gap helps a little alone (−0.29%) but doesn't stack with the long windows (v29 ≤ long on both splits). Drop it; it would also need dist_along in the ring.
+- Serving: the per-vehicle ring from run 28 grows from 300 s to 1200 s (~120 entries per vehicle × ~600 vehicles; trivial memory). No new feed fields.
+- **Hand-off recipe (run 29): sc_big_dwell + max_features 0.3 + pos_age_s (+ optional age ring) + V28 cols + _ODOL (arm `sc_big_fo_long`).**
+
+### Next steps
+1. Run 30 = housekeeping (journal > 400 lines). Candidates to prune (lost twice or superseded): addon_v28b / sc_big_mf3_age_fo2 (lost once only; keep for now),
+   sc_big_fo_gap / _ODOG (lost on ds4, not stacked on either split), run27.sh, run28.sh, run28b.sh (keep the last 2 runners: run28*, run29).
+2. Odometer ideas are close to exhausted (instant, 60–1200 s windows, trajectory, shape gap). Untested: an even longer window (2400–3600 s), but the 600 → 1200 step was already small.
+3. Still recommend pausing the schedule. Runs 16–29 moved the leader by ≈ 3.5% in total (sc_big_dwell 88.1 → fo_long 85.65 on ds4), and the hand-off is the owner's call.
