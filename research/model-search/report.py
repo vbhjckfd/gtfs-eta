@@ -102,6 +102,9 @@ SERVING = {
     "sc_big_fo_nolap": "as sc_big_fo_long minus the own previous-lap cols",
     "sc_big_fo_noveh": "as sc_big_fo_long minus the vehicle own/hist ratio cols",
     "sc_big_fo_novl": "as sc_big_fo_long minus _LAP and _VEH (no per-vehicle crossing log): ~0.5 day less serving work",
+    "sc_big_fo_brk": "as sc_big_fo_pa + per-vehicle stopped-episode state (last end / length / odometer, 3 h deque)",
+    "sc_big_fo_duty": "as sc_big_fo_pa + per-vehicle shift start (feed t + odometer after the last >= 30 min gap); trivial",
+    "sc_big_fo_v32": "as sc_big_fo_brk + sc_big_fo_duty",
     "m3_nocal": "link store (last 3 traversals/link) + 5-min position ring, persisted in tracker_state.json; ~1 day",
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);

@@ -62,6 +62,9 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4shiftv31 | sc_big_fo_pan | 11 | 2,064,786 | 1,423,357 | 83.9 | 41.5 | 169.2 | -15.8 | 58.8 | 117.5 | — | — | — | — | ? |
 | ds4shiftv31 | sc_big_fo_pax | 11 | 2,064,786 | 1,423,357 | 83.5 | 41.5 | 168.9 | -15.4 | 58.4 | 117.1 | — | — | — | — | ? |
 | ds4shiftv31 | sc_big_fo_v31 | 11 | 2,064,786 | 1,423,357 | 83.5 | 41.5 | 168.4 | -15.8 | 58.6 | 116.9 | — | — | — | — | ? |
+| ds4shiftv32 | sc_big_fo_brk | 11 | 2,064,786 | 1,423,357 | 83.9 | 41.6 | 169.5 | -15.7 | 58.7 | 117.6 | — | — | — | — | as sc_big_fo_pa + per-vehicle stopped-episode state (last end / length / odometer, 3 h deque) |
+| ds4shiftv32 | sc_big_fo_duty | 11 | 2,064,786 | 1,423,357 | 83.6 | 41.5 | 168.7 | -16.0 | 58.6 | 117.0 | — | — | — | — | as sc_big_fo_pa + per-vehicle shift start (feed t + odometer after the last >= 30 min gap); trivial |
+| ds4shiftv32 | sc_big_fo_v32 | 11 | 2,064,786 | 1,423,357 | 83.7 | 41.6 | 169.7 | -15.6 | 58.5 | 117.1 | — | — | — | — | as sc_big_fo_brk + sc_big_fo_duty |
 | ds4v25 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
 | ds4v25 | sc_big_dwell | 42 | 2,205,756 | 1,607,392 | 88.1 | 44.9 | 181.3 | -12.4 | 61.1 | 122.7 | -22.7% | -24.9% | -16.7% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds4v25 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.8 | 44.7 | 180.8 | -12.7 | 61.0 | 122.3 | -23.0% | -25.1% | -16.9% | **yes** | as sc_big_mf5 (max_features 0.3) |
@@ -89,3 +92,8 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4v31 | sc_big_fo_pan | 42 | 2,205,756 | 1,607,392 | 85.1 | 43.3 | 175.1 | -13.6 | 58.7 | 119.4 | -25.3% | -27.5% | -20.0% | **yes** | ? |
 | ds4v31 | sc_big_fo_pax | 42 | 2,205,756 | 1,607,392 | 85.0 | 43.3 | 174.8 | -14.1 | 58.7 | 119.2 | -25.4% | -27.6% | -20.0% | **yes** | ? |
 | ds4v31 | sc_big_fo_v31 | 42 | 2,205,756 | 1,607,392 | 85.1 | 43.3 | 174.6 | -13.8 | 58.5 | 119.6 | -25.3% | -27.7% | -20.2% | **yes** | ? |
+| ds4v32 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
+| ds4v32 | sc_big_fo_brk | 42 | 2,205,756 | 1,607,392 | 85.4 | 43.3 | 175.4 | -14.1 | 58.8 | 119.8 | -25.0% | -27.4% | -19.8% | **yes** | as sc_big_fo_pa + per-vehicle stopped-episode state (last end / length / odometer, 3 h deque) |
+| ds4v32 | sc_big_fo_duty | 42 | 2,205,756 | 1,607,392 | 84.8 | 43.2 | 174.6 | -13.7 | 58.4 | 119.0 | -25.6% | -27.7% | -20.4% | **yes** | as sc_big_fo_pa + per-vehicle shift start (feed t + odometer after the last >= 30 min gap); trivial |
+| ds4v32 | sc_big_fo_pa | 42 | 2,205,756 | 1,607,392 | 85.2 | 43.4 | 175.4 | -13.7 | 58.5 | 119.6 | -25.2% | -27.4% | -20.2% | **yes** | as sc_big_fo_long + per-cycle link -> [(vehicle, fraction, odometer speed)] dict from the daemon's own trip placement; < 0.5 day |
+| ds4v32 | sc_big_fo_v32 | 42 | 2,205,756 | 1,607,392 | 84.7 | 43.3 | 174.9 | -13.4 | 58.1 | 119.0 | -25.6% | -27.6% | -20.7% | **yes** | as sc_big_fo_brk + sc_big_fo_duty |

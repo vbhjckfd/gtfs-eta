@@ -7,7 +7,7 @@ feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed b
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries are archived in `archive/JOURNAL-runs-1-12.md`, `-13-16.md`, `-17-18.md`, `-19-20.md`, `-21-23.md`, `-24-27.md`.
 
-## State of the search (updated run 31)
+## State of the search (updated run 32)
 
 ### Protocol set-up (fixed)
 - Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
@@ -44,6 +44,8 @@ export ~29 MB, fits the 10 s cycle. Cheaper fallbacks (ds4, mf3 base): 127 leave
 Productionising is the owner's call.
 **Run 30 optional add-on: `sc_big_fo_pa`** = fo_long + other vehicles on the path links right now (addon_v30): ds4 85.65 → 85.20 (−0.53%), ds4shift 84.20 → 83.95 (−0.30%),
 every bucket better; cheap to serve (one per-cycle link → vehicles dict). Ablation: dropping `_LAP` + `_VEH` costs +1.7 / +2.0%, so the crossing log stays.
+**Run 32 optional add-on: `sc_big_fo_duty`** = fo_pa + shift time / odometer since the vehicle's last ≥ 30 min feed gap (addon_v32 `_DUTY`): ds4 85.20 → 84.77 (−0.50%),
+ds4shift 83.95 → 83.62 (−0.39%), every bucket and p90 better on both splits; trivial to serve (one shift-start (t, odometer) per vehicle).
 
 ### What won (in order; each Δ is vs the previous leader)
 - live link path times: −7 to −9% vs baseline (run 1). + own speed, − headway: −8.3 / −9.0% (run 2).
@@ -53,6 +55,7 @@ every bucket better; cheap to serve (one per-cycle link → vehicles dict). Abla
 - own previous lap: −1.2 to −1.5% (run 11). vehicle own/hist ratio: −1.0 to −1.2% (run 12). location dwell table: −0.8% (run 14).
 - max_features 0.3: −0.4 to −0.65% (runs 23–25). fix-age cols: −0.3 to −0.6% (run 26).
 - feed speed + odometer: −1.1 / −1.6% (run 28). odometer 600/1200 s windows: −0.7 / −1.0% (run 29). vehicles on the path now: −0.5 / −0.3% (run 30).
+- shift duty (time / odometer since shift start): −0.50 / −0.39% (run 32).
 
 ### Ruled out (one line each)
 - Segment-additive link-time model: loses to direct HGBT at every horizon (repo history). Lookup-table bias correction: hurts MAE.
@@ -76,11 +79,12 @@ every bucket better; cheap to serve (one per-cycle link → vehicles dict). Abla
 - Odometer-vs-shape progress gap (V29 `_ODOG`): −0.29% alone, doesn't stack with `_ODOL` (run 29).
 - Dropping the per-vehicle crossing log (`_LAP` / `_VEH`) now that the odometer exists: +0.6 / +1.1%, both +1.7 / +2.0% (run 30). Keep them.
 - Occupied-link "now" path time + slow-vehicle gap (V31 `_PAN`): −0.13 / −0.07% vs fo_pa (run 31). 40/60 min odometer (`_ODOX`): −0.19 / −0.49%, sa1 +0.27% on ds4 (run 31).
+- Own break history (V32 `_BRK`: time / odometer since the last ≥ 3 / ≥ 10 min stop, its length, 3 h count): +0.27 / −0.06% (run 32). Does not touch 133 / 137.
 - Odometer-based crossing times in the link store: reasoned out (run 31). Snapshots are ~10 s apart and both odometer and dist_along interpolate linearly in between, so crossing times barely move.
 
 ### Open next steps
-1. Hand-off of `sc_big_fo_long` (+ optional V30 `sc_big_fo_pa`) is the owner's call. **Strongly recommend pausing the schedule**: runs 16–31 moved the leader by ≈ 4% in total,
-   and run 31's three arms were all within 0.6% of fo_pa. Live-feature ideas from the feed (positions, odometer, speed, other vehicles) look exhausted.
+1. Hand-off of `sc_big_fo_long` (+ optional V30 `sc_big_fo_pa`, + optional V32 duty `sc_big_fo_duty`) is the owner's call. **Strongly recommend pausing the schedule**: runs 16–32 moved the leader by ≈ 4.5% in total,
+   and runs 31–32 each added ≤ 0.5%. Live-feature ideas from the feed (positions, odometer, speed, other vehicles) look exhausted.
 2. What is left needs new data, not features: operator break / layover schedules (routes 133 / 137 / 122 dominate the tail), or more training days (data lever, run 16).
 
 ## 2026-10-01/02 — run 28 (feed-reported speed + odometer; feed-clock age ablation)
@@ -275,3 +279,56 @@ Worst routes, v31:
 ### Next steps
 1. Pause the schedule (owner's call). Every feed-derived live signal has now been tried, and runs 28–31 each added ≤ 1.6%, the last two ≤ 0.6%.
 2. If it continues: run 35 = housekeeping (or earlier if the journal passes 400 lines). Candidates to prune: addon_v28b / sc_big_mf3_age_fo2, sc_big_fo_gap / fo_v29 / _ODOG, and sc_big_fo_pan / _PAN (each lost once).
+
+## 2026-10-03 — run 32 (V32: own break history and shift duty)
+
+Lock taken at 04:14 UTC. Main was already merged. No housekeeping (journal 277 lines; due run 35).
+**Idea.** The tail (133 / 137 / 122) is driver breaks. Trip-keyed hold tables gave only ±0.5% (run 20–23). This run tests the vehicle's own break state instead,
+from the per-vehicle odometer ring that the hand-off already needs. A driver who just took a long stop is unlikely to take another soon, and one who has driven for hours is due one.
+`addon_v32.py` (v31 → ms_features_v32):
+- Stopped episodes come from distinct fixes: odometer step ≤ 2 m, fix gap ≤ 120 s, and length ≥ 180 s. Only episodes that already ended count.
+  The day averages 7.6k episodes, length p50 367 s.
+- `_BRK`: brk_since_s, brk_last_len, brk_odo_since (last ≥ 180 s episode, ≤ 4 h); brk10_since_s, brk10_odo_since (≥ 600 s, ≤ 6 h); brk_n3h.
+  Coverage: brk 86% (p50 ≈ 2200 s weekday / 1800 s weekend), brk10 51–64%.
+- `_DUTY`: duty_s and duty_odo, measured from the vehicle's first snapshot after its last ≥ 30 min feed gap (p50 ≈ 7 h).
+- Arms: sc_big_fo_brk (fo_pa + _BRK), sc_big_fo_duty (fo_pa + _DUTY), sc_big_fo_v32 (both).
+
+Commands:
+- pipeline_lite 09-08..09-29 `--parallel 3`, 04:14–≈06:50.
+- `sh research/model-search/run32.sh`: prep v10 plus addons v26, v28–v32, done 07:18 (v32 takes ≈ 10 s/day); then fits until 08:30.
+- Then sc_big_fo_duty on ds4shift via `harness.py run`.
+
+Reproduction: the ds4v32 baseline (113.946) and sc_big_fo_pa (85.197) equal ds4v31 bit-for-bit. ds4shift is judged against the ds4shiftv30 fo_pa row (83.95).
+
+### Results (MAE / median / p90 / bias; ds4 s42 train 2.21M / test 1.61M; ds4shift s11 train 2.06M / test 1.42M)
+| arm | ds4 | Δ vs fo_pa | Sun / Mon / Tue | ds4shift | Δ vs fo_pa | Sat / Sun / Mon |
+|---|---|---|---|---|---|---|
+| baseline | 113.95 / 60.4 / 241.6 / −19.3 | | 104.5 / 115.5 / 118.5 | 109.95 / 55.9 / 228.7 / −23.5 (v25) | | 103.6 / 106.8 / 116.5 |
+| sc_big_fo_pa | 85.20 / 43.4 / 175.4 / −13.7 | | 79.0 / 86.5 / 88.0 | 83.95 / 41.6 / 169.1 / −15.7 (v30) | | 81.9 / 81.1 / 87.2 |
+| sc_big_fo_brk | 85.43 / 43.3 / 175.4 / −14.1 | +0.27% | 79.3 / 86.6 / 88.3 | 83.90 / 41.6 / 169.5 / −15.7 | −0.06% | 81.6 / 81.0 / 87.4 |
+| **sc_big_fo_duty** | **84.77** / 43.2 / 174.6 / −13.7 | **−0.50%** | 78.9 / 85.7 / 87.7 | **83.62** / 41.5 / 168.7 / −16.0 | **−0.39%** | 81.8 / 80.9 / 86.7 |
+| sc_big_fo_v32 | 84.75 / 43.3 / 174.9 / −13.4 | −0.53% | 78.5 / 85.9 / 87.6 | 83.66 / 41.6 / 169.7 / −15.6 | −0.34% | 81.6 / 81.0 / 86.8 |
+
+Bucket Δ (sa1..10) vs fo_pa:
+- brk ds4: +0.50 +0.54 +0.31 +0.30 +0.17 +0.05 +0.25 +0.31 +0.23 +0.18%. ds4shift: −0.22 +0.15 −0.07 −0.09 −0.29 +0.04 −0.07 −0.04 −0.03 +0.05%.
+- duty ds4: −0.25 −0.30 −0.52 −0.45 −0.50 −0.77 −0.57 −0.53 −0.55 −0.46%. ds4shift: −0.34 −0.26 −0.39 −0.41 −0.38 −0.36 −0.35 −0.48 −0.39 −0.47%.
+- v32 ds4: −0.69 −0.44 −0.64 −0.50 −0.63 −0.47 −0.34 −0.56 −0.55 −0.52%. ds4shift: −0.52 −0.11 −0.10 −0.27 −0.36 −0.43 −0.42 −0.38 −0.37 −0.39%.
+
+duty vs baseline: −25.6% / −24.0%, p90 241.6 → 174.6 / 228.7 → 168.7.
+Worst routes, duty:
+- ds4: 137 223, 133 188, 118 167, 122 160, 106 141, 2302 132, 2460 130, 111 125, 143 124, 131 124.
+- ds4shift: 133 253, 137 209, 122 165, 106 152, 143 150, 2460 129, 1630 124, 111 120, 2302 118, 125 112.
+
+**Conclusion: no protocol win (all < 3%), so no notification.**
+- The vehicle's own break history doesn't help: +0.27% on ds4, −0.06% on ds4shift, and routes 133 / 137 are unchanged.
+  The stop-state cols the leader already has (stationary_sec, the dwell table, _LAP, fs_zero_frac600) cover what is learnable; the breaks themselves stay unpredictable from the feed.
+- Shift duty is a small, consistent gain: −0.50% / −0.39%, every bucket, p90 and 5 of 6 test days better. It is not driven by the break routes.
+  Likely it encodes the vehicle's place in its block (morning vs evening shift, running late through the day).
+  It is the cheapest add-on so far: per vehicle, one (t, odometer) at the first snapshot after a ≥ 30 min gap, persisted with the tracker state.
+  Optional in the hand-off, like V30.
+- Hand-off recipe unchanged: sc_big_fo_long, optionally + V30 (`sc_big_fo_pa`) + V32 duty (`sc_big_fo_duty`).
+
+### Next steps
+1. Pause the schedule (owner's call). Runs 30–32 each added ≤ 0.5%.
+2. If it continues: a later day set once ≥ 10-11 is available (two new weekends) to re-check the leader + V30 + duty on fresh days and re-test trip-keyed holds (run 24–27 note).
+   Run 35 = housekeeping; prune candidates as listed in run 31, plus `_BRK` / sc_big_fo_brk / sc_big_fo_v32 (lost once).
