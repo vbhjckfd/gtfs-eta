@@ -7,7 +7,7 @@ feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed b
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
 Full run entries are archived in `archive/JOURNAL-runs-1-12.md`, `-13-16.md`, `-17-18.md`, `-19-20.md`, `-21-23.md`, `-24-27.md`.
 
-## State of the search (updated run 30)
+## State of the search (updated run 31)
 
 ### Protocol set-up (fixed)
 - Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
@@ -75,11 +75,13 @@ every bucket better; cheap to serve (one per-cycle link → vehicles dict). Abla
 - Reported-speed trajectory (V28b: lag, accel, max, time since moving, 30 s odometer speed): −0.19 / −0.07%, sa1 worse (run 28).
 - Odometer-vs-shape progress gap (V29 `_ODOG`): −0.29% alone, doesn't stack with `_ODOL` (run 29).
 - Dropping the per-vehicle crossing log (`_LAP` / `_VEH`) now that the odometer exists: +0.6 / +1.1%, both +1.7 / +2.0% (run 30). Keep them.
+- Occupied-link "now" path time + slow-vehicle gap (V31 `_PAN`): −0.13 / −0.07% vs fo_pa (run 31). 40/60 min odometer (`_ODOX`): −0.19 / −0.49%, sa1 +0.27% on ds4 (run 31).
+- Odometer-based crossing times in the link store: reasoned out (run 31). Snapshots are ~10 s apart and both odometer and dist_along interpolate linearly in between, so crossing times barely move.
 
 ### Open next steps
-1. Hand-off of `sc_big_fo_long` (+ optional V30 `sc_big_fo_pa`) is the owner's call. Recommend pausing the schedule: runs 16–30 moved the leader by ≈ 4% in total.
-2. V30 extensions (path time "now" from occupied links; vehicles that just left the path): likely ≤ 0.3%.
-3. Untested, needs prep changes: odometer-based crossing times in the live link store.
+1. Hand-off of `sc_big_fo_long` (+ optional V30 `sc_big_fo_pa`) is the owner's call. **Strongly recommend pausing the schedule**: runs 16–31 moved the leader by ≈ 4% in total,
+   and run 31's three arms were all within 0.6% of fo_pa. Live-feature ideas from the feed (positions, odometer, speed, other vehicles) look exhausted.
+2. What is left needs new data, not features: operator break / layover schedules (routes 133 / 137 / 122 dominate the tail), or more training days (data lever, run 16).
 
 ## 2026-10-01/02 — run 28 (feed-reported speed + odometer; feed-clock age ablation)
 
@@ -225,3 +227,51 @@ Worst routes, fo_pa:
 2. Possible extensions of V30, each likely ≤ 0.3%: weight the occupancy by link (span / speed per occupied link, summed into a "now" path time), or use the
    vehicles that just left the path (last 120 s). Untested.
 3. Untested, needs prep changes: odometer-based crossing times in the live link store.
+
+## 2026-10-02/03 — run 31 (V31: "now" path time from vehicles on the path; 40/60 min odometer)
+
+Lock taken at 20:13 UTC. Main was already merged. No housekeeping (journal 227 lines; run 30 did it).
+**Ideas** (run 30 next step 2, run 29 next step 2). `addon_v31.py` (v30 → ms_features_v31):
+- `_PAN`: pa_now_t = Σ over the occupied path links of (metres still ahead on that link) / max(median 120 s odometer speed of the vehicles on it, 0.5 m/s).
+  Also pa_now_len (metres those links cover) and pa_slow_gap (path distance to the nearest vehicle ahead moving < 1 m/s over 120 s).
+  Coverage: now_t > 0 on 75% of weekday rows and 68% of weekend rows (p50 ≈ 380 s / 260 s); slow_gap on 15% / 6%.
+- `_ODOX`: odo_spd_2400 and odo_spd_3600 (coverage 93%).
+- Odometer-based crossing times (run 30 next step 3) were reasoned out, not run: snapshots are ~10 s apart and both odometer and dist_along interpolate linearly between them.
+- Arms: sc_big_fo_pan (fo_pa + _PAN), sc_big_fo_pax (fo_pa + _ODOX), sc_big_fo_v31 (both).
+
+Commands:
+- pipeline_lite 09-08..09-29 `--parallel 3` (20:13–≈22:40).
+- `sh run31.sh`: prep v10 + addons v26, v28, v29, v30, v31 (≈ 110 s/day for v31), then fits.
+- The container restarted twice (≈ 22:50 during the v31 add-on, then ≈ 23:20 with a proxy outage that broke the static-GTFS fetch). Relaunching run31.sh resumed both times, because prep and addons skip finished days.
+- Fits finished ≈ 02:00 UTC.
+
+Reproduction: the ds4v31 baseline (113.946) and sc_big_fo_pa (85.197) equal ds4v30 bit-for-bit. ds4shift is judged against the ds4shiftv30 fo_pa row (83.95).
+
+### Results (MAE / median / p90 / bias; ds4 s42 train 2.21M / test 1.61M; ds4shift s11 train 2.06M / test 1.42M)
+| arm | ds4 | Δ vs fo_pa | Sun / Mon / Tue | ds4shift | Δ vs fo_pa | Sat / Sun / Mon |
+|---|---|---|---|---|---|---|
+| baseline | 113.95 / 60.4 / 241.6 / −19.3 | | 104.5 / 115.5 / 118.5 | 109.95 / 55.9 / 228.7 / −23.5 (v25) | | 103.6 / 106.8 / 116.5 |
+| sc_big_fo_pa | 85.20 / 43.4 / 175.4 / −13.7 | | 79.0 / 86.5 / 88.0 | 83.95 / 41.6 / 169.1 / −15.7 (v30) | | 81.9 / 81.1 / 87.2 |
+| sc_big_fo_pan | 85.09 / 43.3 / 175.1 / −13.6 | −0.13% | 78.9 / 86.3 / 87.9 | 83.89 / 41.5 / 169.2 / −15.8 | −0.07% | 81.7 / 81.1 / 87.3 |
+| sc_big_fo_pax | 85.03 / 43.3 / 174.8 / −14.1 | −0.19% | 79.0 / 86.2 / 87.8 | 83.54 / 41.5 / 168.9 / −15.4 | −0.49% | 81.2 / 80.7 / 87.0 |
+| sc_big_fo_v31 | 85.07 / 43.3 / 174.6 / −13.8 | −0.15% | 79.1 / 86.3 / 87.7 | 83.48 / 41.5 / 168.4 / −15.8 | −0.56% | 81.2 / 80.6 / 87.0 |
+
+Bucket Δ (sa1..10) vs fo_pa:
+- pan ds4: +0.21 −0.17 −0.16 −0.13 −0.35 −0.21 −0.10 −0.11 −0.08 −0.17%. ds4shift: −0.03 −0.02 +0.08 −0.06 −0.03 −0.24 −0.13 +0.01 −0.18 −0.03%.
+- pax ds4: +0.27 −0.04 −0.06 −0.31 −0.30 −0.30 −0.15 −0.22 −0.33 −0.34%. ds4shift: −0.73 −0.60 −0.60 −0.92 −0.56 −0.31 −0.27 −0.35 −0.35 −0.33%.
+- v31 ds4: −0.02 −0.04 −0.21 −0.27 −0.34 −0.36 −0.07 −0.07 −0.09 −0.04%. ds4shift: −0.43 −0.58 −0.59 −0.65 −0.69 −0.54 −0.45 −0.56 −0.59 −0.51%.
+
+v31 vs baseline: −25.3% / −24.1%, p90 241.6 → 174.6 / 228.7 → 168.4.
+Worst routes, v31:
+- ds4: 137 225, 133 191, 118 174, 122 159, 106 140, 2460 131, 2302 129, 111 126, 131 125, 143 122.
+- ds4shift: 133 257, 137 208, 122 172, 143 146, 106 146, 2460 127, 1630 122, 111 120, 2302 116, 125 115.
+
+**Conclusion: no protocol win (all < 3%), so no notification.**
+- The "now" path time adds almost nothing on top of V30's raw cols (−0.13 / −0.07%): the trees already combine pa_spd / pa_cov with the link store.
+- 40/60 min odometer is the only consistent part (−0.19 / −0.49%), but sa1 is worse on ds4 (+0.27%). v31 (both) is the most even (every bucket ≤ 0 on both splits).
+  At ≤ 0.6% it is within the split-to-split noise seen in earlier runs, so I would not add it to the hand-off.
+- Hand-off recipe unchanged: sc_big_fo_long, optionally + V30 (`sc_big_fo_pa`).
+
+### Next steps
+1. Pause the schedule (owner's call). Every feed-derived live signal has now been tried, and runs 28–31 each added ≤ 1.6%, the last two ≤ 0.6%.
+2. If it continues: run 35 = housekeeping (or earlier if the journal passes 400 lines). Candidates to prune: addon_v28b / sc_big_mf3_age_fo2, sc_big_fo_gap / fo_v29 / _ODOG, and sc_big_fo_pan / _PAN (each lost once).

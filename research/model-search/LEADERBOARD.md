@@ -59,6 +59,9 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4shiftv29 | sc_big_fo_v29 | 11 | 2,064,786 | 1,423,357 | 84.3 | 41.8 | 170.6 | -14.6 | 59.0 | 118.0 | -23.3% | -25.4% | -19.5% | **yes** | as sc_big_fo_long + sc_big_fo_gap |
 | ds4shiftv30 | sc_big_fo_novl | 11 | 2,064,786 | 1,423,357 | 85.9 | 42.3 | 173.3 | -16.2 | 59.8 | 120.1 | -21.9% | -24.2% | -18.5% | **yes** | as sc_big_fo_long minus _LAP and _VEH (no per-vehicle crossing log): ~0.5 day less serving work |
 | ds4shiftv30 | sc_big_fo_pa | 11 | 2,064,786 | 1,423,357 | 83.9 | 41.6 | 169.1 | -15.7 | 58.8 | 117.5 | -23.6% | -26.1% | -19.8% | **yes** | as sc_big_fo_long + per-cycle link -> [(vehicle, fraction, odometer speed)] dict from the daemon's own trip placement; < 0.5 day |
+| ds4shiftv31 | sc_big_fo_pan | 11 | 2,064,786 | 1,423,357 | 83.9 | 41.5 | 169.2 | -15.8 | 58.8 | 117.5 | — | — | — | — | ? |
+| ds4shiftv31 | sc_big_fo_pax | 11 | 2,064,786 | 1,423,357 | 83.5 | 41.5 | 168.9 | -15.4 | 58.4 | 117.1 | — | — | — | — | ? |
+| ds4shiftv31 | sc_big_fo_v31 | 11 | 2,064,786 | 1,423,357 | 83.5 | 41.5 | 168.4 | -15.8 | 58.6 | 116.9 | — | — | — | — | ? |
 | ds4v25 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
 | ds4v25 | sc_big_dwell | 42 | 2,205,756 | 1,607,392 | 88.1 | 44.9 | 181.3 | -12.4 | 61.1 | 122.7 | -22.7% | -24.9% | -16.7% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds4v25 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.8 | 44.7 | 180.8 | -12.7 | 61.0 | 122.3 | -23.0% | -25.1% | -16.9% | **yes** | as sc_big_mf5 (max_features 0.3) |
@@ -81,3 +84,8 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4v30 | sc_big_fo_noveh | 42 | 2,205,756 | 1,607,392 | 86.6 | 43.7 | 178.2 | -14.0 | 59.8 | 121.2 | -24.0% | -26.2% | -18.4% | **yes** | as sc_big_fo_long minus the vehicle own/hist ratio cols |
 | ds4v30 | sc_big_fo_novl | 42 | 2,205,756 | 1,607,392 | 87.1 | 44.0 | 179.1 | -13.6 | 59.7 | 122.1 | -23.6% | -25.9% | -18.6% | **yes** | as sc_big_fo_long minus _LAP and _VEH (no per-vehicle crossing log): ~0.5 day less serving work |
 | ds4v30 | sc_big_fo_pa | 42 | 2,205,756 | 1,607,392 | 85.2 | 43.4 | 175.4 | -13.7 | 58.5 | 119.6 | -25.2% | -27.4% | -20.2% | **yes** | as sc_big_fo_long + per-cycle link -> [(vehicle, fraction, odometer speed)] dict from the daemon's own trip placement; < 0.5 day |
+| ds4v31 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
+| ds4v31 | sc_big_fo_pa | 42 | 2,205,756 | 1,607,392 | 85.2 | 43.4 | 175.4 | -13.7 | 58.5 | 119.6 | -25.2% | -27.4% | -20.2% | **yes** | as sc_big_fo_long + per-cycle link -> [(vehicle, fraction, odometer speed)] dict from the daemon's own trip placement; < 0.5 day |
+| ds4v31 | sc_big_fo_pan | 42 | 2,205,756 | 1,607,392 | 85.1 | 43.3 | 175.1 | -13.6 | 58.7 | 119.4 | -25.3% | -27.5% | -20.0% | **yes** | ? |
+| ds4v31 | sc_big_fo_pax | 42 | 2,205,756 | 1,607,392 | 85.0 | 43.3 | 174.8 | -14.1 | 58.7 | 119.2 | -25.4% | -27.6% | -20.0% | **yes** | ? |
+| ds4v31 | sc_big_fo_v31 | 42 | 2,205,756 | 1,607,392 | 85.1 | 43.3 | 174.6 | -13.8 | 58.5 | 119.6 | -25.3% | -27.7% | -20.2% | **yes** | ? |
