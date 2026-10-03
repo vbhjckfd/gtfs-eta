@@ -110,6 +110,9 @@ def state_table(day: str) -> pd.DataFrame:
     so = pd.Series(a["odo"].to_numpy()).groupby(sid).transform("first").to_numpy()
     a["duty_s"] = t - st
     a["duty_odo"] = a["odo"].to_numpy() - so
+    # stale fixes: feed t can run far ahead of the vehicle clock; keep the windows on the feed clock too
+    a.loc[a["brk_since_s"] > 4 * 3600, ["brk_since_s", "brk_last_len", "brk_odo_since"]] = np.nan
+    a.loc[a["brk10_since_s"] > 6 * 3600, ["brk10_since_s", "brk10_odo_since"]] = np.nan
     for c in ["brk_odo_since", "brk10_odo_since", "duty_odo"]:
         a.loc[a[c] < 0, c] = np.nan
     return a[["vehicle_id", "t"] + V32_COLS]
