@@ -829,3 +829,26 @@ def sc_big_fo_duty(tr, te, seed=42):
 def sc_big_fo_v32(tr, te, seed=42):
     """sc_big_fo_pa + all V32 cols."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _BRK + _DUTY, max_features=0.3)
+
+
+# ---- run 33 (same V32 feature dir): stack the optional add-ons; pace target ----
+@arm
+def sc_big_fo_all(tr, te, seed=42):
+    """sc_big_fo_duty + 40 / 60 min odometer (_ODOX): do the optional add-ons stack?"""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _DUTY + _ODOX, max_features=0.3)
+
+
+_PACE_MIN_M = 50.0
+
+
+@arm
+def sc_big_duty_pace(tr, te, seed=42):
+    """sc_big_fo_duty with target = seconds per metre of remaining_dist_m (floored at 50 m),
+    sample weight x that distance, so the absolute_error objective is still L1 in seconds;
+    prediction = pace x distance. Trees can then scale with distance instead of tiling it."""
+    dtr = np.maximum(tr["remaining_dist_m"].to_numpy(dtype=float), _PACE_MIN_M)
+    w = prod._build_sample_weights(tr) * dtr
+    target = lambda d: d[TARGET_COL].to_numpy(dtype=float) / dtr
+    inv = lambda d, p: np.clip(p * np.maximum(d["remaining_dist_m"].to_numpy(dtype=float), _PACE_MIN_M), 0, 3600)
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _DUTY, max_features=0.3,
+                             weights=w, target=target, inv=inv)
