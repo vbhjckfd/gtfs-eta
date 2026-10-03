@@ -806,3 +806,26 @@ def sc_big_fo_pax(tr, te, seed=42):
 def sc_big_fo_v31(tr, te, seed=42):
     """sc_big_fo_pa + all V31 cols."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _PAN + _ODOX, max_features=0.3)
+
+
+# ---- run 32 add-on (V32 cols: own break / duty state from the odometer ring, MS_FEAT_DIR=ms_features_v32) ----
+_BRK = ["brk_since_s", "brk_last_len", "brk_odo_since", "brk10_since_s", "brk10_odo_since", "brk_n3h"]
+_DUTY = ["duty_s", "duty_odo"]
+
+
+@arm
+def sc_big_fo_brk(tr, te, seed=42):
+    """sc_big_fo_pa + the vehicle's own past stopped episodes (since / length / odometer since, 3 h count)."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _BRK, max_features=0.3)
+
+
+@arm
+def sc_big_fo_duty(tr, te, seed=42):
+    """sc_big_fo_pa + time / odometer since the vehicle's shift start."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _DUTY, max_features=0.3)
+
+
+@arm
+def sc_big_fo_v32(tr, te, seed=42):
+    """sc_big_fo_pa + all V32 cols."""
+    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _BRK + _DUTY, max_features=0.3)

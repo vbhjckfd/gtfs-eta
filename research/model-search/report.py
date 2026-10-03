@@ -106,7 +106,7 @@ SERVING = {
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);
 # every other tag goes to archive/LEADERBOARD-old.md.
-CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds3v13", "ds3shiftv13", "ds4v25", "ds4shiftv25", "ds4v28", "ds4shiftv28", "ds4v29", "ds4shiftv29", "ds4v30", "ds4shiftv30", "ds4v31", "ds4shiftv31"}
+CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds3v13", "ds3shiftv13", "ds4v25", "ds4shiftv25", "ds4v28", "ds4shiftv28", "ds4v29", "ds4shiftv29", "ds4v30", "ds4shiftv30", "ds4v31", "ds4shiftv31", "ds4v32", "ds4shiftv32"}
 # tags without their own baseline row (same rows as another tag, verified bit-for-bit)
 BASE_ALIAS = {"ds4shiftv26": "ds4shiftv25", "ds4shiftv27": "ds4shiftv25", "ds4shiftv28": "ds4shiftv25",
               "ds4v28b": "ds4v28", "ds4shiftv28b": "ds4shiftv25", "ds4shiftv29": "ds4shiftv25", "ds4shiftv30": "ds4shiftv25"}
