@@ -379,3 +379,14 @@ Worst routes:
    rather than rebuild ds4 for more ≤ 0.5% ideas.
 3. Run 35 = housekeeping. Prune candidates: sc_big_duty_pace (lost on both splits), _BRK / sc_big_fo_brk / sc_big_fo_v32, sc_big_fo_pan / _PAN,
    addon_v28b / sc_big_mf3_age_fo2, sc_big_fo_gap / fo_v29 / _ODOG; run28b.sh, run29.sh, run30.sh, run31.sh.
+
+## 2026-10-03 — run 34 (early exit: waiting for a fresh day set)
+
+Lock taken at 20:12 UTC. Main was already merged. R2 credentials present. No housekeeping (journal 381 lines; due run 35).
+Per run 33 next step 2: the newest complete day is 10-02, and a fresh split needs ≥ 10-11 (two new weekends among the held-out days). Rebuilding ds4
+(≈ 2.5 h pipeline) for another ≤ 0.5% idea isn't worth it, so no experiment this run. No result rows, no notification.
+
+### Next steps
+1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2.
+2. Then build ds5 (e.g. train 09-22..10-07, test 10-09..10-11 + shift split) and re-check baseline vs sc_big_fo_long / fo_pa / fo_duty on fresh days.
+3. Run 35 = housekeeping (prune list in run 33 step 3).
