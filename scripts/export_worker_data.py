@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 
 from src.gtfs_static import get_gtfs
 from src.train import MODEL_PATH, PRIORS_PATH, UNCERTAINTY_PATH
+from src.train_live import MODEL_PATH as LIVE_MODEL_PATH, TABLES_PATH as LIVE_TABLES_PATH
 
 load_dotenv()
 
@@ -173,11 +174,52 @@ def _starting_bias(live_model: dict, new_trees: bool) -> tuple[dict | None, str 
 
 def _model_fingerprint(tree_data: dict) -> str:
     """Stable digest of the serving trees, to tell a real retrain from a re-export."""
+    if tree_data.get("feature_set") == "live_v2":
+        h = hashlib.sha256(repr(tree_data.get("baseline")).encode())
+        for k in sorted(tree_data["flat"]):
+            h.update(k.encode())
+            h.update(tree_data["flat"][k].tobytes())
+        return h.hexdigest()
     payload = pickle.dumps(
         (tree_data.get("baseline"), tree_data.get("learning_rate"), tree_data.get("trees")),
         protocol=4,
     )
     return hashlib.sha256(payload).hexdigest()
+
+
+# Which local model to export. "auto" prefers the live_v2 model
+# (src/train_live.py) when one has been trained, else the legacy pipeline.
+# The live_v2 format needs the daemon from the same commit (src/inference
+# predict_live + the live state in scripts/push_feed.py): an older daemon
+# cannot read it.
+EXPORT_MODEL = os.environ.get("EXPORT_MODEL", "auto")
+
+# Keys a live_v2 export carries besides the shared calibration fields.
+_LIVE_MODEL_KEYS = ("feature_set", "cols", "route_codes", "stop_codes", "n_stop_codes",
+                    "cat_maps", "baseline", "n_trees", "flat", "live_tables",
+                    "trained_through", "tables_through")
+
+
+def _local_tree_data() -> dict | None:
+    """Serving dict for the locally trained model, or None when there is none."""
+    use_live = EXPORT_MODEL == "live" or (EXPORT_MODEL == "auto" and LIVE_MODEL_PATH.exists())
+    if use_live:
+        from src.train_live import flatten_model
+        bundle = joblib.load(LIVE_MODEL_PATH)
+        data = flatten_model(bundle)
+        data["live_tables"] = joblib.load(LIVE_TABLES_PATH)
+        data["trained_through"] = bundle.get("trained_through")
+        data["tables_through"] = bundle.get("tables_through")
+        n_nodes = len(data["flat"]["value"])
+        print(f"  live_v2 model: {data['n_trees']} trees, {n_nodes:,} nodes, "
+              f"{len(data['route_codes'])} routes, {len(data['live_tables'].get('hist_k', {})):,} "
+              f"links, {len(data['live_tables'].get('dwell', {})):,} dwell locations; "
+              f"trained through {data['trained_through']}, tables through {data['tables_through']}")
+        return data
+    model_path = Path(MODEL_PATH)
+    if model_path.exists():
+        return _extract_trees(joblib.load(model_path))
+    return None
 
 
 def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
@@ -416,11 +458,8 @@ def main():
     except Exception:  # noqa: BLE001 — first ever export has nothing to read
         live_model = {}
 
-    model_path = Path(MODEL_PATH)
-    if model_path.exists():
-        import joblib
-        pipeline = joblib.load(model_path)
-        tree_data = _extract_trees(pipeline)
+    tree_data = _local_tree_data()
+    if tree_data is not None:
         fingerprint = _model_fingerprint(tree_data)
         if fingerprint and fingerprint == live_model.get("model_fingerprint"):
             # Same trees as those already live: a hand `make export`, or a band
@@ -444,19 +483,21 @@ def main():
         # existing_priors above.
         try:
             existing_model = live_model or {}
-            tree_data = {
-                k: existing_model[k]
-                for k in ("route_to_int", "baseline", "learning_rate", "trees")
-            }
+            keys = (
+                [k for k in _LIVE_MODEL_KEYS if k in existing_model]
+                if existing_model.get("feature_set") == "live_v2"
+                else ("route_to_int", "baseline", "learning_rate", "trees")
+            )
+            tree_data = {k: existing_model[k] for k in keys}
             model_since = existing_model.get("model_since")
             fingerprint = existing_model.get("model_fingerprint") or _model_fingerprint(tree_data)
-            print(f"  Model not found at {model_path} — reusing trees already live "
+            print("  No local model — reusing trees already live "
                   "on R2, refreshing live-calibrated bands only")
             if model_since:
                 print(f"  Live bands will pool only days from {model_since} "
                       "(when these trees went live)")
         except Exception as exc:  # noqa: BLE001 — no existing object, nothing to refresh
-            print(f"  Model not found at {model_path} and no existing model on R2 "
+            print(f"  No local model and no existing model on R2 "
                   f"({exc!r}) — skipping model upload")
             return
 
