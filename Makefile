@@ -1,4 +1,4 @@
-.PHONY: install pipeline pipeline-date train learn export deploy \
+.PHONY: install pipeline pipeline-date train train-legacy learn export deploy \
         sanity validate-off-route validate-horizon compare-models \
         check-gtfs check-snapshots \
         push-feed serve-feed smoke score route-mae review-quality diagnose \
@@ -22,9 +22,16 @@ install:
 
 # ── Data pipeline ──────────────────────────────────────────────────────────
 
-## Run the full pipeline for all available days (skips already-done days)
+# Days labeled by `make pipeline`: the live_v2 trainer uses the latest 21,
+# plus the 14 before them for its historical tables.
+LABEL_DAYS ?= 36
+# Share of snapshots kept as training rows (the trainer samples below it anyway).
+KEEP_PCT ?= 10
+
+## Label the last LABEL_DAYS days (training rows + live side tables; skips done days)
 pipeline:
-	$(KEEP_AWAKE) python scripts/run_pipeline.py --all --parallel $(PARALLEL)
+	$(KEEP_AWAKE) python scripts/run_pipeline.py --all --parallel $(PARALLEL) \
+		--keep-pct $(KEEP_PCT) --since $$(python -c "import datetime as d;print(d.date.today()-d.timedelta(days=$(LABEL_DAYS)))")
 
 ## Run the pipeline for a single date: make pipeline-date DATE=2026-06-01
 pipeline-date:
@@ -32,8 +39,12 @@ pipeline-date:
 
 # ── Model ──────────────────────────────────────────────────────────────────
 
-## Build features from data/training/ and train the sklearn model
+## Train the live_v2 model (src/train_live.py) on the latest 21 labeled days
 train:
+	$(KEEP_AWAKE) python -m src.train_live --parallel $(PARALLEL)
+
+## Train the legacy single-snapshot model (rollback path)
+train-legacy:
 	$(KEEP_AWAKE) python -m src.train data/training/
 
 ## Full learning cycle: regenerate training data (parallel) + train the model
@@ -125,7 +136,8 @@ help:
 	@echo ""
 	@echo "  pipeline             Run pipeline for all days (incremental, PARALLEL=$(PARALLEL))"
 	@echo "  pipeline-date DATE=  Run pipeline for a single date"
-	@echo "  train                Build features + train model"
+	@echo "  train                Train the live_v2 model (latest 21 days)"
+	@echo "  train-legacy         Train the legacy single-snapshot model"
 	@echo "  learn                pipeline + train in one step"
 	@echo "  validate-horizon     Held-out bias + MAE per stops_ahead (post-retrain check)"
 	@echo "  compare-models       Production model vs segment-additive challenger, one split"
