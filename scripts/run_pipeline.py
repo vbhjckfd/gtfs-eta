@@ -135,21 +135,48 @@ def _process_day_in_worker(date_str: str, keep_pct: float, side: bool) -> dict:
 
 def _run_parallel(days: list[str], n_workers: int, keep_pct: float, side: bool) -> list[dict]:
     from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures.process import BrokenProcessPool
     print(f"Processing {len(days)} days with {n_workers} workers…")
     results = []
-    # One day per worker process: a day's peak heap is never handed back to the
-    # OS, so a reused worker carries the previous day's high-water mark into
-    # the next one.
-    with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker,
-                             max_tasks_per_child=1) as ex:
-        futures = {ex.submit(_process_day_in_worker, d, keep_pct, side): d for d in days}
-        for fut in as_completed(futures):
-            r = fut.result()
-            results.append(r)
-            if r["status"] == "ok":
-                print(f"  {r['date']}: {r['n_labeled']:,} training rows  [{r['elapsed_s']:.0f}s]")
-            else:
-                print(f"  {r['date']}: {r['status']}")
+    pending = list(days)
+    attempts: dict[str, int] = {}
+    # A worker killed outright (the OOM killer, mostly) breaks the whole pool
+    # and fails every day still queued on it. Those days are resubmitted on a
+    # fresh pool — one at a time after a break, since a break means the box was
+    # short of memory — and only a day that keeps breaking it is given up on.
+    while pending:
+        workers = n_workers if not attempts else 1
+        broken = False
+        # One day per worker process: a day's peak heap is never handed back to
+        # the OS, so a reused worker carries the previous day's high-water mark
+        # into the next one.
+        with ProcessPoolExecutor(max_workers=min(workers, len(pending)),
+                                 initializer=_init_worker, max_tasks_per_child=1) as ex:
+            futures = {ex.submit(_process_day_in_worker, d, keep_pct, side): d for d in pending}
+            for fut in as_completed(futures):
+                day = futures[fut]
+                try:
+                    r = fut.result()
+                except BrokenProcessPool:
+                    broken = True
+                    continue
+                except Exception as exc:  # noqa: BLE001 — one bad day must not stop the rest
+                    r = {"date": day, "status": f"error {exc!r}"}
+                pending.remove(day)
+                results.append(r)
+                if r["status"] == "ok":
+                    print(f"  {r['date']}: {r['n_labeled']:,} training rows  [{r['elapsed_s']:.0f}s]")
+                else:
+                    print(f"  {r['date']}: {r['status']}")
+        if broken:
+            for day in list(pending):
+                attempts[day] = attempts.get(day, 0) + 1
+                if attempts[day] > 2:
+                    pending.remove(day)
+                    results.append({"date": day, "status": "worker killed (out of memory?)"})
+                    print(f"  {day}: worker killed repeatedly — giving up")
+            if pending:
+                print(f"  worker pool broke — retrying {len(pending)} day(s) one at a time")
     results.sort(key=lambda r: r["date"])
     return results
 
