@@ -165,3 +165,11 @@ Lock taken at 00:14 UTC. Main had not moved. R2 credentials present. Newest comp
 
 ### Next steps
 1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2; then ds5 via ds.sh (state step 3).
+
+## 2026-10-04 — run 36 (early exit, no fresh day set)
+
+Lock taken at 04:12 UTC. Main had not moved. R2 credentials present. Newest complete day is 10-03; a fresh split needs ≥ 10-12 (state step 3), so no experiment,
+no result rows, no notification. No housekeeping due (journal 167 lines, last done run 35).
+
+### Next steps
+1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2; then ds5 via ds.sh.
