@@ -399,6 +399,7 @@ def training_rows_for_trajectory(
     traj: pd.DataFrame,
     gtfs: GTFSStatic,
     max_stops_ahead: int = MAX_STOPS_AHEAD,
+    positions_out: list | None = None,
 ) -> pd.DataFrame | None:
     """
     Snapshot-anchored rows for one (vehicle, trip) trajectory.
@@ -407,6 +408,11 @@ def training_rows_for_trajectory(
     with the observed arrival time at that stop as the target. This matches
     the live-serving question exactly: "given the vehicle *here*, when does it
     reach stop S?" — including remaining distances near zero.
+
+    ``positions_out``, when given, receives one DataFrame per run with every
+    projected snapshot (vehicle_id, trip_id, t, dist_along_m, run) — whether or
+    not it emitted a row. src/live_features.py replays these to rebuild the
+    live state the serving daemon keeps (link store, position ring).
     """
     trip = gtfs.get_trip(trip_id)
     if trip is None:
@@ -442,6 +448,17 @@ def training_rows_for_trajectory(
 
     n_stops_total = len(trip.stop_times)
     seq_to_index = {st.stop_sequence: i for i, st in enumerate(trip.stop_times)}
+
+    if positions_out is not None:
+        for run_idx, run_traj in enumerate(runs):
+            ts = run_traj["timestamp"]
+            positions_out.append(pd.DataFrame({
+                "vehicle_id": vehicle_id,
+                "trip_id": trip_id,
+                "t": (ts - pd.Timestamp("1970-01-01", tz="UTC")).dt.total_seconds().to_numpy(),
+                "dist_along_m": run_traj["dist_along"].to_numpy(dtype=float),
+                "run": run_idx,
+            }))
 
     rows = []
     # One pass per run: speeds, stationary time and "upcoming stop" all have
@@ -508,11 +525,25 @@ def training_rows_for_trajectory(
     return pd.DataFrame(rows)
 
 
+def snapshot_sample_mask(rows: pd.DataFrame, keep_pct: float) -> np.ndarray:
+    """Deterministic keep-mask over whole snapshots (vehicle_id, snapshot_ts).
+
+    Hashing rather than random sampling keeps the choice stable across reruns
+    and keeps every horizon of a sampled snapshot together.
+    """
+    key = pd.util.hash_pandas_object(
+        rows[["vehicle_id", "snapshot_ts"]].astype(str), index=False
+    ).to_numpy()
+    return (key % 10000) < keep_pct * 100
+
+
 def build_training_rows(
     df: pd.DataFrame,
     gtfs: GTFSStatic,
     trip_col: str = "inferred_trip_id",
     max_stops_ahead: int = MAX_STOPS_AHEAD,
+    positions_out: list | None = None,
+    keep_pct: float = 100.0,
 ) -> pd.DataFrame:
     """
     Build the snapshot-anchored training dataset from a snapshot DataFrame.
@@ -521,7 +552,11 @@ def build_training_rows(
            lat, lon, timestamp (and optionally off_route).
 
     Output: one row per (snapshot, upcoming stop) — see
-    training_rows_for_trajectory for the schema.
+    training_rows_for_trajectory for the schema. ``positions_out`` collects
+    every projected snapshot (see there). ``keep_pct`` < 100 keeps only that
+    share of snapshots (whole snapshots, all horizons together — see
+    snapshot_sample_mask), sampled per trajectory so a full day's rows are
+    never held in memory at once.
     """
     if "off_route" in df.columns:
         df = df[~df["off_route"]].copy()
@@ -538,8 +573,11 @@ def build_training_rows(
             traj=traj.sort_values("timestamp"),
             gtfs=gtfs,
             max_stops_ahead=max_stops_ahead,
+            positions_out=positions_out,
         )
         if result is not None:
+            if keep_pct < 100.0:
+                result = result[snapshot_sample_mask(result, keep_pct)]
             pieces.append(result)
 
     if not pieces:

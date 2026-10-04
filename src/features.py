@@ -103,13 +103,17 @@ def sched_sec_at_dist(profile: list[tuple[str, int, float, float]], d: float) ->
 def compute_features_for_training(
     training_rows: pd.DataFrame,
     gtfs: GTFSStatic,
+    passthrough: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """
     Build the model feature matrix from labeling.build_training_rows output.
 
     Vectorised per trip group (the input easily reaches millions of rows).
     Returns a DataFrame with FEATURE_COLS + TARGET_COL + date, plus
-    `sched_remaining_sec` doubling as the baseline in train.py.
+    `sched_remaining_sec` doubling as the baseline in train.py. Columns named
+    in *passthrough* are copied from the input rows unchanged (rows of trips
+    missing from static are dropped, so this is the only way to keep them
+    aligned).
     """
     rows = training_rows.copy()
     rows["snapshot_ts"] = pd.to_datetime(rows["snapshot_ts"], utc=True)
@@ -175,6 +179,7 @@ def compute_features_for_training(
             "sched_remaining_sec": sched_rem,
             "date": grp["date"].to_numpy(),
             TARGET_COL: grp["seconds_to_arrival"].to_numpy(dtype=float),
+            **{c: grp[c].to_numpy() for c in passthrough},
         }))
 
     if not pieces:
