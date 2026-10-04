@@ -275,3 +275,58 @@ class TestRunInference:
         assert len(feed.entity) == 1
         assert "v1" in live.veh and len(live.veh["v1"].feed) == 3 and len(live.veh["v1"].pos) == 3
         assert N_LIVE == len(LIVE_COLS)
+
+
+class TestDaemonPersistence:
+    """push_feed carries the LiveState across its ~5.5 min restarts through R2."""
+
+    def _push_feed(self):
+        import importlib.util
+        import os
+        from pathlib import Path
+        for k in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
+            os.environ.setdefault(k, "test")
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("push_feed_live", root / "scripts" / "push_feed.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    class _R2:
+        def __init__(self):
+            self.objects = {}
+
+        def put_object(self, Bucket, Key, Body, **kw):
+            self.objects[Key] = Body
+
+        def get_object(self, Bucket, Key):
+            import io
+            if Key not in self.objects:
+                raise KeyError(Key)
+            return {"Body": io.BytesIO(self.objects[Key])}
+
+    def test_round_trip_and_legacy_model_has_no_state(self):
+        import time as _time
+        pf = self._push_feed()
+        assert pf._make_live_state({"trees": []}, {}) is None
+        now = _time.time()
+        st = LiveState()
+        st.geom = _geom
+        _drive(st, "A", "t1", now - 300, 10.0, now - 100)
+        r2 = self._R2()
+        pf._save_live_state(r2, st)
+        st2 = LiveState()
+        st2.geom = _geom
+        pf._load_live_state(r2, st2)
+        assert set(st2.links) == set(st.links) and set(st2.veh) == {"A"}
+        q = dict(vid="B", trip_id="t1", t=now - 90, d=100.0, geom=GEOM, targets=[1, 3], stationary_sec=0.0)
+        assert st.features(**q) == st2.features(**q)
+
+    def test_unreadable_state_starts_cold(self):
+        pf = self._push_feed()
+        r2 = self._R2()
+        r2.objects[pf.LIVE_STATE_KEY] = b"not gzip"
+        st = LiveState()
+        st.geom = _geom
+        pf._load_live_state(r2, st)
+        assert not st.veh and not st.links
