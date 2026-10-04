@@ -109,11 +109,14 @@ SERVING = {
 }
 # Tags shown in LEADERBOARD.md (the current feature versions + the leader's scale check);
 # every other tag goes to archive/LEADERBOARD-old.md.
-CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds3v13", "ds3shiftv13", "ds4v25", "ds4shiftv25", "ds4v28", "ds4shiftv28", "ds4v29", "ds4shiftv29", "ds4v30", "ds4shiftv30", "ds4v31", "ds4shiftv31", "ds4v32", "ds4shiftv32", "ds4v33", "ds4shiftv33"}
+CURRENT_TAGS = {"ds1v10", "ds1shiftv10", "ds1v12k3", "ds3v13", "ds3shiftv13", "ds4v25", "ds4shiftv25", "ds4v29", "ds4shiftv29", "ds4v30", "ds4shiftv30", "ds4v32", "ds4shiftv32", "ds4v33", "ds4shiftv33"}
 # tags without their own baseline row (same rows as another tag, verified bit-for-bit)
 BASE_ALIAS = {"ds4shiftv26": "ds4shiftv25", "ds4shiftv27": "ds4shiftv25", "ds4shiftv28": "ds4shiftv25",
-              "ds4v28b": "ds4v28", "ds4shiftv28b": "ds4shiftv25", "ds4shiftv29": "ds4shiftv25", "ds4shiftv30": "ds4shiftv25"}
-OLD_TAGS = """`ds4v28b` / `ds4shiftv28b` = + addon_v28b speed-trajectory cols (ms_features_v28b), judged against the ds4v28 / ds4shiftv25 baselines.
+              "ds4v28b": "ds4v28", "ds4shiftv28b": "ds4shiftv25", "ds4shiftv29": "ds4shiftv25", "ds4shiftv30": "ds4shiftv25",
+              "ds4shiftv31": "ds4shiftv25", "ds4shiftv32": "ds4shiftv25", "ds4shiftv33": "ds4shiftv25"}
+OLD_TAGS = """`ds4v31` / `ds4shiftv31` = run 31, + addon_v31 cols (occupied-link "now" path time, slow-vehicle gap, 40 / 60 min odometer; ms_features_v31).
+`ds4v28` / `ds4shiftv28` = run 28, ds4 rebuilt on feed-clock prep (v10) + addon_v26 age cols + addon_v28 feed-reported speed / odometer cols (ms_features_v28); ds4v28 baseline / mf3_age reproduce 113.95 / 87.22; ds4shiftv28 is judged against the ds4shiftv25 baseline.
+`ds4v28b` / `ds4shiftv28b` = + addon_v28b speed-trajectory cols (ms_features_v28b), judged against the ds4v28 / ds4shiftv25 baselines.
 `ds4v27` / `ds4shiftv27` = run 27, ds4 rebuilt with MS_AGE_CORR=1 prep (link traversal times and own speed on the GPS fix clock; ms_features_v27c) + addon_v26 cols (ms_features_v27); ds4v27 baseline reproduces 113.95, ds4shiftv27 is judged against the ds4shiftv25 baseline.
 `ds4v26` / `ds4shiftv26` = run 26, the ds4 day set rebuilt with the GPS-fix age side table (MS_FEAT_DIR=ms_features_v26 = v10 + addon_v26.py cols); ds4v26 baseline / mf3 reproduce ds4v25 bit-for-bit, so ds4shiftv26 (age arm only) is judged against the ds4shiftv25 baseline.
 `ds1v20` / `ds1shiftv20` = run 20, v10 features rebuilt (baseline + leader reproduce ds1v18/v19), + the no-hour-weights arm.
@@ -142,12 +145,13 @@ Held-out raw-model metrics (seconds); Δ vs the baseline row with the same tag
 worse by > 5%. Regenerate with `python research/model-search/report.py`.
 
 Superseded tags (ds1 .. ds1v9, ds1shift .. ds1shiftv9, ds1v5k3, ds1v9k3, ds1v11, ds1v12,
-ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72, ds1v10f / ds2w / ds2, ds1v19 / ds1v19t, ds1v13, ds1v18, ds1v20, ds4v26 / ds4v27 / ds4v28b (run 30) and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
+ds1lag90w15, ds1h21 / ds1h7, ds1r32 / ds1r72, ds1v10f / ds2w / ds2, ds1v19 / ds1v19t, ds1v13, ds1v18, ds1v20, ds4v26 / ds4v27 / ds4v28b (run 30), ds4v28 / ds4v31 (run 35) and their shift twins) are in `archive/LEADERBOARD-old.md` with their definitions;
 their baselines are identical to the ds1 / ds1shift ones below.
 
-Tags: `ds4v28` / `ds4shiftv28` = run 28, ds4 rebuilt on feed-clock prep (v10) + addon_v26 age cols + addon_v28 feed-reported speed / odometer cols (ms_features_v28); ds4v28 baseline / mf3_age reproduce 113.95 / 87.22; ds4shiftv28 is judged against the ds4shiftv25 baseline.
-`ds4v29` / `ds4shiftv29` = run 29, + addon_v29 odometer cols (600 / 1200 s odometer speed, 600 s zero-speed share, odometer-vs-shape gap, trip-average odometer speed; ms_features_v29); ds4v29 baseline / mf3_age_fo reproduce 113.95 / 86.28; ds4shiftv29 is judged against the ds4shiftv25 baseline.
+Tags: `ds4v29` / `ds4shiftv29` = run 29, + addon_v29 odometer cols (600 / 1200 s odometer speed, 600 s zero-speed share, odometer-vs-shape gap, trip-average odometer speed; ms_features_v29); ds4v29 baseline / mf3_age_fo reproduce 113.95 / 86.28; ds4shiftv29 is judged against the ds4shiftv25 baseline.
 `ds4v30` / `ds4shiftv30` = run 30, + addon_v30 cols (other vehicles on the path links right now: count, 120 s odometer speeds, stopped share, nearest gap, occupied share; ms_features_v30), and fo_long ablations without _LAP / _VEH; ds4shiftv30 is judged against the ds4shiftv25 baseline.
+`ds4v32` / `ds4shiftv32` = run 32, + addon_v32 cols (own break history, shift duty; ms_features_v32); ds4v32 baseline / fo_pa reproduce 113.95 / 85.20.
+`ds4v33` / `ds4shiftv33` = run 33, same ms_features_v32 (stacked add-ons, pace target); baseline / fo_duty reproduce ds4v32. ds4shiftv29..v33 are judged against the ds4shiftv25 baseline.
 `ds4v25` / `ds4shiftv25` = run 25, the newest day set (data 09-08..09-29, v10 features): ds4 = train 09-15..09-26, test 09-27 (Sun) / 09-28 (Mon) / 09-29 (Tue), seed 42; ds4shift = train 09-15..09-25, test 09-26 (Sat) / 09-27 / 09-28, seed 11.
 `ds3v13` / `ds3shiftv13` = runs 21–22, a later day set (data 09-07..09-28, v10 + V13 cols): ds3 = train 09-14..09-25, test 09-26 (Sat) / 09-27 (Sun) / 09-28 (Mon), seed 42; ds3shift = train 09-14..09-24, test 09-25 (Fri) / 09-26 / 09-27, seed 7. Its baselines differ from ds1 (different days).
 `ds1v10` / `ds1shiftv10` = rebuilt in run 14 (+ V10 cols: conditional remaining dwell at the current location from prior days' stationary runs; MS_FEAT_DIR=ms_features_v10); baselines identical. `ds1v12k3` = run 15, the same v10 cols at 3x train rows (3% of snapshots).

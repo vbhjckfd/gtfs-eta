@@ -722,37 +722,14 @@ def sc_big_mf3_age_fo(tr, te, seed=42):
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO, max_features=0.3)
 
 
-# ---- run 28 part 2 (V28b cols, MS_FEAT_DIR=ms_features_v28b) ----
-_FS2 = ["fs_lag1", "fs_acc30", "fs_max120", "fs_zero_sec", "odo_spd_30"]
-
-
-@arm
-def sc_big_mf3_age_fo2(tr, te, seed=42):
-    """sc_big_mf3_age_fo + recent reported-speed trajectory (lag, 30 s accel, 120 s max, time since moving) and 30 s odometer speed."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO + _FS2, max_features=0.3)
-
-
 # ---- run 29 add-on (V29 cols: long-window odometer + odometer-vs-shape, MS_FEAT_DIR=ms_features_v29) ----
 _ODOL = ["odo_spd_600", "odo_spd_1200", "fs_zero_frac600"]
-_ODOG = ["odo_shape_gap300", "odo_trip_spd"]
 
 
 @arm
 def sc_big_fo_long(tr, te, seed=42):
     """sc_big_mf3_age_fo + odometer speed over 600 / 1200 s and the 600 s zero-speed share."""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO + _ODOL, max_features=0.3)
-
-
-@arm
-def sc_big_fo_gap(tr, te, seed=42):
-    """sc_big_mf3_age_fo + odometer-vs-shape progress gap (300 s) and trip-average odometer speed."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO + _ODOG, max_features=0.3)
-
-
-@arm
-def sc_big_fo_v29(tr, te, seed=42):
-    """sc_big_mf3_age_fo + all V29 cols."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _AGE + _FS + _ODO + _ODOL + _ODOG, max_features=0.3)
 
 
 # ---- run 30 add-on (V30 cols: other vehicles on the path right now, MS_FEAT_DIR=ms_features_v30) ----
@@ -786,14 +763,7 @@ def sc_big_fo_novl(tr, te, seed=42):
 
 
 # ---- run 31 add-on (V31 cols: "now" path time from the vehicles on the path, 40/60 min odometer, MS_FEAT_DIR=ms_features_v31) ----
-_PAN = ["pa_now_t", "pa_now_len", "pa_slow_gap"]
 _ODOX = ["odo_spd_2400", "odo_spd_3600"]
-
-
-@arm
-def sc_big_fo_pan(tr, te, seed=42):
-    """sc_big_fo_pa + occupied-link "now" path time, its length and the gap to the nearest slow vehicle ahead."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _PAN, max_features=0.3)
 
 
 @arm
@@ -802,21 +772,8 @@ def sc_big_fo_pax(tr, te, seed=42):
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _ODOX, max_features=0.3)
 
 
-@arm
-def sc_big_fo_v31(tr, te, seed=42):
-    """sc_big_fo_pa + all V31 cols."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _PAN + _ODOX, max_features=0.3)
-
-
 # ---- run 32 add-on (V32 cols: own break / duty state from the odometer ring, MS_FEAT_DIR=ms_features_v32) ----
-_BRK = ["brk_since_s", "brk_last_len", "brk_odo_since", "brk10_since_s", "brk10_odo_since", "brk_n3h"]
 _DUTY = ["duty_s", "duty_odo"]
-
-
-@arm
-def sc_big_fo_brk(tr, te, seed=42):
-    """sc_big_fo_pa + the vehicle's own past stopped episodes (since / length / odometer since, 3 h count)."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _BRK, max_features=0.3)
 
 
 @arm
@@ -825,30 +782,9 @@ def sc_big_fo_duty(tr, te, seed=42):
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _DUTY, max_features=0.3)
 
 
-@arm
-def sc_big_fo_v32(tr, te, seed=42):
-    """sc_big_fo_pa + all V32 cols."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _BRK + _DUTY, max_features=0.3)
-
-
-# ---- run 33 (same V32 feature dir): stack the optional add-ons; pace target ----
+# ---- run 33 (same V32 feature dir): stack the optional add-ons ----
 @arm
 def sc_big_fo_all(tr, te, seed=42):
     """sc_big_fo_duty + 40 / 60 min odometer (_ODOX): do the optional add-ons stack?"""
     return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _DUTY + _ODOX, max_features=0.3)
 
-
-_PACE_MIN_M = 50.0
-
-
-@arm
-def sc_big_duty_pace(tr, te, seed=42):
-    """sc_big_fo_duty with target = seconds per metre of remaining_dist_m (floored at 50 m),
-    sample weight x that distance, so the absolute_error objective is still L1 in seconds;
-    prediction = pace x distance. Trees can then scale with distance instead of tiling it."""
-    dtr = np.maximum(tr["remaining_dist_m"].to_numpy(dtype=float), _PACE_MIN_M)
-    w = prod._build_sample_weights(tr) * dtr
-    target = lambda d: d[TARGET_COL].to_numpy(dtype=float) / dtr
-    inv = lambda d, p: np.clip(p * np.maximum(d["remaining_dist_m"].to_numpy(dtype=float), _PACE_MIN_M), 0, 3600)
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _DUTY, max_features=0.3,
-                             weights=w, target=target, inv=inv)

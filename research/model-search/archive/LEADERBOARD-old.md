@@ -2,6 +2,8 @@
 
 Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs-*.md):
 
+`ds4v31` / `ds4shiftv31` = run 31, + addon_v31 cols (occupied-link "now" path time, slow-vehicle gap, 40 / 60 min odometer; ms_features_v31).
+`ds4v28` / `ds4shiftv28` = run 28, ds4 rebuilt on feed-clock prep (v10) + addon_v26 age cols + addon_v28 feed-reported speed / odometer cols (ms_features_v28); ds4v28 baseline / mf3_age reproduce 113.95 / 87.22; ds4shiftv28 is judged against the ds4shiftv25 baseline.
 `ds4v28b` / `ds4shiftv28b` = + addon_v28b speed-trajectory cols (ms_features_v28b), judged against the ds4v28 / ds4shiftv25 baselines.
 `ds4v27` / `ds4shiftv27` = run 27, ds4 rebuilt with MS_AGE_CORR=1 prep (link traversal times and own speed on the GPS fix clock; ms_features_v27c) + addon_v26 cols (ms_features_v27); ds4v27 baseline reproduces 113.95, ds4shiftv27 is judged against the ds4shiftv25 baseline.
 `ds4v26` / `ds4shiftv26` = run 26, the ds4 day set rebuilt with the GPS-fix age side table (MS_FEAT_DIR=ms_features_v26 = v10 + addon_v26.py cols); ds4v26 baseline / mf3 reproduce ds4v25 bit-for-bit, so ds4shiftv26 (age arm only) is judged against the ds4shiftv25 baseline.
@@ -206,7 +208,12 @@ Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs
 | ds2w | sc_big_dwell | 42 | 2,126,692 | 1,414,363 | 86.3 | 43.0 | 177.3 | -11.8 | 59.9 | 120.8 | -20.7% | -22.2% | -16.2% | **yes** | as sc_big_veh + static location -> sorted stop-duration table (prior 14 days, built at export like hist_dt); lookup by (last passed stop, 50 m bin) and stationary_sec; ~+0.3 day, ~3 days total |
 | ds4shiftv26 | sc_big_mf3_age | 11 | 2,064,786 | 1,423,357 | 86.5 | 42.5 | 174.7 | -15.0 | 61.1 | 120.0 | -21.4% | -23.6% | -16.6% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
 | ds4shiftv27 | sc_big_mf3_age | 11 | 2,064,786 | 1,423,357 | 86.4 | 42.5 | 174.5 | -15.4 | 61.2 | 119.9 | -21.4% | -23.7% | -16.5% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
+| ds4shiftv28 | sc_big_mf3_age1 | 11 | 2,064,786 | 1,423,357 | 86.4 | 42.7 | 174.5 | -15.1 | 61.1 | 119.7 | -21.4% | -23.7% | -16.7% | **yes** | as sc_big_mf3 + pos_age_s only (no ring needed) |
+| ds4shiftv28 | sc_big_mf3_age_fo | 11 | 2,064,786 | 1,423,357 | 85.1 | 41.9 | 172.3 | -15.1 | 59.6 | 118.9 | -22.6% | -24.7% | -18.8% | **yes** | as sc_big_mf3_age + feed speed + odometer (per-vehicle 300 s ring of ts / vehicle ts / speed / odometer; < 0.5 day) |
 | ds4shiftv28b | sc_big_mf3_age_fo2 | 11 | 2,064,786 | 1,423,357 | 85.0 | 41.7 | 171.9 | -15.0 | 59.7 | 118.5 | -22.7% | -24.9% | -18.6% | **yes** | as sc_big_mf3_age_fo + 5 speed-trajectory cols (same ring) |
+| ds4shiftv31 | sc_big_fo_pan | 11 | 2,064,786 | 1,423,357 | 83.9 | 41.5 | 169.2 | -15.8 | 58.8 | 117.5 | -23.7% | -26.0% | -19.8% | **yes** | ? |
+| ds4shiftv31 | sc_big_fo_pax | 11 | 2,064,786 | 1,423,357 | 83.5 | 41.5 | 168.9 | -15.4 | 58.4 | 117.1 | -24.0% | -26.1% | -20.4% | **yes** | ? |
+| ds4shiftv31 | sc_big_fo_v31 | 11 | 2,064,786 | 1,423,357 | 83.5 | 41.5 | 168.4 | -15.8 | 58.6 | 116.9 | -24.1% | -26.4% | -20.1% | **yes** | ? |
 | ds4v26 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
 | ds4v26 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.8 | 44.7 | 180.8 | -12.7 | 61.0 | 122.3 | -23.0% | -25.1% | -16.9% | **yes** | as sc_big_mf5 (max_features 0.3) |
 | ds4v26 | sc_big_mf3_age | 42 | 2,205,756 | 1,607,392 | 87.2 | 44.3 | 180.3 | -12.8 | 60.4 | 121.5 | -23.5% | -25.4% | -17.6% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
@@ -214,4 +221,15 @@ Tag definitions (current ones: see ../LEADERBOARD.md; runs: archive/JOURNAL-runs
 | ds4v27 | sc_big_mf3 | 42 | 2,205,756 | 1,607,392 | 87.4 | 44.5 | 179.9 | -12.7 | 60.7 | 122.0 | -23.3% | -25.5% | -17.2% | **yes** | as sc_big_mf5 (max_features 0.3) |
 | ds4v27 | sc_big_mf3_age | 42 | 2,205,756 | 1,607,392 | 87.3 | 44.3 | 180.3 | -12.8 | 60.6 | 122.0 | -23.3% | -25.4% | -17.4% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
 | ds4v27 | sc_big_mf3_age1 | 42 | 2,205,756 | 1,607,392 | 87.3 | 44.3 | 179.8 | -13.1 | 60.7 | 121.8 | -23.4% | -25.6% | -17.2% | **yes** | as sc_big_mf3 + pos_age_s only (no ring needed) |
+| ds4v28 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
+| ds4v28 | sc_big_mf3_age | 42 | 2,205,756 | 1,607,392 | 87.2 | 44.3 | 180.3 | -12.8 | 60.4 | 121.5 | -23.5% | -25.4% | -17.6% | **yes** | as sc_big_mf3 + GPS-fix age cols (vehicle_ts already in inference; + a per-vehicle 600 s age ring, < 0.5 day) |
+| ds4v28 | sc_big_mf3_age1 | 42 | 2,205,756 | 1,607,392 | 87.4 | 44.5 | 180.3 | -12.9 | 60.7 | 121.9 | -23.3% | -25.4% | -17.2% | **yes** | as sc_big_mf3 + pos_age_s only (no ring needed) |
+| ds4v28 | sc_big_mf3_age_fo | 42 | 2,205,756 | 1,607,392 | 86.3 | 43.8 | 178.3 | -13.0 | 59.2 | 120.9 | -24.3% | -26.2% | -19.3% | **yes** | as sc_big_mf3_age + feed speed + odometer (per-vehicle 300 s ring of ts / vehicle ts / speed / odometer; < 0.5 day) |
+| ds4v28 | sc_big_mf3_age_odo | 42 | 2,205,756 | 1,607,392 | 86.8 | 44.2 | 179.1 | -13.0 | 59.9 | 121.3 | -23.8% | -25.9% | -18.4% | **yes** | as sc_big_mf3_age + odometer windows (entity field; 300 s ring) |
+| ds4v28 | sc_big_mf3_age_spd | 42 | 2,205,756 | 1,607,392 | 86.8 | 43.8 | 179.3 | -13.2 | 59.8 | 121.5 | -23.8% | -25.8% | -18.5% | **yes** | as sc_big_mf3_age + feed-reported speed (entity field; 60 s ring) |
 | ds4v28b | sc_big_mf3_age_fo2 | 42 | 2,205,756 | 1,607,392 | 86.1 | 43.6 | 177.9 | -13.2 | 59.3 | 120.6 | -24.4% | -26.4% | -19.1% | **yes** | as sc_big_mf3_age_fo + 5 speed-trajectory cols (same ring) |
+| ds4v31 | baseline | 42 | 2,205,756 | 1,607,392 | 113.9 | 60.4 | 241.6 | -19.3 | 73.4 | 157.8 | — | — | — | — | prod |
+| ds4v31 | sc_big_fo_pa | 42 | 2,205,756 | 1,607,392 | 85.2 | 43.4 | 175.4 | -13.7 | 58.5 | 119.6 | -25.2% | -27.4% | -20.2% | **yes** | as sc_big_fo_long + per-cycle link -> [(vehicle, fraction, odometer speed)] dict from the daemon's own trip placement; < 0.5 day |
+| ds4v31 | sc_big_fo_pan | 42 | 2,205,756 | 1,607,392 | 85.1 | 43.3 | 175.1 | -13.6 | 58.7 | 119.4 | -25.3% | -27.5% | -20.0% | **yes** | ? |
+| ds4v31 | sc_big_fo_pax | 42 | 2,205,756 | 1,607,392 | 85.0 | 43.3 | 174.8 | -14.1 | 58.7 | 119.2 | -25.4% | -27.6% | -20.0% | **yes** | ? |
+| ds4v31 | sc_big_fo_v31 | 42 | 2,205,756 | 1,607,392 | 85.1 | 43.3 | 174.6 | -13.8 | 58.5 | 119.6 | -25.3% | -27.7% | -20.2% | **yes** | ? |
