@@ -110,3 +110,16 @@ so no experiment, no result rows, no notification. Housekeeping due next run (ru
 
 ### Next steps
 1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC); then ds5 via ds.sh.
+
+## 2026-10-04 — run 40 (housekeeping; early exit, no fresh day set)
+
+Lock taken at 20:13 UTC. Main had not moved. R2 credentials present. Newest possible complete day is 10-03; a fresh split needs ≥ 10-12 (state step 3),
+so no experiment, no result rows, no notification.
+**Housekeeping** (5th run since run 35, own commit): runs 33–37 → `archive/JOURNAL-runs-33-37.md`; arms.py drops sc_big_fo_novl and sc_big_fo_pax
+(each lost on ds4 and ds4shift; nothing imports them; _ODOX kept for sc_big_fo_all; report.py keeps their descriptions for the archived rows).
+Only three .sh files remain (ds.sh, run.sh, queue.sh), so no runner pruning. Checks: `python report.py` regenerates LEADERBOARD.md unchanged;
+baseline and sc_big_fo_duty fit and predict on a synthetic 3000-row frame (no data on this box).
+
+### Next steps
+1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC); then ds5 via ds.sh.
+2. Next housekeeping due run 45.
