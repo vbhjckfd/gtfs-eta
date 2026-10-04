@@ -162,6 +162,40 @@ feature vector is indexed **positionally** by the exported tree traversal, so
 
 **Baseline**: scheduled remaining time (`sched_remaining_sec`). The model is evaluated against this baseline and must beat it on the held-out test set (last 20% of days by date).
 
+### live_v2 (current production model)
+
+The model above sees one snapshot of one vehicle. `live_v2` ([src/train_live.py](src/train_live.py), features in [src/live_features.py](src/live_features.py)) keeps 13 of its base features (drops `month`, `day_of_week`, `stop_sequence`), makes `route_id` and the target stop (top 254) native categoricals, and adds 36 live columns:
+
+| Group | Columns | Source |
+|---|---|---|
+| Live link store | `live_path_sec_m3/_m5`, `live_path_cov/_age`, `live_speed_mps`, `cur_link_*` | last traversals of every stop-to-stop link on the path by **any** vehicle (≤ 30 min), summed to the target stop |
+| Historical links | `hist_path_sec`, `hist_path_sec_dt`, `hist_path_cov` | median link time × local hour (and × weekday/weekend) over the prior 14 days |
+| Own history | `lap_path_*`, `veh_hist_ratio60/_n60`, `own_speed_60/180/300` | this vehicle's previous traversal of the path links (≤ 3 h), its own-vs-historical link times over the last hour, its recent speed |
+| Dwell | `dwell_rem_med/_p75`, `dwell_p_more120`, `dwell_n`, `dwell_long_share` | remaining stop time at its current location (stop + 50 m bin) given `stationary_sec`, from prior days' stops |
+| Feed fields | `pos_age_*`, `fs_now`, `fs_mean60`, `fs_zero_frac600`, `odo_spd_60/180/600/1200`, `odo_m_300` | GPS-fix age, reported speed and odometer windows |
+
+Missing live values are `-1`. Trees: 255 leaves, ≤ 1200 iterations, `max_features=0.3`, absolute-error loss.
+
+**One engine for training and serving.** `LiveState` is fed the same two streams in both: every vehicle entity's raw feed fields, and every on-route vehicle's projected distance along its trip. `run_pipeline.py` writes both streams per day (`data/training/side/<day>.feed|pos.parquet`), the trainer replays them to build features for each training snapshot, and `run_inference` feeds the live ones. Information from other vehicles only becomes visible on the next snapshot, so the order the daemon processes vehicles in doesn't matter. `push_feed.py` carries the state across restarts in `feed/live_state.pkl.gz`. The static tables (historical link medians, dwell) are built by the trainer from the 14 days up to its last day and shipped inside the model export.
+
+**Held-out result** (protocol of branch `claude/model-search`, same rows for both models; train 09-19..09-30, test 10-01 Thu / 10-02 Fri / 10-03 Sat, 1.58 M rows):
+
+| | legacy | live_v2 |
+|---|---|---|
+| MAE | 119.3 s | 92.8 s (−22.2%) |
+| median | 60.7 s | 45.0 s |
+| p90 | 256.1 s | 192.3 s (−24.9%) |
+| MAE at 1 / 5 / 10 stops ahead | 73.8 / 121.7 / 167.9 s | 60.8 / 93.6 / 131.7 s |
+
+```bash
+make pipeline     # label the last 36 days (rows + side tables, 10% of snapshots)
+make train        # python -m src.train_live: latest 21 days, last 20% held out
+make export       # exports live_v2 when models/eta_live.joblib exists (EXPORT_MODEL=legacy|live to force)
+python -m src.train_live --train 2026-09-19..2026-09-30 --test 2026-10-01..2026-10-03 --compare-baseline --no-save
+```
+
+**Rollback**: `make train-legacy && EXPORT_MODEL=legacy make export`. The daemon serves whichever format is in `worker/eta_pipeline.pkl`.
+
 ## Inference & serving
 
 Inference runs in `scripts/push_feed.py` (the GitHub Actions push pipeline), using a compact, pure-Python re-implementation of GBT tree traversal (`src/inference.py`) — no sklearn or pandas at runtime.
