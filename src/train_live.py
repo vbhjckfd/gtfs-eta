@@ -257,11 +257,31 @@ def _run(days, fn, parallel, label):
             print(f"    {d}: {'ok' if fn(d) else 'missing side tables'}", flush=True)
 
 
-def load_days(days: list[str], frac: float) -> pd.DataFrame:
-    df = pd.concat([pd.read_parquet(feature_path(d, frac)) for d in days], ignore_index=True)
+# Cap on training rows. 17 days at the default sample is ~9M rows, and the
+# fit plus the priors' frame copies then overran a 15 GB box; the research
+# measured only ~2.5% from tripling 2.2M rows, so the cap costs little.
+MAX_TRAIN_ROWS = int(os.environ.get("GTFS_ETA_LIVE_MAX_ROWS", 5_000_000))
+
+
+def load_days(days: list[str], frac: float, max_rows: int | None = None, seed: int = 42) -> pd.DataFrame:
+    """Feature rows of *days*: only the columns the fit and the metrics use,
+    numerics as float32 (a full frame of 9M rows is ~4x larger)."""
+    num = sorted(set(BASE_FEATURE_COLS + BASE_COLS + LIVE_COLS + [TARGET_COL])
+                 - {"route_id", "speed_eta_warm", "hist_speed_mps", "hist_travel_time_est"})
+    cols = ["route_id", "stop_id", "date"] + num
+    pieces = []
+    for d in days:
+        piece = pd.read_parquet(feature_path(d, frac), columns=cols)
+        piece[num] = piece[num].astype(np.float32)
+        pieces.append(piece)
+    df = pd.concat(pieces, ignore_index=True)
+    del pieces
     df = df.dropna(subset=[TARGET_COL] + [c for c in BASE_FEATURE_COLS if c in df.columns])
     df = df[df[TARGET_COL].between(0, 3600)]
     df = df[~df["route_id"].astype(str).isin(legacy._BAD_ROUTE_IDS)]
+    if max_rows and len(df) > max_rows:
+        print(f"  sampling {max_rows:,} of {len(df):,} rows (GTFS_ETA_LIVE_MAX_ROWS)", flush=True)
+        df = df.sample(n=max_rows, random_state=seed)
     return df.reset_index(drop=True)
 
 
@@ -397,7 +417,7 @@ def main(argv=None) -> dict:
     if test_days:
         build_features(test_days, args.test_snap_frac, args.parallel)
 
-    train_df = load_days(train_days, args.snap_frac)
+    train_df = load_days(train_days, args.snap_frac, max_rows=MAX_TRAIN_ROWS, seed=args.seed)
     print(f"  train rows {len(train_df):,}", flush=True)
     bundle = fit(train_df, seed=args.seed)
     result: dict = {"train_days": [train_days[0], train_days[-1]], "test_days": test_days,
