@@ -756,20 +756,8 @@ def sc_big_fo_noveh(tr, te, seed=42):
     return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _LAP + _DWELL + _FOL, max_features=0.3)
 
 
-@arm
-def sc_big_fo_novl(tr, te, seed=42):
-    """sc_big_fo_long without _LAP and _VEH (no per-vehicle crossing log at serving)."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_CUR + _DWELL + _FOL, max_features=0.3)
-
-
 # ---- run 31 add-on (V31 cols: "now" path time from the vehicles on the path, 40/60 min odometer, MS_FEAT_DIR=ms_features_v31) ----
 _ODOX = ["odo_spd_2400", "odo_spd_3600"]
-
-
-@arm
-def sc_big_fo_pax(tr, te, seed=42):
-    """sc_big_fo_pa + odometer speed over 40 / 60 min."""
-    return _stopcat_big_plus(tr, te, seed, extra_num=_LEAD + _FOL + _PA + _ODOX, max_features=0.3)
 
 
 # ---- run 32 add-on (V32 cols: own break / duty state from the odometer ring, MS_FEAT_DIR=ms_features_v32) ----
