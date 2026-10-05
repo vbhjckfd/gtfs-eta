@@ -146,3 +146,12 @@ which no recorded candidate does. No result rows, no notification.
    to measure live_v2 on unseen days, then try `_PA` + `_DUTY` ported into src/live_features.py behind a flag (expected ≈ −1%, below the win bar;
    only worth it as a cheap optional add-on).
 3. Next housekeeping due run 45.
+
+## 2026-10-05 — run 42 (early exit, no fresh day set)
+
+Lock taken at 04:13 UTC. Main had not moved since run 41. R2 credentials present. Newest complete day is 10-04; a fresh split needs ≥ 10-12
+(state step 3 / run 41 step 2), so no experiment, no result rows, no notification.
+
+### Next steps
+1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC).
+2. Next housekeeping due run 45.
