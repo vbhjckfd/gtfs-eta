@@ -86,6 +86,15 @@ ds4shift 83.95 → 83.62 (−0.39%), every bucket and p90 better on both splits;
 - Arms removed in run 35 (lost on both splits / superseded): sc_big_mf3_age_fo2 + addon_v28b.py, sc_big_fo_gap / fo_v29, sc_big_fo_pan / fo_v31, sc_big_fo_brk / fo_v32, sc_big_duty_pace.
 - Odometer-based crossing times in the link store: reasoned out (run 31). Snapshots are ~10 s apart and both odometer and dist_along interpolate linearly in between, so crossing times barely move.
 
+### Production status (run 41)
+- **Main shipped the hand-off as `live_v2`** (commits 6fa9bd6..35c8927, 2026-10-04): `src/live_features.py` (one `LiveState` engine for training replay and
+  serving), `src/train_live.py` (255 leaves, route / target-stop categoricals, max_features 0.3, absolute error), `predict_live` in src/inference.py,
+  state carried across restarts in `feed/live_state.pkl.gz`, weekly retrain. Its 36 live cols = fo_long (no `_PA` / `_DUTY`).
+  README held-out: train 09-19..09-30, test 10-01..10-03, legacy 119.3 → live_v2 92.8 (−22.2%), p90 256.1 → 192.3.
+- **New protocol baseline = `python -m src.train_live`** on the same days (not `src.train`). Future arms should be built on src/live_features.py +
+  src/train_live.py (behind flags), not on this branch's harness/addon chain, so that a winner is already in serving form.
+- Against that baseline, the known optional add-ons (`_PA` −0.3/−0.5%, `_DUTY` −0.4/−0.5%) cannot reach the 3% win bar even stacked.
+
 ### Open next steps
 1. Hand-off of `sc_big_fo_long` (+ optional V30 `sc_big_fo_pa`, + optional V32 duty `sc_big_fo_duty`) is the owner's call. **Strongly recommend pausing the schedule**: run 33 found nothing; runs 16–32 moved the leader by ≈ 4.5% in total,
    and runs 31–32 each added ≤ 0.5%. Live-feature ideas from the feed (positions, odometer, speed, other vehicles) look exhausted.
@@ -123,3 +132,17 @@ baseline and sc_big_fo_duty fit and predict on a synthetic 3000-row frame (no da
 ### Next steps
 1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC); then ds5 via ds.sh.
 2. Next housekeeping due run 45.
+
+## 2026-10-05 — run 41 (early exit; hand-off landed on main)
+
+Lock taken at 00:14 UTC. R2 credentials present. Main moved: it now ships `live_v2` = this branch's `sc_big_fo_long` (see "Production status").
+Merged origin/main into the branch (clean). No experiment: the newest complete day is 10-04, and every fresh-split idea now has to beat live_v2 by ≥ 3%,
+which no recorded candidate does. No result rows, no notification.
+
+### Next steps
+1. **Recommend pausing the schedule** (owner's call): the search's hand-off is in production, and the remaining ideas need new data (operator break
+   schedules for 133 / 137 / 122) rather than features.
+2. If it continues: from ≥ 10-12, build a fresh day set with the production pipeline (`make pipeline`; `python -m src.train_live --train … --test …`)
+   to measure live_v2 on unseen days, then try `_PA` + `_DUTY` ported into src/live_features.py behind a flag (expected ≈ −1%, below the win bar;
+   only worth it as a cheap optional add-on).
+3. Next housekeeping due run 45.
