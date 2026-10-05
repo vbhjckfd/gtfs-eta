@@ -194,7 +194,7 @@ make export       # exports live_v2 when models/eta_live.joblib exists (EXPORT_M
 python -m src.train_live --train 2026-09-19..2026-09-30 --test 2026-10-01..2026-10-03 --compare-baseline --no-save
 ```
 
-**Rollback**: `make train-legacy && EXPORT_MODEL=legacy make export`. The daemon serves whichever format is in `worker/eta_pipeline.pkl`.
+**Rollback**: every export that publishes new trees first copies the old ones to `worker/eta_pipeline.pkl.prev`, so copying that object back over `worker/eta_pipeline.pkl` restores the previous model within one daemon restart (~5 min). Or retrain it: `make train-legacy && EXPORT_MODEL=legacy make export`. The daemon serves whichever format is in `worker/eta_pipeline.pkl`.
 
 ## Inference & serving
 

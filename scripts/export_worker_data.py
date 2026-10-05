@@ -637,6 +637,15 @@ def main():
 
     model_bytes = pickle.dumps(tree_data, protocol=4)
     size_mb = len(model_bytes) / 1e6
+    if new_trees and live_model:
+        # Keep the trees being replaced one copy back, so a bad retrain rolls
+        # back with a single server-side copy of MODEL_KEY + ".prev".
+        try:
+            client.copy_object(Bucket=R2_BUCKET, Key=MODEL_KEY + ".prev",
+                               CopySource={"Bucket": R2_BUCKET, "Key": MODEL_KEY})
+            print(f"  Previous model kept → R2:{MODEL_KEY}.prev")
+        except Exception as exc:  # noqa: BLE001 — a missing backup must not block the export
+            print(f"  WARNING: could not back up the previous model: {exc!r}")
     print(f"Uploading model trees ({size_mb:.1f} MB) → R2:{MODEL_KEY}")
     client.put_object(Bucket=R2_BUCKET, Key=MODEL_KEY, Body=model_bytes)
     print("  done")
