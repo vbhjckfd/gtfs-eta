@@ -79,6 +79,19 @@ def list_snapshot_keys(
     return sorted(keys)
 
 
+def list_snapshot_days() -> list[str]:
+    """Days (YYYY-MM-DD) that have a raw/ snapshot prefix, sorted."""
+    client = _make_client()
+    days: set[str] = set()
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=R2_BUCKET, Prefix=R2_PREFIX, Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            day = cp["Prefix"][len(R2_PREFIX):].rstrip("/")
+            if day:
+                days.add(day)
+    return sorted(days)
+
+
 def _key_to_timestamp(key: str) -> datetime | None:
     """Extract UTC datetime from key like raw/2024-11-15/2024-11-15T13:45:00Z.pb"""
     try:
@@ -125,6 +138,11 @@ def _fetch_and_parse(client, key: str) -> list[dict]:
             "speed": pos.speed if pos else None,
             "stop_id": str(v.stop_id) if v.stop_id else None,
             "current_status": v.current_status,
+            # The vehicle's own fix time and odometer (km) — the live ETA
+            # features (src/live_features.py) use both; not in _COLUMNS, so
+            # load_snapshots_df leaves its frame unchanged.
+            "vehicle_ts": int(v.timestamp) if v.HasField("timestamp") else None,
+            "odometer": pos.odometer if pos is not None and pos.HasField("odometer") else None,
         }
         rows.append(row)
 

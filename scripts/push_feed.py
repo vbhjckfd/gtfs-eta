@@ -29,6 +29,7 @@ Environment (read from .env):
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import pickle
@@ -46,7 +47,7 @@ from dotenv import load_dotenv
 from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
 
-from src.inference import run_inference
+from src.inference import is_live_model, run_inference
 
 load_dotenv()
 
@@ -127,6 +128,17 @@ TRACKER_STATE_KEY = os.environ.get("TRACKER_STATE_KEY", "feed/tracker_state.json
 # to have finished its day than to still be sitting at the same stop, and a
 # resurrected anchor would report a bogus multi-hour dwell.
 TRACKER_STATE_MAX_AGE_SEC = 6 * 3600
+
+# State of the live_v2 model's features (src/live_features.LiveState): the
+# network link store and every vehicle's recent feed / position / crossing
+# history. Its windows reach back up to 3 h (own previous lap), far beyond one
+# ~5.5 min run, so like the anchors above it is carried across runs — as a
+# gzipped pickle, since it holds a few thousand small tuples per minute of
+# history. A run that cannot load it starts cold: the model then sees missing
+# live values (its -1 sentinel) and falls back on the base features until the
+# store refills.
+LIVE_STATE_KEY = os.environ.get("LIVE_STATE_KEY", "feed/live_state.pkl.gz")
+LIVE_STATE_MAX_AGE_SEC = 3 * 3600
 
 # Publishing a collapsed feed is worse than publishing nothing: consumers filter
 # out arrivals already in the past, so an empty feed empties every stop at once,
@@ -446,7 +458,54 @@ def _save_tracker_state(client, trackers: dict) -> None:
         print(f"[warn] could not persist tracker state: {exc!r}", flush=True)
 
 
-def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> None:
+def _make_live_state(model_data: dict, gtfs_data: dict):
+    """A LiveState for a live_v2 model (None for the legacy one)."""
+    if not is_live_model(model_data):
+        return None
+    from src.live_features import LiveState, LiveTables, geom_from_worker_data
+    live = LiveState(LiveTables.from_dict(model_data.get("live_tables")))
+    live.geom = geom_from_worker_data(gtfs_data)
+    return live
+
+
+def _load_live_state(client, live) -> None:
+    """Restore the previous run's live state into *live*. Never raises."""
+    try:
+        raw = client.get_object(Bucket=R2_BUCKET, Key=LIVE_STATE_KEY)["Body"].read()
+        blob = pickle.loads(gzip.decompress(raw))
+        age = time.time() - float(blob.get("saved_at", 0))
+        if age > LIVE_STATE_MAX_AGE_SEC:
+            print(f"[warn] live state is {round(age)}s old — starting cold", flush=True)
+            return
+        live.load(blob.get("state"), live.geom)
+        live.prune(time.time())
+        print(f"[info] live state carried over ({round(age)}s old): "
+              f"{len(live.links)} links, {len(live.veh)} vehicles", flush=True)
+    except Exception as exc:  # noqa: BLE001 — cold start is an acceptable outcome
+        print(f"[warn] no live state carried over: {exc!r}", flush=True)
+
+
+def _save_live_state(client, live) -> None:
+    """Persist *live* for the next run. Never raises — losing it costs accuracy, not the feed."""
+    if live is None:
+        return
+    try:
+        now = time.time()
+        live.prune(now)
+        body = gzip.compress(pickle.dumps({"saved_at": now, "state": live.dump()}, protocol=4),
+                             compresslevel=5)
+        client.put_object(
+            Bucket=R2_BUCKET,
+            Key=LIVE_STATE_KEY,
+            Body=body,
+            ContentType="application/octet-stream",
+            CacheControl="no-store",
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] could not persist live state: {exc!r}", flush=True)
+
+
+def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=None) -> None:
     global _last_published_entities
 
     t0 = time.monotonic()
@@ -455,7 +514,7 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict) -> Non
     stats: dict = {}
     tu_result, vp_result = run_inference(
         gtfs_data, model_data, trackers, vp_bytes,
-        with_vehicle_positions=True, stats=stats,
+        with_vehicle_positions=True, stats=stats, live=live,
     )
 
     feed_ts, entities = _feed_stats(tu_result)
@@ -550,6 +609,9 @@ def main() -> None:
     client = _make_client()
     gtfs_data, model_data = _load_resources(client)
     trackers: dict = _load_tracker_state(client)
+    live = _make_live_state(model_data, gtfs_data)
+    if live is not None:
+        _load_live_state(client, live)
 
     # Carry the collapse guard's baseline across the restart, so an upstream
     # outage cannot slip an empty feed through on this process's first pass.
@@ -565,16 +627,21 @@ def main() -> None:
             # usually recovers, keeping the feed fresh.
             iter_start = time.monotonic()
             try:
-                _push_once(client, gtfs_data, model_data, trackers)
+                _push_once(client, gtfs_data, model_data, trackers, live)
             except Exception as exc:  # noqa: BLE001 — daemon must stay alive
                 sentry_sdk.capture_exception(exc)
                 print(f"[error] push iteration failed: {exc!r}", flush=True)
             n += 1
             # Checkpoint periodically as well as at exit: this job is killed
             # outright if it overruns its timeout, and anchors lost that way
-            # would restart every stopped vehicle's dwell clock at zero.
+            # would restart every stopped vehicle's dwell clock at zero. The
+            # live state is checkpointed twice as often: the next run boots
+            # while this one still publishes and loads whatever was saved
+            # last, so the checkpoint's age is a gap in its history.
             if n % 10 == 0:
                 _save_tracker_state(client, trackers)
+            if n % 5 == 0:
+                _save_live_state(client, live)
             if args.count and n >= args.count:
                 break
             # Drift-free cadence: the interval covers fetch+inference+upload,
@@ -583,14 +650,16 @@ def main() -> None:
             elapsed = time.monotonic() - iter_start
             time.sleep(max(0.0, args.loop - elapsed))
         _save_tracker_state(client, trackers)
+        _save_live_state(client, live)
     else:
         # One-shot mode: report, then re-raise so the exit code reflects failure.
         try:
-            _push_once(client, gtfs_data, model_data, trackers)
+            _push_once(client, gtfs_data, model_data, trackers, live)
         except Exception as exc:  # noqa: BLE001
             sentry_sdk.capture_exception(exc)
             raise
         _save_tracker_state(client, trackers)
+        _save_live_state(client, live)
 
 
 if __name__ == "__main__":

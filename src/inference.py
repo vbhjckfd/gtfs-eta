@@ -716,6 +716,108 @@ def predict_rows(model_data: dict, rows: list) -> list:
     return out.tolist()
 
 
+def predict_live(model_data: dict, X) -> list:
+    """Sum of leaf values for a ``live_v2`` model (see train_live.flatten_model).
+
+    Same vectorised walk as predict_rows, plus native categorical splits: the
+    leading ``len(cat_maps)`` columns hold raw category codes, mapped here to
+    the estimator's encoded categories (unknown -> NaN). NaN follows the
+    node's missing direction; an encoded category in the node's bitset goes
+    left. Numeric columns never carry NaN (missing live values are -1).
+    """
+    X = _np.asarray(X, dtype=_np.float64)
+    if not len(X):
+        return []
+    X = X.copy()
+    for j, cmap in enumerate(model_data["cat_maps"]):
+        raw = X[:, j]
+        ok = (raw >= 0) & (raw < len(cmap)) & ~_np.isnan(raw)
+        enc = _np.full(len(raw), _np.nan)
+        enc[ok] = cmap[raw[ok].astype(_np.int64)]
+        X[:, j] = enc
+
+    fl = model_data["flat"]
+    roots = fl["roots"]
+    f_idx, thr = fl["f_idx"], fl["thr"]
+    left, right, leaf_of, value = fl["left"], fl["right"], fl["is_leaf"], fl["value"]
+    miss_left, is_cat, bitset, bits = fl["miss_left"], fl["is_cat"], fl["bitset"], fl["bits"]
+    baseline = model_data["baseline"]
+
+    n_trees = len(roots)
+    out = _np.empty(len(X), dtype=_np.float64)
+    for start in range(0, len(X), _PREDICT_CHUNK_ROWS):
+        chunk = X[start:start + _PREDICT_CHUNK_ROWS]
+        n_chunk = len(chunk)
+        state = _np.tile(roots, n_chunk)
+        row_of = _np.repeat(_np.arange(n_chunk), n_trees)
+        active = _np.arange(n_chunk * n_trees)
+        while active.size:
+            at = state[active]
+            landed = leaf_of[at]
+            if landed.any():
+                active = active[~landed]
+                if not active.size:
+                    break
+                at = state[active]
+            x = chunk[row_of[active], f_idx[at]]
+            go_right = x > thr[at]
+            cat = is_cat[at]
+            if cat.any():
+                xc = x[cat]
+                xi = _np.where(_np.isnan(xc), 0, xc).astype(_np.int64)
+                word = bits[bitset[at[cat]], xi >> 5]
+                in_left = ((word >> (xi & 31).astype(_np.uint32)) & 1).astype(bool)
+                go_right[cat] = ~in_left
+            miss = _np.isnan(x)
+            if miss.any():
+                go_right[miss] = ~miss_left[at[miss]]
+            state[active] = _np.where(go_right, right[at], left[at])
+        out[start:start + n_chunk] = baseline + value[state].reshape(n_chunk, n_trees).sum(axis=1)
+    return out.tolist()
+
+
+def is_live_model(model_data: dict) -> bool:
+    return model_data.get("feature_set") == "live_v2"
+
+
+# Legacy feature row (build_features) -> its index, for the live_v2 base columns
+# (train_live.BASE_COLS order).
+_LIVE_BASE_IDX = [2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+
+def build_features_live(model_data: dict, live, vid: str, trip_id: str, v_dist: float,
+                        snap_t: float, feature_rows: list, data: dict) -> list:
+    """live_v2 model rows for the stops build_features chose.
+
+    feature_rows are build_features' (row, stop_id, stop_sequence) for the
+    upcoming stops in order; the k-th one is stop index a + k - 1 in the
+    trip's sorted stop list (a = first stop strictly ahead), which is how
+    LiveState addresses targets.
+    """
+    from bisect import bisect_right
+
+    geom = live.geom(trip_id) if live is not None and live.geom is not None else None
+    route_codes = model_data["route_codes"]
+    stop_codes = model_data["stop_codes"]
+    n_other = model_data.get("n_stop_codes", 254)
+    if geom is not None:
+        a = bisect_right(geom.dists, v_dist)
+        targets = [a + k for k in range(len(feature_rows))]
+        live_rows = live.features(vid, trip_id, snap_t, v_dist, geom, targets,
+                                  float(feature_rows[0][0][16]) if feature_rows else 0.0)
+    else:
+        from src.live_features import MISSING, N_LIVE
+        live_rows = [[MISSING] * N_LIVE for _ in feature_rows]
+    rows = []
+    for (row, stop_id, _seq), lv in zip(feature_rows, live_rows):
+        rows.append(
+            [float(route_codes.get(str(row[0]), -1)), float(stop_codes.get(str(stop_id), n_other))]
+            + [float(row[i]) for i in _LIVE_BASE_IDX]
+            + lv
+        )
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Feature building
 # ---------------------------------------------------------------------------
@@ -1469,7 +1571,7 @@ def staleness_reference(vp_feed, feed_ts: int) -> tuple[int, int]:
 
 def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                   vp_bytes: bytes, *, with_vehicle_positions: bool = False,
-                  stats: dict | None = None):
+                  stats: dict | None = None, live=None):
     """Vehicle-positions protobuf bytes → TripUpdates protobuf bytes.
 
     With ``with_vehicle_positions=True`` returns a ``(trip_updates_bytes,
@@ -1482,6 +1584,10 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     (see staleness_reference).  The daemon publishes these as R2 object
     metadata so /health can tell "upstream went stale" apart from "inference
     broke", which are indistinguishable from an empty feed alone.
+
+    *live* is the daemon's src.live_features.LiveState (with ``geom`` set);
+    a ``live_v2`` model is served from it. Without one such a model still
+    predicts, from cold-start (all-missing) live features.
     """
     vp_feed = gtfs_realtime_pb2.FeedMessage()
     vp_feed.ParseFromString(vp_bytes)
@@ -1536,6 +1642,12 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             flush=True,
         )
 
+    live_model = is_live_model(model_data)
+    if live_model and live is not None and live.geom is None:
+        from src.live_features import geom_from_worker_data
+        live.geom = geom_from_worker_data(gtfs_data)
+    feed_t = float(feed_ts)
+
     vehicles_in = 0
     vehicles_stale = 0
     updates = []
@@ -1548,6 +1660,15 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         trp = v.trip     if v.HasField("trip")     else None
         if pos is None:
             continue
+        if live_model and live is not None and pos.latitude and pos.longitude:
+            # Every entity, before any filter — exactly the rows the pipeline
+            # writes to side/<day>.feed.parquet (src.snapshots._fetch_and_parse).
+            live.observe_feed(
+                v.vehicle.id if v.HasField("vehicle") else entity.id, feed_t,
+                int(v.timestamp) if v.HasField("timestamp") else None,
+                pos.speed,
+                pos.odometer if pos.HasField("odometer") else None,
+            )
 
         lat, lon      = pos.latitude, pos.longitude
         bearing       = float(pos.bearing) if pos.HasField("bearing") else None
@@ -1600,6 +1721,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         )
         speed  = progress_speed(trackers, vid, trip_id, v_dist, float(feed_ts))
         still  = stationary_seconds(trackers, vid, trip_id, v_dist, float(feed_ts))
+        if live_model and live is not None:
+            live.observe_position(vid, trip_id, feed_t, v_dist, live.geom(trip_id))
 
         feature_rows = build_features(
             trip_id, v_dist, speed, snap_ts, gtfs_data, still
@@ -1688,7 +1811,11 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 continue
             terminus_unc = _TERMINUS_MODEL_UNCERTAINTY_SEC
 
-        preds_sec = predict_rows(model_data, [r[0] for r in feature_rows])
+        if live_model:
+            preds_sec = predict_live(model_data, build_features_live(
+                model_data, live, vid, trip_id, v_dist, feed_t, feature_rows, gtfs_data))
+        else:
+            preds_sec = predict_rows(model_data, [r[0] for r in feature_rows])
         model_preds = [
             {"stop_id": r[1], "stop_sequence": int(r[2]),
              "stops_ahead": int(r[0][2]),
