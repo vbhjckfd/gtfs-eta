@@ -12,6 +12,7 @@
  *                  hours, requires stop 60 to have predicted arrivals.  Overnight
  *                  0 arrivals is healthy (transit isn't running), so the arrivals
  *                  check is gated on working hours to avoid false alarms.
+ *                  Cached for 5 s by Workers Caching (HEALTH_CACHE_CONTROL).
  *
  * scheduled: fires every 5 minutes (wrangler.toml [triggers]) and dispatches
  *   the GitHub Actions push-feed workflow via the GitHub API.  The workflow runs
@@ -426,10 +427,22 @@ async function dispatchWorkflow(env, workflow) {
   return true;
 }
 
+// /health is cached for this long by Workers Caching ([cache] in wrangler.toml).
+// A hit never runs the worker — no R2 read, no New Relic / Analytics Engine
+// event — so any number of monitors polling /health cost one real check per
+// window per data center.  5 s is well under the feed's 10 s republish cadence
+// and its 60 s `aging` threshold, so a cached verdict is never misleadingly old.
+// 503s carry it too: an explicit max-age makes them cacheable, and a stale
+// verdict should not be re-checked more often than a healthy one.
+const HEALTH_CACHE_CONTROL = "public, max-age=5";
+
 function jsonResponse(payload, status) {
   return new Response(JSON.stringify(payload), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "cache-control": HEALTH_CACHE_CONTROL,
+    },
   });
 }
 
