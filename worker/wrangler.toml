@@ -2,6 +2,13 @@ name = "gtfs-eta"
 main = "worker.js"
 compatibility_date = "2026-06-01"
 
+# Workers Caching: responses are cached per their own Cache-Control, keyed by
+# path and worker version (a deploy starts a fresh cache).  Only /health sets
+# one (max-age=5); the legacy 301 redirects are heuristically cacheable.  A hit
+# skips the worker entirely.  Cron and Durable Object alarms are never cached.
+[cache]
+enabled = true
+
 [[r2_buckets]]
 binding = "R2"
 bucket_name = "gtfs-lviv"

@@ -13,6 +13,7 @@ build/
 # Data & models (too large for git)
 data/
 models/
+models_*/
 
 # Cloudflare / wrangler
 .wrangler/

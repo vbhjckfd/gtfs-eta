@@ -111,7 +111,9 @@ Without the key, reporting is a no-op.
 Two event types, both tagged `service = gtfs-eta-worker` and stamped with
 `GIT_COMMIT`:
 
-- `GtfsEtaWorkerHealth` — one per `/health` hit, mirroring the verdict:
+- `GtfsEtaWorkerHealth` — one per uncached `/health` check (the response is
+  cached for 5 s by Workers Caching, and a cache hit never runs the worker),
+  mirroring the verdict:
   `status`, `ageSec`, `entities`, `arrivals`, `workingHours`, `vehiclesIn`,
   `vehiclesStale`, `feedSkewSec`, `feedCommit`. Every field is already public in
   the `/health` body. The legacy redirect paths are deliberately not
