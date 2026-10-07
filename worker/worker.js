@@ -18,6 +18,11 @@
  *   for ~4 minutes pushing a fresh feed to R2 every 10 s — Cloudflare's cron is
  *   far more reliable than GitHub's own scheduled triggers on low-activity repos.
  *
+ * FeedWatchdog (Durable Object): between those 5-minute crons an alarm checks
+ *   every WATCHDOG_INTERVAL_SEC that the feed blob is still being rewritten and
+ *   re-dispatches push-feed.yml as soon as it goes stale, instead of leaving a
+ *   dead run's gap open until the next cron.  See the class for details.
+ *
  * This worker was originally a Python Worker (worker.py, git history).  Pyodide
  * isolates intermittently entered a poisoned state where every request died in
  * ~2 ms before handler code ran ("code had hung and would never generate a
@@ -36,6 +41,8 @@
  *   with other services.
  */
 
+import { DurableObject } from "cloudflare:workers";
+import { cronPoint, healthPoint, watchdogPoint } from "./analytics.js";
 import { recordEvent } from "./newrelic.js";
 
 const FEED_KEY = "feed/trip_updates.pb";
@@ -89,6 +96,21 @@ const HEALTH_CHECK_STOP_ID = "4577";
 // edges fall back to the freshness-only check, avoiding false alarms.
 const WORKING_HOURS_UTC_START = 5;
 const WORKING_HOURS_UTC_END = 18; // exclusive
+
+// FeedWatchdog cadence (all overridable via [vars]).
+//   interval  30 s — 2,880 alarms/day; each setAlarm() is one row write, well
+//                    inside the Free plan's 100k/day.
+//   stale     90 s — the feed is rewritten every ~10 s, and overlapping runs
+//                    keep it that way across run boundaries.  90 s sits between
+//                    /health's `aging` (60 s) and `stale` (180 s), so a dead run
+//                    is replaced before consumers see a stale feed.
+//   cooldown 180 s — a dispatched run needs ~45 s to boot plus queue time; do
+//                    not stack dispatches on one that is still coming up.  The
+//                    workflow's guard job also skips a duplicate, so the cooldown
+//                    only saves runner time, it is not what keeps runs single.
+const WATCHDOG_INTERVAL_SEC = 30;
+const WATCHDOG_STALE_SEC = 90;
+const WATCHDOG_COOLDOWN_SEC = 180;
 
 const textDecoder = new TextDecoder();
 
@@ -521,9 +543,9 @@ async function handleHealth(env) {
 }
 
 /**
- * Mirror a /health verdict into New Relic.  Reads a clone of the response
- * rather than threading a reporter through handleHealth's four exit points, so
- * the health logic itself stays untouched.  Every field here is already public
+ * Mirror a /health verdict into Analytics Engine and New Relic.  Reads a
+ * clone of the response rather than threading a reporter through
+ * handleHealth's four exit points, so the health logic itself stays untouched.  Every field here is already public
  * in the /health body.
  */
 async function reportHealth(env, response) {
@@ -533,6 +555,7 @@ async function reportHealth(env, response) {
   } catch {
     return;
   }
+  healthPoint(env, response.status, body);
   await recordEvent(env, "GtfsEtaWorkerHealth", {
     status: body.status ?? "unknown",
     httpStatus: response.status,
@@ -546,6 +569,97 @@ async function reportHealth(env, response) {
     feedSkewSec: body.feed_skew_sec ?? null,
     feedCommit: body.feed_commit ?? null,
   });
+}
+
+/**
+ * Number from a [vars] string, falling back to the default when unset or bad.
+ */
+function numVar(env, name, fallback) {
+  const n = Number(env[name]);
+  return env[name] !== undefined && Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Feed watchdog — a single Durable Object (idFromName("feed")) whose alarm
+ * re-fires every WATCHDOG_INTERVAL_SEC.
+ *
+ * The 5-minute cron is the pipeline's heartbeat, but on its own a push-feed
+ * run that dies mid-cycle (runner lost, job never acquired, crash) leaves the
+ * feed frozen until the next cron — up to 5 minutes, long past the point where
+ * consumers drop every arrival as already past.  The alarm closes that gap:
+ * it HEADs the feed blob (no body read — the R2 upload time is exactly "when
+ * did a push last land") and, when it is older than WATCHDOG_STALE_SEC,
+ * dispatches push-feed.yml right away.
+ *
+ * Arming: the cron handler calls cronTick() every 5 minutes, which re-arms the
+ * alarm if it is not scheduled — so the chain starts by itself after a deploy
+ * and recovers if it is ever lost.  The cron's own dispatch is recorded there
+ * too, so the watchdog does not stack a second dispatch on top of it.
+ *
+ * Kill switch: set WATCHDOG_DISABLED = "true" in [vars]; the next alarm then
+ * does not re-arm and cronTick() stops arming it.
+ *
+ * Free-plan cost: 2,880 alarm invocations and row writes a day, one R2 HEAD
+ * (Class B) per alarm, and storage of a single key.
+ */
+export class FeedWatchdog extends DurableObject {
+  /** Called by the 5-minute cron.  Records its dispatch and keeps the alarm armed. */
+  async cronTick(dispatchedAtMs) {
+    if (dispatchedAtMs) await this.ctx.storage.put("lastDispatchMs", dispatchedAtMs);
+    if (this.env.WATCHDOG_DISABLED === "true") {
+      await this.ctx.storage.deleteAlarm();
+      return false;
+    }
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.#arm();
+      return true;
+    }
+    return false;
+  }
+
+  async #arm() {
+    const intervalSec = numVar(this.env, "WATCHDOG_INTERVAL_SEC", WATCHDOG_INTERVAL_SEC);
+    await this.ctx.storage.setAlarm(Date.now() + intervalSec * 1000);
+  }
+
+  async alarm() {
+    const env = this.env;
+    if (env.WATCHDOG_DISABLED === "true") return;
+    // Re-arm before doing anything that can fail, so a throw below (R2 or
+    // GitHub hiccup) costs one check, not the whole chain.
+    await this.#arm();
+
+    let action = "ok";
+    let ageSec = null;
+    let dispatched = false;
+    try {
+      const obj = await env.R2.head(env.FEED_KEY ?? FEED_KEY);
+      const now = Date.now();
+      ageSec = obj === null ? null : Math.round((now - obj.uploaded.getTime()) / 1000);
+
+      const staleSec = numVar(env, "WATCHDOG_STALE_SEC", WATCHDOG_STALE_SEC);
+      if (ageSec === null || ageSec > staleSec) {
+        const cooldownSec = numVar(env, "WATCHDOG_COOLDOWN_SEC", WATCHDOG_COOLDOWN_SEC);
+        const last = (await this.ctx.storage.get("lastDispatchMs")) ?? 0;
+        if (now - last < cooldownSec * 1000) {
+          action = "cooldown";
+        } else {
+          // Recorded before the dispatch so a failing GitHub API is retried at
+          // the cooldown cadence, not hammered every interval.
+          await this.ctx.storage.put("lastDispatchMs", now);
+          const workflow = env.GITHUB_WORKFLOW ?? "push-feed.yml";
+          dispatched = await dispatchWorkflow(env, workflow);
+          action = dispatched ? "dispatched" : "dispatch_failed";
+          console.warn(`[watchdog] feed ${ageSec ?? "missing"}s old — ${action}`);
+        }
+      }
+    } catch (exc) {
+      action = "error";
+      console.error(`[watchdog] check raised: ${exc}`);
+      await reportException(env, exc, "watchdog.alarm");
+    }
+    watchdogPoint(env, { action, ageSec, dispatched });
+  }
 }
 
 export default {
@@ -586,13 +700,15 @@ export default {
     if (event.cron === scoreCron) {
       const workflow = env.SCORE_WORKFLOW ?? "score-quality.yml";
       const dispatched = await dispatchWorkflow(env, workflow);
-      await recordEvent(env, "GtfsEtaWorkerCron", {
+      const attrs = {
         cron: event.cron,
         workflow,
         dispatched,
         archived: null,
         durationMs: Date.now() - started,
-      });
+      };
+      cronPoint(env, attrs);
+      await recordEvent(env, "GtfsEtaWorkerCron", attrs);
       return;
     }
 
@@ -611,6 +727,16 @@ export default {
     const workflow = env.GITHUB_WORKFLOW ?? "push-feed.yml";
     const dispatched = await dispatchWorkflow(env, workflow);
 
+    // Keep the watchdog armed and tell it about this dispatch.  After the
+    // dispatch for the same reason as the archive: nothing may delay that.
+    try {
+      const stub = env.WATCHDOG.get(env.WATCHDOG.idFromName("feed"));
+      await stub.cronTick(dispatched ? Date.now() : 0);
+    } catch (exc) {
+      console.error(`[scheduled] watchdog tick raised: ${exc}`);
+      await reportException(env, exc, "scheduled.watchdog");
+    }
+
     let archived = true;
     try {
       await archiveFeed(env);
@@ -622,12 +748,14 @@ export default {
 
     // Awaited rather than waitUntil'd: nothing is waiting on a cron run, and
     // this is the only record that the 5-minute pipeline actually fired.
-    await recordEvent(env, "GtfsEtaWorkerCron", {
+    const attrs = {
       cron: event.cron,
       workflow,
       dispatched,
       archived,
       durationMs: Date.now() - started,
-    });
+    };
+    cronPoint(env, attrs);
+    await recordEvent(env, "GtfsEtaWorkerCron", attrs);
   },
 };

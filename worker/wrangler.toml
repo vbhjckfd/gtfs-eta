@@ -9,6 +9,23 @@ bucket_name = "gtfs-lviv"
 # */5 — archive served feed + dispatch push-feed.yml
 # 15 2 — dispatch score-quality.yml for the UTC day that just closed
 # (the handler branches on event.cron; keep SCORE_CRON below in sync).
+# Feed watchdog (FeedWatchdog in worker.js): a 30 s alarm that re-dispatches
+# push-feed.yml when the feed goes stale between crons.  SQLite-backed — the
+# only Durable Object backend on the Workers Free plan.
+[[durable_objects.bindings]]
+name = "WATCHDOG"
+class_name = "FeedWatchdog"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FeedWatchdog"]
+
+# Workers Analytics Engine (worker/analytics.js) — health, cron and watchdog
+# points, queryable over the SQL API as dataset gtfs_eta_worker.
+[[analytics_engine_datasets]]
+binding = "METRICS"
+dataset = "gtfs_eta_worker"
+
 [triggers]
 crons = ["*/5 * * * *", "15 2 * * *"]
 
@@ -22,6 +39,11 @@ GITHUB_WORKFLOW = "push-feed.yml"
 SCORE_WORKFLOW = "score-quality.yml"
 SCORE_CRON = "15 2 * * *"
 GITHUB_REF = "main"
+# FeedWatchdog tuning (seconds); defaults live in worker.js.  Set
+# WATCHDOG_DISABLED = "true" to stop the alarm chain without a code change.
+WATCHDOG_INTERVAL_SEC = "30"
+WATCHDOG_STALE_SEC = "90"
+WATCHDOG_COOLDOWN_SEC = "180"
 
 [observability.logs]
 enabled = true
