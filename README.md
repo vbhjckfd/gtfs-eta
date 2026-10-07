@@ -28,6 +28,8 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
 
 **Cron reliability trick**: GitHub Actions scheduled triggers are unreliable on low-activity repos. Instead, a Cloudflare Worker cron fires every 5 minutes and dispatches the `push-feed.yml` GitHub Actions workflow, which pushes a fresh feed snapshot every 10 seconds for ~4 minutes.
 
+**Feed watchdog**: between those crons a Durable Object alarm (`FeedWatchdog` in [worker/worker.js](worker/worker.js)) HEADs the feed blob every 30 s. If no push has landed for 90 s (a run died mid-cycle), it dispatches `push-feed.yml` immediately instead of waiting up to 5 minutes for the next cron. There is a 180 s cooldown after any dispatch. The cron re-arms the alarm on every fire, so the chain starts by itself after a deploy. Tune or disable it via the `WATCHDOG_*` vars in `wrangler.toml` (`WATCHDOG_DISABLED = "true"` stops it). Everything it uses is on the Workers Free plan.
+
 ## Repository layout
 
 ```
@@ -68,6 +70,7 @@ make measure-dwell       # measure real per-route-type stop dwell → models/dwe
 make export              # serialise GTFS + model, upload to R2
 make deploy              # deploy Cloudflare Worker
 make release             # export + deploy in one step
+make r2-lifecycle        # apply R2 lifecycle rules (predictions/ expire after 14 d)
 
 make push-feed           # push one TripUpdates snapshot to R2 now
 make serve-feed          # push every 10 s (local daemon)
@@ -125,6 +128,34 @@ SELECT count(*) FROM GtfsEtaWorkerCron WHERE dispatched IS false SINCE 1 day ago
 The account is in New Relic's **EU** region: ingest goes to
 `insights-collector.eu01.nr-data.net` and the key is the 40-character licence
 key starting `eu01xx`, not an `NRAK-...` user API key.
+
+### Analytics Engine
+
+The same signals also go to Workers Analytics Engine (free, no secret, no outbound fetch) through [worker/analytics.js](worker/analytics.js). They land in dataset `gtfs_eta_worker`. Columns are positional; `index1` is the point kind and `blob1` is the worker commit:
+
+| `index1` | blobs | doubles |
+|---|---|---|
+| `health` | `blob2` status, `blob3` feedCommit | `double1` httpStatus, `double2` ageSec, `double3` entities, `double4` arrivals, `double5` workingHours, `double6` vehiclesIn, `double7` vehiclesStale, `double8` feedSkewSec |
+| `cron` | `blob2` cron, `blob3` workflow | `double1` dispatched, `double2` archived, `double3` durationMs |
+| `watchdog` | `blob2` action (`ok`/`cooldown`/`dispatched`/`dispatch_failed`/`error`) | `double1` feed ageSec, `double2` dispatched |
+
+Unknown numbers are written as `-1`. Query over the SQL API with an API token that has *Account Analytics: Read*:
+
+```sql
+-- watchdog interventions per hour
+SELECT toStartOfHour(timestamp) AS h, count() AS n
+FROM gtfs_eta_worker WHERE index1 = 'watchdog' AND blob2 = 'dispatched'
+  AND timestamp > NOW() - INTERVAL '1' DAY GROUP BY h ORDER BY h
+-- worst feed age seen by the watchdog, per 5 min
+SELECT toStartOfFiveMinutes(timestamp) AS t, max(double1) AS max_age
+FROM gtfs_eta_worker WHERE index1 = 'watchdog'
+  AND timestamp > NOW() - INTERVAL '1' DAY GROUP BY t ORDER BY t
+```
+
+```bash
+curl "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/analytics_engine/sql" \
+  -H "Authorization: Bearer $CF_API_TOKEN" --data "SELECT ..."
+```
 
 ## Model
 

@@ -126,9 +126,9 @@ must **never** require re-reading Bronze.
 5. **`predictions/` is a bounded sample, not source of truth** — it records what
    the live feed served (for quality scoring), and is regenerable in spirit (the
    feed could be re-inferred from Bronze). It is expired after **14 days** by an
-   R2 **Object Lifecycle Rule** ("delete old predictions", prefix `predictions/`),
-   managed in the Cloudflare R2 dashboard — the S3 token in `.env` is
-   object-scoped and cannot set bucket lifecycle config. The worker writes one
+   R2 **Object Lifecycle Rule** (prefix `predictions/`), applied with
+   `make r2-lifecycle` (wrangler, idempotent) or the Cloudflare R2 dashboard —
+   the S3 token in `.env` is object-scoped and cannot set bucket lifecycle config. The worker writes one
    object per 5-min cron fire, keyed by the feed's own header timestamp
    (idempotent — a stalled feed re-archives to the same key).
 
