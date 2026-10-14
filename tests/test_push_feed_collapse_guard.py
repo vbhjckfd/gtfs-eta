@@ -226,6 +226,30 @@ def test_published_feed_carries_its_entity_count(monkeypatch):
     assert feed_put["Metadata"]["entities"] == "500"
 
 
+def test_published_feed_carries_the_health_stats(monkeypatch):
+    # The worker's /health reads these with a HEAD instead of decoding the body.
+    client = _FakeClient()
+    _run_push(monkeypatch, client, 3)
+
+    meta = next(p for p in client.puts if p["Key"] == push_feed.FEED_KEY)["Metadata"]
+    assert meta["feed_timestamp"] == "1786000000"
+    assert meta["health_stop_id"] == push_feed.HEALTH_STOP_ID
+    assert meta["health_stop_arrivals"] == "0"
+
+
+def test_stop_arrivals_skips_no_data_updates():
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    for i, (stop, rel) in enumerate([("4577", 0), ("4577", 0), ("4577", 2), ("1", 0)]):
+        tu = feed.entity.add(id=f"t{i}").trip_update
+        tu.trip.trip_id = f"{1000 + i}_1_1"
+        stu = tu.stop_time_update.add()
+        stu.stop_id = stop
+        stu.schedule_relationship = rel
+
+    assert push_feed._stop_arrivals(feed.SerializeToString(), "4577") == 2
+
+
 def test_seeded_baseline_blocks_an_empty_first_push(monkeypatch):
     # The 2026-08-26 regression: upstream returned no vehicles for ~12 min, the
     # guard held for the first process's whole lifetime, then the restart

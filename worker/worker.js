@@ -458,13 +458,32 @@ function numMeta(obj, key) {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * The /health numbers as stamped on the blob by the push daemon, or null when
+ * any is missing (an older daemon) or the stamped stop is not ours.
+ */
+export function stampedFeedStats(obj) {
+  if (obj.customMetadata?.health_stop_id !== HEALTH_CHECK_STOP_ID) return null;
+  const timestamp = numMeta(obj, "feed_timestamp");
+  const entities = numMeta(obj, "entities");
+  const arrivals = numMeta(obj, "health_stop_arrivals");
+  if (timestamp === null || entities === null || arrivals === null) return null;
+  return { timestamp, entities, arrivals };
+}
+
 async function handleHealth(env) {
   // worker_commit: this worker's revision (injected by `make deploy`).
   // feed_commit: revision of the push daemon that produced the feed blob
   // (stamped as R2 object metadata) — the one that matters for predictions.
   const versions = { worker_commit: env.GIT_COMMIT ?? null, feed_commit: null };
 
-  const obj = await env.R2.get(env.FEED_KEY ?? FEED_KEY);
+  // A HEAD first: the push daemon stamps the header timestamp, entity count
+  // and the health stop's arrival count on the blob, so a feed it wrote needs
+  // no body read at all. Decoding the ~200 KB feed here ran past the free
+  // plan's CPU limit at the daily peak (Cloudflare reported 100+ killed checks
+  // a day); the decode stays only as a fallback for a blob without the stamp.
+  const key = env.FEED_KEY ?? FEED_KEY;
+  const obj = await env.R2.head(key);
   if (obj === null) {
     return jsonResponse({ status: "error", detail: "feed not in R2", ...versions }, 503);
   }
@@ -479,8 +498,15 @@ async function handleHealth(env) {
     feed_skew_sec: numMeta(obj, "feed_skew_sec"),
   };
 
-  const data = new Uint8Array(await obj.arrayBuffer());
-  const { timestamp, entities, arrivals } = parseFeedStats(data, HEALTH_CHECK_STOP_ID);
+  let stats = stampedFeedStats(obj);
+  if (stats === null) {
+    const body = await env.R2.get(key);
+    if (body === null) {
+      return jsonResponse({ status: "error", detail: "feed not in R2", ...versions }, 503);
+    }
+    stats = parseFeedStats(new Uint8Array(await body.arrayBuffer()), HEALTH_CHECK_STOP_ID);
+  }
+  const { timestamp, entities, arrivals } = stats;
 
   const now = Math.floor(Date.now() / 1000);
   const age = now - timestamp;

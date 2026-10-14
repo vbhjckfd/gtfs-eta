@@ -149,6 +149,11 @@ LIVE_STATE_MAX_AGE_SEC = 3 * 3600
 COLLAPSE_MIN_PREV_ENTITIES = 20  # below this the ratio is noise (night service)
 COLLAPSE_RATIO = 0.3
 
+# The stop /health checks for predicted arrivals (stop code 60, the busiest in
+# Lviv). Must match HEALTH_CHECK_STOP_ID in worker/worker.js; the worker only
+# trusts the stamped count when the stamped id matches its own.
+HEALTH_STOP_ID = os.environ.get("HEALTH_STOP_ID", "4577")
+
 # How stale the served feed may be and still seed the collapse guard at startup
 # (see _load_prev_entities). This bounds both sides of one tradeoff: a longer
 # window protects a longer upstream outage, and is also the longest a wrongly
@@ -300,6 +305,25 @@ def _feed_stats(pb_bytes: bytes) -> tuple[int, int]:
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.ParseFromString(pb_bytes)
     return int(feed.header.timestamp), len(feed.entity)
+
+
+def _stop_arrivals(pb_bytes: bytes, stop_id: str) -> int:
+    """How many stop_time_updates predict an arrival at *stop_id*.
+
+    The worker's /health used to work this out itself by walking the whole
+    ~200 KB feed in JS, which ran past Cloudflare's free-plan CPU limit at the
+    daily peak (100+ killed checks a day). Counted here instead and stamped on
+    the blob as metadata, so /health needs only an R2 HEAD. NO_DATA (2) marks
+    the stops past the prediction horizon, so it is not an arrival.
+    """
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(pb_bytes)
+    return sum(
+        1
+        for ent in feed.entity
+        for stu in ent.trip_update.stop_time_update
+        if stu.stop_id == stop_id and stu.schedule_relationship != 2
+    )
 
 
 def _should_publish(prev_entities: int | None, new_entities: int) -> bool:
@@ -559,6 +583,10 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=N
             # ~5.5 min restart, and a HEAD on this key is the cheapest way to
             # get it (no 200 KB body, no protobuf decode).
             "entities": str(entities),
+            # Read by the worker's /health in place of decoding this body.
+            "feed_timestamp": str(feed_ts),
+            "health_stop_id": HEALTH_STOP_ID,
+            "health_stop_arrivals": str(_stop_arrivals(tu_result, HEALTH_STOP_ID)),
             "vehicles_in": str(stats.get("vehicles_in", 0)),
             "vehicles_stale": str(stats.get("vehicles_stale", 0)),
             "feed_skew_sec": str(stats.get("feed_skew_sec", 0)),
