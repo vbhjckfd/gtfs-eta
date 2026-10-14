@@ -104,3 +104,6 @@ Arms: `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv
 | A | legacy | 42 | 4,937,670 | 2,898,302 | 126.7 | 60.8 | 270.2 | -41.3 | 79.8 | 171.6 | +28.0% | +34.1% | +30.7% | no | prod rollback |
 | A | lv2x_duty | 42 | 4,937,670 | 2,898,302 | 98.8 | 45.9 | 201.3 | -28.5 | 65.0 | 136.6 | -0.2% | -0.1% | -0.0% | no | as lv2 + 2 per-vehicle fields in the persisted state; trivial |
 | A | lv2x_dutypa | 42 | 4,937,670 | 2,898,302 | 98.0 | 45.5 | 198.4 | -28.2 | 64.7 | 135.3 | -1.1% | -1.5% | -0.9% | no | as lv2 + duty fields in the persisted state + per-cycle link occupancy dict; < 0.5 day |
+| A | lv2x_pa | 42 | 4,937,670 | 2,898,302 | 98.1 | 45.5 | 198.7 | -27.8 | 64.8 | 135.8 | -0.9% | -1.3% | -0.6% | no | as lv2 + per-cycle link occupancy dict; < 0.5 day |
+| B | lv2 | 11 | 4,344,765 | 1,379,889 | 96.6 | 44.5 | 199.9 | -33.0 | 62.3 | 136.3 | — | — | — | — | prod (live_v2) |
+| B | lv2x_dutypa | 11 | 4,344,765 | 1,379,889 | 95.5 | 44.2 | 197.5 | -32.4 | 61.7 | 135.6 | -1.1% | -1.2% | -0.5% | no | as lv2 + duty fields in the persisted state + per-cycle link occupancy dict; < 0.5 day |

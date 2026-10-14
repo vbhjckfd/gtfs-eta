@@ -95,6 +95,11 @@ ds4shift 83.95 → 83.62 (−0.39%), every bucket and p90 better on both splits;
   src/train_live.py (behind flags), not on this branch's harness/addon chain, so that a winner is already in serving form.
 - Against that baseline, the known optional add-ons (`_PA` −0.3/−0.5%, `_DUTY` −0.4/−0.5%) cannot reach the 3% win bar even stacked.
 
+### Run 44 (production trainer, fresh days 10-01..10-13)
+- live_v2 holds on unseen days: split A (test 10-10..10-13) legacy 126.7 → live_v2 99.0 (−22%), p90 270.2 → 201.4.
+- `_DUTY` + `_PA` ported into src/live_features.py behind GTFS_ETA_LIVE_EXTRA (off by default): −1.1% on A and B, p90 −1.5 / −1.2%;
+  `_PA` alone −0.9%, `_DUTY` alone −0.2%. Below the 3% bar → optional only (needs: duty fields in the persisted state, per-cycle occupancy dict).
+
 ### Open next steps
 1. Hand-off of `sc_big_fo_long` (+ optional V30 `sc_big_fo_pa`, + optional V32 duty `sc_big_fo_duty`) is the owner's call. **Strongly recommend pausing the schedule**: run 33 found nothing; runs 16–32 moved the leader by ≈ 4.5% in total,
    and runs 31–32 each added ≤ 0.5%. Live-feature ideas from the feed (positions, odometer, speed, other vehicles) look exhausted.
@@ -164,3 +169,49 @@ Lock taken at 08:14 UTC. Main had not moved since run 41. R2 credentials present
 ### Next steps
 1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC).
 2. Next housekeeping due run 45.
+
+## 2026-10-14 — run 44 (fresh days on the production trainer; no winner)
+
+Lock taken 13:01 UTC (refreshed every 50 min by a background loop). Main had moved (worker-only commits #80 / #81); merged cleanly.
+R2 credentials present. Fresh box: `python -m pip install -e . tzdata` (plain `pip` points at another interpreter here).
+
+**Data.** `python scripts/run_pipeline.py --all --parallel 3 --keep-pct 10 --since 2026-09-17 --until 2026-10-13` — 27 days in 3 h 40 min
+(16–38 min per day per worker; peak ≈ 9 GB used, no OOM). Drift: 10-12 / 10-13 have 3.1M / 3.9M pipeline rows vs ≈ 2.0M on earlier weekdays
+(test rows on those days are 2–3x the others; worth a look at the feed — more vehicles or a faster snapshot cadence?).
+
+**Code** (flag-gated; production unchanged with the flag off):
+- src/live_features.py: `GTFS_ETA_LIVE_EXTRA=1` appends `EXTRA_COLS` = duty_s, duty_odo (feed t / odometer since the last ≥ 30 min feed gap)
+  and pa_n, pa_spd_mean, pa_spd_min, pa_stop_frac, pa_gap_m, pa_gap_spd, pa_cov (other vehicles whose current link is on the path at this
+  snapshot, 120 s odometer speed). Ports of addon_v32 `_DUTY` / addon_v30 `_PA` onto LiveState; dump/load do not carry the duty fields yet.
+- src/train_live.py: `GTFS_ETA_LIVE_DROP=a,b` leaves live cols out of the model (MODEL_LIVE_COLS).
+- tl.sh (one fit on src.train_live → results_tl.jsonl; all arms read one EXTRA=1 feature cache data/features_live_x so rows are identical),
+  run44.sh (this run's six fits); report.py now also renders a "Production trainer" section from results_tl.jsonl.
+
+**Splits.** A = train 10-01..10-09, test 10-10 Sat / 10-11 Sun / 10-12 Mon / 10-13 Tue, seed 42 (train 4.94M rows, test 2.90M).
+B = train 10-01..10-08, test 10-09 Fri / 10-10 / 10-11, seed 11 (4.34M / 1.38M). Baseline = production `live_v2` (`lv2`) on the same rows.
+Fits ≈ 34 min each (5M rows, 1200 trees, 4 cores); legacy ≈ 20 min.
+
+| split | arm | MAE | median | p90 | bias | sa1 | sa10 | ΔMAE | Δp90 | worst bucket |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A | lv2 (prod) | 99.0 | 45.9 | 201.4 | −28.5 | 65.3 | 136.7 | — | — | — |
+| A | legacy | 126.7 | 60.8 | 270.2 | −41.3 | 79.8 | 171.6 | +28.0% | +34.1% | +30.7% |
+| A | lv2x_duty | 98.8 | 45.9 | 201.3 | −28.5 | 65.0 | 136.6 | −0.2% | −0.1% | −0.0% |
+| A | lv2x_pa | 98.1 | 45.5 | 198.7 | −27.8 | 64.8 | 135.8 | −0.9% | −1.3% | −0.6% |
+| A | lv2x_dutypa | 98.0 | 45.5 | 198.4 | −28.2 | 64.7 | 135.3 | −1.1% | −1.5% | −0.9% |
+| B | lv2 (prod) | 96.6 | 44.5 | 199.9 | −33.0 | 62.3 | 136.3 | — | — | — |
+| B | lv2x_dutypa | 95.5 | 44.2 | 197.5 | −32.4 | 61.7 | 135.6 | −1.1% | −1.2% | −0.5% |
+
+Per day (A, lv2 → dutypa): 10-10 97.1 → 97.0, 10-11 91.6 → 90.5, 10-12 89.7 → 88.3, 10-13 109.7 → 108.6. Legacy per day 115.9 / 122.4 / 120.6 / 136.8.
+Worst routes (A, lv2): 133 187, 137 166, 122 152, 106 140, 2302 140, 88 137. On B, 133 is 255 (lv2) / 262 (dutypa) — driver breaks, unchanged.
+
+**Conclusion.** live_v2 reproduces its −22% vs legacy on fresh days (README: −22.2%). The two optional add-ons together give −1.1% on both splits,
+every bucket and p90 better, consistent with the harness (−1.0%), but far below the 3% bar: not a winner, no notification.
+`_PA` carries most of it; `_DUTY` alone is noise on the production trainer. Worth shipping only as a cheap optional add (< 0.5 day: persist
+duty_t0 / duty_odo0 in LiveState.dump/load; inference needs no other change since it calls LiveState.features).
+
+### Next steps
+1. **Recommend pausing the schedule, or running it weekly** (owner's call; asked in this session). Feed-feature ideas are exhausted;
+   the tail (133 / 137 / 122) needs operator break / layover data.
+2. If continued: re-use this recipe (pipeline 27 days ≈ 3.7 h, feature build ≈ 25 min, six fits ≈ 4 h); the harness/addon chain is superseded.
+3. Check the 10-12 / 10-13 row-count jump (≈ 1.6–2x) before the next weekly retrain.
+4. Housekeeping due run 45: archive runs 38–44; prune ds.sh / run.sh / harness add-ons superseded by the production-trainer path.
