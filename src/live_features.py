@@ -37,6 +37,7 @@ vehicles in feed order and must not depend on it.
 from __future__ import annotations
 
 import math
+import os
 from bisect import bisect_right, insort
 from collections import deque
 from datetime import datetime, timezone
@@ -82,6 +83,18 @@ LIVE_COLS = [
     "fs_now", "fs_mean60", "odo_spd_60", "odo_spd_180", "odo_m_300",
     "odo_spd_600", "odo_spd_1200", "fs_zero_frac600",
 ]
+# Research flag (branch claude/model-search, run 44): GTFS_ETA_LIVE_EXTRA=1 appends
+# the optional add-ons measured on the research harness (runs 30 / 32):
+#   duty_s / duty_odo  time / odometer m since the vehicle's last >= 30 min feed gap
+#   pa_*               other vehicles on the path links at this snapshot
+# Off by default: the production model and its exports are unchanged.
+EXTRA_COLS = ["duty_s", "duty_odo", "pa_n", "pa_spd_mean", "pa_spd_min", "pa_stop_frac",
+              "pa_gap_m", "pa_gap_spd", "pa_cov"]
+LIVE_EXTRA = os.environ.get("GTFS_ETA_LIVE_EXTRA", "") == "1"
+if LIVE_EXTRA:
+    LIVE_COLS = LIVE_COLS + EXTRA_COLS
+DUTY_GAP_SEC = 1800.0
+PA_SPD_SEC = 120.0
 N_LIVE = len(LIVE_COLS)
 _COL = {c: i for i, c in enumerate(LIVE_COLS)}
 # The exported trees carry no NaN handling for numeric splits: every missing
@@ -296,7 +309,8 @@ def stationary_runs(pos: pd.DataFrame, geom) -> pd.DataFrame:
 
 class _Veh:
     __slots__ = ("feed", "pos", "trip", "geom", "furthest", "next_idx", "last_t", "last_d",
-                 "cross_idx", "cross_t", "streak", "own", "vlinks", "last_feed_t", "last_pos_t")
+                 "cross_idx", "cross_t", "streak", "own", "vlinks", "last_feed_t", "last_pos_t",
+                 "duty_t0", "duty_odo0", "cur")
 
     def __init__(self):
         self.feed: deque = deque()        # (t, vehicle_ts, speed, odometer_m)
@@ -314,6 +328,9 @@ class _Veh:
         self.vlinks: deque = deque()      # (t_cross, t_avail, own lt, hist lt)
         self.last_feed_t = -1.0
         self.last_pos_t = -1.0
+        self.duty_t0 = -1.0               # LIVE_EXTRA: shift start (feed t) and its odometer
+        self.duty_odo0 = _NAN
+        self.cur = None                   # LIVE_EXTRA: (t, link key, fraction along it)
 
 
 class LiveState:
@@ -348,10 +365,16 @@ class LiveState:
         v = self._v(vid)
         if t <= v.last_feed_t:
             return                      # same upstream snapshot served twice
-        v.last_feed_t = t
         vts = float(vehicle_ts) if vehicle_ts is not None and vehicle_ts == vehicle_ts else _NAN
         spd = float(speed) if speed is not None and speed == speed else _NAN
         odo = float(odometer_km) * 1000.0 if odometer_km is not None and odometer_km == odometer_km else _NAN
+        if LIVE_EXTRA:
+            if v.last_feed_t < 0 or t - v.last_feed_t >= DUTY_GAP_SEC:
+                v.duty_t0 = t
+                v.duty_odo0 = odo
+            elif v.duty_odo0 != v.duty_odo0:
+                v.duty_odo0 = odo
+        v.last_feed_t = t
         q = v.feed
         q.append((t, vts, spd, odo))
         lim = t - FEED_KEEP_SEC
@@ -371,7 +394,16 @@ class LiveState:
             q.popleft()
         if geom is None:
             v.trip = None
+            v.cur = None
             return
+        if LIVE_EXTRA:
+            ds = geom.dists
+            a = bisect_right(ds, d)
+            if 1 <= a < len(ds):
+                span = ds[a] - ds[a - 1]
+                v.cur = (t, geom.keys[a], (d - ds[a - 1]) / span if span > 0 else 0.0)
+            else:
+                v.cur = None
         if v.trip != trip_id:
             self._start_run(v, trip_id, geom, t, d)
             return
@@ -562,6 +594,11 @@ class LiveState:
                 common[_COL["veh_hist_n60"]] = float(sn)
                 if sb > 0:
                     common[_COL["veh_hist_ratio60"]] = sa / sb
+        if LIVE_EXTRA and v is not None and v.duty_t0 >= 0 and v.feed and v.feed[-1][0] == t:
+            common[_COL["duty_s"]] = t - v.duty_t0
+            dodo = v.feed[-1][3] - v.duty_odo0
+            if dodo >= 0:
+                common[_COL["duty_odo"]] = dodo
         age_s = common[_COL["pos_age_s"]]
         if age_s == age_s and own180 == own180 and own180 >= 0:
             common[_COL["pos_age_dist"]] = age_s * own180
@@ -674,7 +711,96 @@ class LiveState:
             r[C["cur_link_live"]] = cur_live
             r[C["cur_link_hist"]] = cur_hist
             r[C["cur_link_frac"]] = w0
+        if LIVE_EXTRA:
+            self._extra(vid, v, t, d, geom, targets, a, out)
         return _fill_missing(out)
+
+    # ── LIVE_EXTRA (research) ─────────────────────────────────────────────
+
+    def _feed_o120(self, v: _Veh, t: float) -> tuple[float, float]:
+        """(odometer speed over the last ~120 s, reported speed) at feed time t."""
+        feed = v.feed
+        if not feed or feed[-1][0] != t:
+            return _NAN, _NAN
+        cur = feed[-1]
+        hi_t = t - PA_SPD_SEC
+        prev = None
+        for e in reversed(feed):
+            if e[0] <= hi_t:
+                if e[0] >= hi_t - PA_SPD_SEC:
+                    prev = e
+                break
+        o = _NAN
+        if prev is not None:
+            do = cur[3] - prev[3]
+            dv = cur[1] - prev[1]
+            if do >= 0 and dv > 0:
+                o = do / dv
+        return o, cur[2]
+
+    def _occupancy(self, t: float) -> dict:
+        c = getattr(self, "_occ_cache", None)
+        if c is not None and c[0] == t:
+            return c[1]
+        occ: dict = {}
+        for vid, v in self.veh.items():
+            cur = v.cur
+            if cur is None or cur[0] != t:
+                continue
+            o, fs = self._feed_o120(v, t)
+            occ.setdefault(cur[1], []).append((vid, cur[2], o, fs))
+        self._occ_cache = (t, occ)
+        return occ
+
+    def _extra(self, vid, v, t, d, geom, targets, a, out) -> None:
+        C = _COL
+        occ = self._occupancy(t)
+        dists = geom.dists
+        n = cnt = 0
+        so = 0.0
+        mo = _NAN
+        sst = nst = 0
+        gap = gspd = _NAN
+        occ_len = tot_len = 0.0
+        acc = {}
+        for j in range(a, max(targets) + 1):
+            span = dists[j] - dists[j - 1]
+            tot_len += span
+            hit = False
+            for (ovid, frac, o, fs) in occ.get(geom.keys[j], ()):
+                if ovid == vid:
+                    continue
+                g = dists[j - 1] + frac * span - d
+                if j == a and not g > 0:
+                    continue
+                hit = True
+                n += 1
+                if o == o:
+                    cnt += 1
+                    so += o
+                    if not (mo <= o):
+                        mo = o
+                if fs == fs:
+                    nst += 1
+                    sst += fs <= 0
+                if not (gap <= g):
+                    gap, gspd = g, o
+            if hit:
+                occ_len += span
+            acc[j] = (n, cnt, so, mo, sst, nst, gap, gspd, occ_len, tot_len)
+        for r, b in zip(out, targets):
+            if b < a:
+                continue
+            n, cnt, so, mo, sst, nst, gap, gspd, occ_len, tot_len = acc[b]
+            r[C["pa_n"]] = float(n)
+            r[C["pa_cov"]] = occ_len / tot_len if tot_len > 0 else 0.0
+            if cnt:
+                r[C["pa_spd_mean"]] = so / cnt
+                r[C["pa_spd_min"]] = mo
+            if nst:
+                r[C["pa_stop_frac"]] = sst / nst
+            r[C["pa_gap_m"]] = gap
+            r[C["pa_gap_spd"]] = gspd
 
     # ── persistence ───────────────────────────────────────────────────────
 

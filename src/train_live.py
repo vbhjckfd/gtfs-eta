@@ -65,7 +65,11 @@ BASE_COLS = [
     "progress_speed_mps", "stops_remaining", "trip_progress_frac", "dist_per_stop_m",
     "speed_eta_warm", "hist_speed_mps", "hist_travel_time_est", "stationary_sec",
 ]
-MODEL_COLS = CAT_COLS + BASE_COLS + LIVE_COLS
+# Research ablations (branch claude/model-search): GTFS_ETA_LIVE_DROP=a,b leaves
+# those live columns out of the model (the cached feature files keep them).
+_DROP = {c for c in os.environ.get("GTFS_ETA_LIVE_DROP", "").split(",") if c}
+MODEL_LIVE_COLS = [c for c in LIVE_COLS if c not in _DROP]
+MODEL_COLS = CAT_COLS + BASE_COLS + MODEL_LIVE_COLS
 N_STOP_CODES = 254          # top target stops get their own category, the rest share 254
 
 DEFAULT_DAYS_BACK = 21
@@ -266,7 +270,7 @@ MAX_TRAIN_ROWS = int(os.environ.get("GTFS_ETA_LIVE_MAX_ROWS", 5_000_000))
 def load_days(days: list[str], frac: float, max_rows: int | None = None, seed: int = 42) -> pd.DataFrame:
     """Feature rows of *days*: only the columns the fit and the metrics use,
     numerics as float32 (a full frame of 9M rows is ~4x larger)."""
-    num = sorted(set(BASE_FEATURE_COLS + BASE_COLS + LIVE_COLS + [TARGET_COL])
+    num = sorted(set(BASE_FEATURE_COLS + BASE_COLS + MODEL_LIVE_COLS + [TARGET_COL])
                  - {"route_id", "speed_eta_warm", "hist_speed_mps", "hist_travel_time_est"})
     cols = ["route_id", "stop_id", "date"] + num
     pieces = []
@@ -294,7 +298,7 @@ def encode(df: pd.DataFrame, route_codes: dict, stop_codes: dict) -> np.ndarray:
     X = np.empty((len(df), len(MODEL_COLS)), dtype=np.float64)
     X[:, 0] = df["route_id"].astype(str).map(route_codes).fillna(-1).to_numpy(dtype=float)
     X[:, 1] = df["stop_id"].astype(str).map(stop_codes).fillna(N_STOP_CODES).to_numpy(dtype=float)
-    for i, c in enumerate(BASE_COLS + LIVE_COLS, start=2):
+    for i, c in enumerate(BASE_COLS + MODEL_LIVE_COLS, start=2):
         X[:, i] = df[c].to_numpy(dtype=float)
     return X
 
