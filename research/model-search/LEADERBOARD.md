@@ -89,3 +89,18 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 | ds4v33 | sc_big_duty_pace | 42 | 2,205,756 | 1,607,392 | 88.2 | 44.1 | 177.8 | -17.9 | 70.6 | 119.7 | -22.6% | -26.4% | -3.7% | **yes** | ? |
 | ds4v33 | sc_big_fo_all | 42 | 2,205,756 | 1,607,392 | 84.7 | 43.2 | 174.3 | -13.7 | 58.2 | 119.0 | -25.7% | -27.9% | -20.7% | **yes** | ? |
 | ds4v33 | sc_big_fo_duty | 42 | 2,205,756 | 1,607,392 | 84.8 | 43.2 | 174.6 | -13.7 | 58.4 | 119.0 | -25.6% | -27.7% | -20.4% | **yes** | as sc_big_fo_pa + per-vehicle shift start (feed t + odometer after the last >= 30 min gap); trivial |
+
+## Production trainer (run 44+: `src/train_live.py`, `tl.sh`, results_tl.jsonl)
+
+Protocol baseline = `lv2` (production live_v2 recipe, `python -m src.train_live`) on the same split and seed;
+`legacy` = src/train.py recipe on the same rows (`--compare-baseline`). Feature rows from the full
+production pipeline (`run_pipeline.py --keep-pct 10`, train / test at 0.3 of those snapshots).
+Splits: `A` = train 10-01..10-09, test 10-10 (Sat) .. 10-13 (Tue); `B` = train 10-01..10-08, test 10-09 (Fri) .. 10-11 (Sun).
+Arms: `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv2x_pa` = one group each (GTFS_ETA_LIVE_DROP).
+
+| split | arm | seed | n_train | n_test | MAE | median | p90 | bias | sa1 | sa10 | ΔMAE | Δp90 | worst bucket Δ | win | serving |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| A | lv2 | 42 | 4,937,670 | 2,898,302 | 99.0 | 45.9 | 201.4 | -28.5 | 65.3 | 136.7 | — | — | — | — | prod (live_v2) |
+| A | legacy | 42 | 4,937,670 | 2,898,302 | 126.7 | 60.8 | 270.2 | -41.3 | 79.8 | 171.6 | +28.0% | +34.1% | +30.7% | no | prod rollback |
+| A | lv2x_duty | 42 | 4,937,670 | 2,898,302 | 98.8 | 45.9 | 201.3 | -28.5 | 65.0 | 136.6 | -0.2% | -0.1% | -0.0% | no | as lv2 + 2 per-vehicle fields in the persisted state; trivial |
+| A | lv2x_dutypa | 42 | 4,937,670 | 2,898,302 | 98.0 | 45.5 | 198.4 | -28.2 | 64.7 | 135.3 | -1.1% | -1.5% | -0.9% | no | as lv2 + duty fields in the persisted state + per-cycle link occupancy dict; < 0.5 day |

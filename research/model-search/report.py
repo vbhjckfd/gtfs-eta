@@ -185,11 +185,60 @@ def _rows(res, keep):
     return lines
 
 
+TL_HEAD = """
+## Production trainer (run 44+: `src/train_live.py`, `tl.sh`, results_tl.jsonl)
+
+Protocol baseline = `lv2` (production live_v2 recipe, `python -m src.train_live`) on the same split and seed;
+`legacy` = src/train.py recipe on the same rows (`--compare-baseline`). Feature rows from the full
+production pipeline (`run_pipeline.py --keep-pct 10`, train / test at 0.3 of those snapshots).
+Splits: `A` = train 10-01..10-09, test 10-10 (Sat) .. 10-13 (Tue); `B` = train 10-01..10-08, test 10-09 (Fri) .. 10-11 (Sun).
+Arms: `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv2x_pa` = one group each (GTFS_ETA_LIVE_DROP).
+
+| split | arm | seed | n_train | n_test | MAE | median | p90 | bias | sa1 | sa10 | ΔMAE | Δp90 | worst bucket Δ | win | serving |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+"""
+TL_SERVING = {"lv2": "prod (live_v2)", "legacy": "prod rollback",
+              "lv2x_dutypa": "as lv2 + duty fields in the persisted state + per-cycle link occupancy dict; < 0.5 day",
+              "lv2x_duty": "as lv2 + 2 per-vehicle fields in the persisted state; trivial",
+              "lv2x_pa": "as lv2 + per-cycle link occupancy dict; < 0.5 day"}
+
+
+def tl_rows() -> list[str]:
+    import json
+    p = HERE / "results_tl.jsonl"
+    if not p.exists():
+        return []
+    res = {}
+    for line in p.read_text().splitlines():
+        r = json.loads(line)
+        arm, split, seed = r["name"].rsplit("_", 2)
+        res[(split, seed, arm)] = dict(r["live_v2"], n_train=r["n_train"])
+        if "baseline" in r:
+            res[(split, seed, "legacy")] = dict(r["baseline"], n_train=r["n_train"])
+    lines = []
+    for (split, seed, arm), m in sorted(res.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] != "lv2", kv[0][2])):
+        base = res.get((split, seed, "lv2"))
+        if base and arm != "lv2":
+            j = judge(base, m)
+            d = (f"{j['mae_change_pct']:+.1f}%", f"{j['p90_change_pct']:+.1f}%",
+                 f"{j['worst_bucket_change_pct']:+.1f}%", "**yes**" if j["wins"] else "no")
+        else:
+            d = ("—",) * 4
+        sa = {str(k): v for k, v in m["mae_by_stops_ahead"].items()}
+        lines.append(
+            f"| {split} | {arm} | {seed[1:]} | {m['n_train']:,} | {m['n']:,} | {m['mae']:.1f} | "
+            f"{m['median_ae']:.1f} | {m['p90_ae']:.1f} | {m['bias']:+.1f} | "
+            f"{sa.get('1', 0):.1f} | {sa.get('10', 0):.1f} | {' | '.join(d)} | {TL_SERVING.get(arm, '?')} |")
+    return lines
+
+
 def main():
     res = {(m["tag"], m["seed"], m["arm"]): m for m in load_results().values()}
     cur = _rows(res, lambda t: t in CURRENT_TAGS)
     old = _rows(res, lambda t: t not in CURRENT_TAGS)
-    (HERE / "LEADERBOARD.md").write_text("\n".join([HEAD.rstrip("\n")] + cur) + "\n")
+    tl = tl_rows()
+    (HERE / "LEADERBOARD.md").write_text("\n".join([HEAD.rstrip("\n")] + cur) + "\n"
+                                         + (TL_HEAD + "\n".join(tl) + "\n" if tl else ""))
     tbl = HEAD[HEAD.index("| tag |"):]
     (HERE / "archive").mkdir(exist_ok=True)
     (HERE / "archive" / "LEADERBOARD-old.md").write_text(
