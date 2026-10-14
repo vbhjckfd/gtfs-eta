@@ -1,4 +1,4 @@
-.PHONY: install pipeline pipeline-date train train-legacy learn export deploy \
+.PHONY: install pipeline pipeline-date train train-legacy learn export deploy r2-lifecycle \
         sanity validate-off-route validate-horizon compare-models \
         check-gtfs check-snapshots \
         push-feed serve-feed smoke score route-mae review-quality diagnose \
@@ -78,6 +78,18 @@ deploy:
 	cd worker && bash -c 'source ~/.nvm/nvm.sh && nvm use 24 && \
 		npx wrangler deploy --var GIT_COMMIT:$$(git rev-parse --short HEAD)'
 
+## Apply the bucket's R2 lifecycle rules (docs/collector_rules.md §5). Needs a
+## wrangler login with R2 admin rights — the .env S3 token cannot set lifecycle
+## config. Idempotent: a prefix that already has a rule is left alone.
+r2-lifecycle:
+	cd worker && bash -c 'source ~/.nvm/nvm.sh && nvm use 24 && \
+		if npx wrangler r2 bucket lifecycle list gtfs-lviv | grep -q "predictions/"; then \
+			echo "predictions/ rule already present"; \
+		else \
+			npx wrangler r2 bucket lifecycle add gtfs-lviv delete-old-predictions predictions/ \
+				--expire-days 14 --force; \
+		fi && npx wrangler r2 bucket lifecycle list gtfs-lviv'
+
 ## Export then deploy in one step
 release: export deploy
 
@@ -145,6 +157,7 @@ help:
 	@echo "  export               Upload GTFS + model to R2"
 	@echo "  deploy               Deploy Cloudflare Worker"
 	@echo "  release              export + deploy"
+	@echo "  r2-lifecycle         Apply R2 lifecycle rules (predictions/ 14 d)"
 	@echo ""
 	@echo "  push-feed            Push one TripUpdates snapshot to R2"
 	@echo "  serve-feed           Push to R2 every 10 s (live feed daemon)"
