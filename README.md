@@ -14,7 +14,7 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
   data/training/YYYY-MM-DD.parquet (Gold)    — snapshot-anchored rows with actual arrivals
         │  make train
         ▼
-  models/eta_pipeline.joblib       HistGradientBoostingRegressor
+  models/eta_live.joblib           live_v2 HistGradientBoostingRegressor
         │  make export
         ▼
   R2: worker/*.pkl                 compact GTFS + model for inference
@@ -165,19 +165,16 @@ curl "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/analytics_eng
 
 Training examples are **snapshot-anchored**: every vehicle position snapshot yields one row per upcoming stop, so the model sees vehicles mid-segment and dwelling at stops — not only at stop crossings. This is what lets it predict ≈0 s when a bus is already at the stop.
 
-**Algorithm**: `sklearn.ensemble.HistGradientBoostingRegressor` wrapped in a `Pipeline` with `OrdinalEncoder` for `route_id`. The full pipeline is saved to `models/eta_pipeline.joblib` — a single file contains everything needed for inference.
+**Algorithm** (`live_v2`, [src/train_live.py](src/train_live.py), live features in [src/live_features.py](src/live_features.py)): `sklearn.ensemble.HistGradientBoostingRegressor` with `route_id` and the target stop (top 254) as native categoricals, 13 base features and 36 live columns. Trees: 255 leaves, ≤ 1200 iterations, `max_features=0.3`, absolute-error loss.
 
-**Features** (16 total — 13 base + 3 prior-derived):
+**Base features** — one snapshot of one vehicle:
 
 | Feature | Description |
 |---|---|
-| `route_id` | Route identifier (categorical) |
-| `stop_sequence` | Target stop index in the trip |
 | `stops_ahead` | Prediction horizon in stops (1 = next stop) |
-| `hour`, `day_of_week`, `month` | Temporal context |
+| `hour` | Temporal context |
 | `is_weekend`, `is_holiday` | Calendar flags (Ukrainian holidays) |
 | `remaining_dist_m` | Shape distance from the vehicle's projected position to the target stop |
-| `sched_remaining_sec` | Schedule's expectation for that remaining distance (interpolated at the vehicle's position) |
 | `progress_speed_mps` | Observed speed over the last snapshot interval (−1 when unknown) |
 | `stops_remaining` | Stops left after the target |
 | `trip_progress_frac` | Position along route [0, 1] |
@@ -185,19 +182,18 @@ Training examples are **snapshot-anchored**: every vehicle position snapshot yie
 | `speed_eta_warm` | `remaining_dist_m / effective_speed`, warm-started from the prior when speed is unknown |
 | `hist_speed_mps` | Route×hour historical median speed |
 | `hist_travel_time_est` | `stops_ahead ×` historical seconds-per-stop (dwell-aware) |
+| `stationary_sec` | Seconds since the vehicle last advanced > 25 m |
 
-The last three are computed by `apply_priors()` from a route×hour speed/dwell
-table built on the training split only, so they carry no test-set leakage. The
-feature vector is indexed **positionally** by the exported tree traversal, so
-`FEATURE_COLS` in [src/features.py](src/features.py), `build_features` in
-[src/inference.py](src/inference.py) and `_extract_trees` in
-[scripts/export_worker_data.py](scripts/export_worker_data.py) must stay in sync.
+`speed_eta_warm`, `hist_speed_mps` and `hist_travel_time_est` are computed by
+`apply_priors()` from a route×hour speed/dwell table built on the training split
+only, so they carry no test-set leakage. The serving row is assembled
+**positionally**: `build_features` in [src/inference.py](src/inference.py) emits
+rows in `FEATURE_COLS` order ([src/features.py](src/features.py)),
+`build_features_live` picks the base columns out of them by index
+(`_LIVE_BASE_IDX`), and that must match `MODEL_COLS` in
+[src/train_live.py](src/train_live.py).
 
-**Baseline**: scheduled remaining time (`sched_remaining_sec`). The model is evaluated against this baseline and must beat it on the held-out test set (last 20% of days by date).
-
-### live_v2 (current production model)
-
-The model above sees one snapshot of one vehicle. `live_v2` ([src/train_live.py](src/train_live.py), features in [src/live_features.py](src/live_features.py)) keeps 13 of its base features (drops `month`, `day_of_week`, `stop_sequence`), makes `route_id` and the target stop (top 254) native categoricals, and adds 36 live columns:
+**Live features**:
 
 | Group | Columns | Source |
 |---|---|---|
@@ -207,13 +203,13 @@ The model above sees one snapshot of one vehicle. `live_v2` ([src/train_live.py]
 | Dwell | `dwell_rem_med/_p75`, `dwell_p_more120`, `dwell_n`, `dwell_long_share` | remaining stop time at its current location (stop + 50 m bin) given `stationary_sec`, from prior days' stops |
 | Feed fields | `pos_age_*`, `fs_now`, `fs_mean60`, `fs_zero_frac600`, `odo_spd_60/180/600/1200`, `odo_m_300` | GPS-fix age, reported speed and odometer windows |
 
-Missing live values are `-1`. Trees: 255 leaves, ≤ 1200 iterations, `max_features=0.3`, absolute-error loss.
+Missing live values are `-1`.
 
 **One engine for training and serving.** `LiveState` is fed the same two streams in both: every vehicle entity's raw feed fields, and every on-route vehicle's projected distance along its trip. `run_pipeline.py` writes both streams per day (`data/training/side/<day>.feed|pos.parquet`), the trainer replays them to build features for each training snapshot, and `run_inference` feeds the live ones. Information from other vehicles only becomes visible on the next snapshot, so the order the daemon processes vehicles in doesn't matter. `push_feed.py` carries the state across restarts in `feed/live_state.pkl.gz`. The static tables (historical link medians, dwell) are built by the trainer from the 14 days up to its last day and shipped inside the model export.
 
-**Held-out result** (protocol of branch `claude/model-search`, same rows for both models; train 09-19..09-30, test 10-01 Thu / 10-02 Fri / 10-03 Sat, 1.58 M rows):
+**Held-out result** against the retired single-snapshot model (base features only; protocol of branch `claude/model-search`, same rows for both models; train 09-19..09-30, test 10-01 Thu / 10-02 Fri / 10-03 Sat, 1.58 M rows):
 
-| | legacy | live_v2 |
+| | single-snapshot | live_v2 |
 |---|---|---|
 | MAE | 119.3 s | 92.8 s (−22.2%) |
 | median | 60.7 s | 45.0 s |
@@ -223,11 +219,11 @@ Missing live values are `-1`. Trees: 255 leaves, ≤ 1200 iterations, `max_featu
 ```bash
 make pipeline     # label the last 36 days (rows + side tables, 10% of snapshots)
 make train        # python -m src.train_live: latest 21 days, last 20% held out
-make export       # exports live_v2 when models/eta_live.joblib exists (EXPORT_MODEL=legacy|live to force)
-python -m src.train_live --train 2026-09-19..2026-09-30 --test 2026-10-01..2026-10-03 --compare-baseline --no-save
+make export       # upload models/eta_live.joblib (+ GTFS) to R2
+python -m src.train_live --train 2026-09-19..2026-09-30 --test 2026-10-01..2026-10-03 --no-save
 ```
 
-**Rollback**: every export that publishes new trees first copies the old ones to `worker/eta_pipeline.pkl.prev`, so copying that object back over `worker/eta_pipeline.pkl` restores the previous model within one daemon restart (~5 min). Or retrain it: `make train-legacy && EXPORT_MODEL=legacy make export`. The daemon serves whichever format is in `worker/eta_pipeline.pkl`.
+**Rollback**: every export that publishes new trees first copies the old ones to `worker/eta_pipeline.pkl.prev`, so copying that object back over `worker/eta_pipeline.pkl` restores the previous model within one daemon restart (~5 min).
 
 ## Inference & serving
 

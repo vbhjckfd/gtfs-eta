@@ -305,10 +305,9 @@ class TestDaemonPersistence:
                 raise KeyError(Key)
             return {"Body": io.BytesIO(self.objects[Key])}
 
-    def test_round_trip_and_legacy_model_has_no_state(self):
+    def test_round_trip(self):
         import time as _time
         pf = self._push_feed()
-        assert pf._make_live_state({"trees": []}, {}) is None
         now = _time.time()
         st = LiveState()
         st.geom = _geom

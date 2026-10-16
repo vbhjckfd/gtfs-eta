@@ -47,7 +47,7 @@ from dotenv import load_dotenv
 from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
 
-from src.inference import is_live_model, run_inference
+from src.inference import run_inference
 
 load_dotenv()
 
@@ -483,9 +483,7 @@ def _save_tracker_state(client, trackers: dict) -> None:
 
 
 def _make_live_state(model_data: dict, gtfs_data: dict):
-    """A LiveState for a live_v2 model (None for the legacy one)."""
-    if not is_live_model(model_data):
-        return None
+    """The live_v2 model's LiveState, seeded with its static tables."""
     from src.live_features import LiveState, LiveTables, geom_from_worker_data
     live = LiveState(LiveTables.from_dict(model_data.get("live_tables")))
     live.geom = geom_from_worker_data(gtfs_data)
@@ -511,8 +509,6 @@ def _load_live_state(client, live) -> None:
 
 def _save_live_state(client, live) -> None:
     """Persist *live* for the next run. Never raises — losing it costs accuracy, not the feed."""
-    if live is None:
-        return
     try:
         now = time.time()
         live.prune(now)
@@ -638,8 +634,7 @@ def main() -> None:
     gtfs_data, model_data = _load_resources(client)
     trackers: dict = _load_tracker_state(client)
     live = _make_live_state(model_data, gtfs_data)
-    if live is not None:
-        _load_live_state(client, live)
+    _load_live_state(client, live)
 
     # Carry the collapse guard's baseline across the restart, so an upstream
     # outage cannot slip an empty feed through on this process's first pass.

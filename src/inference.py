@@ -17,7 +17,6 @@ Compatible with the data produced by scripts/export_worker_data.py:
   calendar_dates calendar_dates.txt rows (service_id, date, exception_type)
   ambiguous_shapes  set of shape_ids that self-intersect (out-and-back
                     routes, tram turnarounds) — see vehicle_dist_along
-  model          {route_to_int, baseline, learning_rate, trees}
 
 ``start_sec``, ``route_types`` and ``feed_timezone`` are recent additions;
 data exported before them simply disables the terminus schedule path below.
@@ -36,7 +35,7 @@ remaining_dist ≈ 0 and a near-zero ETA instead of a full segment time.
 No R2 / JS APIs — runs on standard CPython. The only consumer is the
 scripts/push_feed.py daemon; worker/worker.js serves the finished blob from R2
 and does not run inference, so numpy is fair game on the scoring hot path (see
-predict_rows).
+predict_live).
 """
 from __future__ import annotations
 
@@ -154,7 +153,7 @@ _DAY_SEC      = 24 * 3600
 _MISS = object()
 
 # Routes with confirmed trip-matching failures — excluded from training in
-# src/train.py and suppressed here so their bad predictions don't reach riders
+# src/train_live.py and suppressed here so their bad predictions don't reach riders
 # or pollute the quality scorer.
 _BAD_ROUTE_IDS: frozenset[str] = frozenset({"2299", "138"})
 
@@ -598,132 +597,25 @@ def infer_trip(
 # ML inference (pure-Python GBT tree traversal)
 # ---------------------------------------------------------------------------
 
-def _traverse_tree(nodes, feat):
-    """Scalar traversal of one exported tree. Defines the semantics the
-    vectorised path in predict_rows must reproduce exactly (go left on
-    ``<= threshold``); kept as the readable reference for that contract."""
-    idx = 0
-    while True:
-        f_idx, threshold, left, right, is_leaf, value = nodes[idx]
-        if is_leaf:
-            return value
-        idx = left if feat[f_idx] <= threshold else right
-
-
-def _flat_trees(model_data: dict) -> dict:
-    """Flatten every tree's nodes into shared arrays, once per loaded model.
-
-    Node indices are rebased onto a single concatenated array so all trees can
-    be walked at the same time, with ``roots`` holding each tree's entry point.
-    Memoised on the model dict: it is loaded once per daemon run and reused by
-    every push.
-    """
-    cached = model_data.get("_flat_trees")
-    if cached is not None:
-        return cached
-
-    f_idx, thr, left, right, is_leaf, value, roots = [], [], [], [], [], [], []
-    offset = 0
-    for nodes in model_data["trees"]:
-        roots.append(offset)
-        for fi, th, lf, rt, leaf, val in nodes:
-            # A leaf's feature index is never read by the scalar path; the
-            # vectorised one gathers it unconditionally, so pin it to a column
-            # that always exists and discard the result via the leaf mask.
-            f_idx.append(0 if leaf else int(fi))
-            thr.append(th)
-            left.append(offset + lf)
-            right.append(offset + rt)
-            is_leaf.append(leaf)
-            value.append(val)
-        offset += len(nodes)
-
-    flat = {
-        "f_idx":   _np.asarray(f_idx, dtype=_np.int32),
-        "thr":     _np.asarray(thr, dtype=_np.float64),
-        "left":    _np.asarray(left, dtype=_np.int32),
-        "right":   _np.asarray(right, dtype=_np.int32),
-        "is_leaf": _np.asarray(is_leaf, dtype=bool),
-        "value":   _np.asarray(value, dtype=_np.float64),
-        "roots":   _np.asarray(roots, dtype=_np.int32),
-    }
-    model_data["_flat_trees"] = flat
-    return flat
-
-
 # Rows walked at once. The working set is rows x trees, so this bounds peak
 # memory (~10 MB per 1000 rows at 1200 trees) without giving up vectorisation.
 _PREDICT_CHUNK_ROWS = 1024
 
 
-def predict_rows(model_data: dict, rows: list) -> list:
-    """Sum every tree's leaf value for every row.
-
-    Walks all trees for a chunk of rows simultaneously rather than one
-    (row, tree) pair at a time: the scalar version costs rows x trees x depth
-    interpreter steps, which caps how large a model the 10 s push loop can
-    afford — measured at 4.3x slower on a realistic push when trees went from
-    500x63 to 1200x127. Numerically identical to _traverse_tree, which the
-    sklearn-parity test pins.
-    """
-    if not rows:
-        return []
-
-    route_to_int = model_data["route_to_int"]
-    baseline     = model_data["baseline"]
-    flat         = _flat_trees(model_data)
-
-    feats = _np.empty((len(rows), len(rows[0])), dtype=_np.float64)
-    for i, row in enumerate(rows):
-        feats[i, 0] = route_to_int.get(str(row[0]), -1)
-        feats[i, 1:] = row[1:]
-
-    roots = flat["roots"]
-    f_idx, thr = flat["f_idx"], flat["thr"]
-    left, right, leaf_of, value = flat["left"], flat["right"], flat["is_leaf"], flat["value"]
-
-    n_trees = len(roots)
-    out = _np.empty(len(rows), dtype=_np.float64)
-    for start in range(0, len(rows), _PREDICT_CHUNK_ROWS):
-        chunk = feats[start:start + _PREDICT_CHUNK_ROWS]
-        n_chunk = len(chunk)
-
-        # One flat (row, tree) walker per pair, row-major.
-        state = _np.tile(roots, n_chunk)
-        row_of = _np.repeat(_np.arange(n_chunk), n_trees)
-        active = _np.arange(n_chunk * n_trees)
-
-        # Drop walkers as they land, instead of stepping every pair until the
-        # deepest one finishes: these trees are unbalanced (median depth 14
-        # against 6 for a balanced 63-leaf tree, max 27), so most pairs are
-        # done long before the last, and carrying them costs full-width passes.
-        while active.size:
-            at = state[active]
-            landed = leaf_of[at]
-            if landed.any():
-                active = active[~landed]
-                if not active.size:
-                    break
-                at = state[active]
-            # Same rule as the scalar path: <= threshold goes left.
-            go_right = chunk[row_of[active], f_idx[at]] > thr[at]
-            state[active] = _np.where(go_right, right[at], left[at])
-
-        # HistGradientBoosting leaf values already include the learning rate
-        # (shrinkage is applied at fit time), so they are summed raw.
-        out[start:start + n_chunk] = baseline + value[state].reshape(n_chunk, n_trees).sum(axis=1)
-
-    return out.tolist()
-
-
 def predict_live(model_data: dict, X) -> list:
     """Sum of leaf values for a ``live_v2`` model (see train_live.flatten_model).
 
-    Same vectorised walk as predict_rows, plus native categorical splits: the
-    leading ``len(cat_maps)`` columns hold raw category codes, mapped here to
-    the estimator's encoded categories (unknown -> NaN). NaN follows the
-    node's missing direction; an encoded category in the node's bitset goes
-    left. Numeric columns never carry NaN (missing live values are -1).
+    Walks all trees for a chunk of rows at once rather than one (row, tree)
+    pair at a time: the scalar version costs rows x trees x depth interpreter
+    steps, which caps how large a model the 10 s push loop can afford. Walkers
+    drop out as they land — the trees are unbalanced, so most pairs finish
+    long before the deepest. Leaf values already include the learning rate.
+
+    Native categorical splits: the leading ``len(cat_maps)`` columns hold raw
+    category codes, mapped here to the estimator's encoded categories
+    (unknown -> NaN). NaN follows the node's missing direction; an encoded
+    category in the node's bitset goes left. Numeric columns never carry NaN
+    (missing live values are -1).
     """
     X = _np.asarray(X, dtype=_np.float64)
     if not len(X):
@@ -774,10 +666,6 @@ def predict_live(model_data: dict, X) -> list:
             state[active] = _np.where(go_right, right[at], left[at])
         out[start:start + n_chunk] = baseline + value[state].reshape(n_chunk, n_trees).sum(axis=1)
     return out.tolist()
-
-
-def is_live_model(model_data: dict) -> bool:
-    return model_data.get("feature_set") == "live_v2"
 
 
 # Legacy feature row (build_features) -> its index, for the live_v2 base columns
@@ -1586,8 +1474,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     broke", which are indistinguishable from an empty feed alone.
 
     *live* is the daemon's src.live_features.LiveState (with ``geom`` set);
-    a ``live_v2`` model is served from it. Without one such a model still
-    predicts, from cold-start (all-missing) live features.
+    the model is served from it. Without one the model still predicts, from
+    cold-start (all-missing) live features.
     """
     vp_feed = gtfs_realtime_pb2.FeedMessage()
     vp_feed.ParseFromString(vp_bytes)
@@ -1642,8 +1530,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             flush=True,
         )
 
-    live_model = is_live_model(model_data)
-    if live_model and live is not None and live.geom is None:
+    if live is not None and live.geom is None:
         from src.live_features import geom_from_worker_data
         live.geom = geom_from_worker_data(gtfs_data)
     feed_t = float(feed_ts)
@@ -1660,7 +1547,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         trp = v.trip     if v.HasField("trip")     else None
         if pos is None:
             continue
-        if live_model and live is not None and pos.latitude and pos.longitude:
+        if live is not None and pos.latitude and pos.longitude:
             # Every entity, before any filter — exactly the rows the pipeline
             # writes to side/<day>.feed.parquet (src.snapshots._fetch_and_parse).
             live.observe_feed(
@@ -1721,7 +1608,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         )
         speed  = progress_speed(trackers, vid, trip_id, v_dist, float(feed_ts))
         still  = stationary_seconds(trackers, vid, trip_id, v_dist, float(feed_ts))
-        if live_model and live is not None:
+        if live is not None:
             live.observe_position(vid, trip_id, feed_t, v_dist, live.geom(trip_id))
 
         feature_rows = build_features(
@@ -1811,11 +1698,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 continue
             terminus_unc = _TERMINUS_MODEL_UNCERTAINTY_SEC
 
-        if live_model:
-            preds_sec = predict_live(model_data, build_features_live(
-                model_data, live, vid, trip_id, v_dist, feed_t, feature_rows, gtfs_data))
-        else:
-            preds_sec = predict_rows(model_data, [r[0] for r in feature_rows])
+        preds_sec = predict_live(model_data, build_features_live(
+            model_data, live, vid, trip_id, v_dist, feed_t, feature_rows, gtfs_data))
         model_preds = [
             {"stop_id": r[1], "stop_sequence": int(r[2]),
              "stops_ahead": int(r[0][2]),
