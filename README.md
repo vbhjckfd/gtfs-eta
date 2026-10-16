@@ -96,8 +96,7 @@ The worker also requires a Cloudflare secret:
 
 ```bash
 wrangler secret put GITHUB_TOKEN            # PAT with workflow scope
-wrangler secret put SENTRY_DSN              # optional — error reporting to Sentry
-wrangler secret put NEW_RELIC_LICENSE_KEY   # optional — telemetry to New Relic
+wrangler secret put NEW_RELIC_LICENSE_KEY   # optional — telemetry + errors to New Relic
 ```
 
 ### New Relic
@@ -105,10 +104,10 @@ wrangler secret put NEW_RELIC_LICENSE_KEY   # optional — telemetry to New Reli
 The New Relic Node APM agent cannot run in a Worker — it is CommonJS, spawns
 background harvest timers and reads Node internals that a V8 isolate does not
 have. So [worker/newrelic.js](worker/newrelic.js) posts custom events straight
-to the Event API over `fetch`, the same no-SDK approach as `sendSentryEvent`.
-Without the key, reporting is a no-op.
+to the Event API over `fetch`. Without the key, reporting is a no-op. Errors
+go there too: there is no Sentry anywhere in the project.
 
-Two event types, both tagged `service = gtfs-eta-worker` and stamped with
+Three event types, all tagged `service = gtfs-eta-worker` and stamped with
 `GIT_COMMIT`:
 
 - `GtfsEtaWorkerHealth` — one per uncached `/health` check (the response is
@@ -121,6 +120,10 @@ Two event types, both tagged `service = gtfs-eta-worker` and stamped with
 - `GtfsEtaWorkerCron` — one per cron fire: which `cron` matched, the `workflow`
   dispatched, whether the dispatch and the feed archive succeeded, `durationMs`.
   This is the only record that the 5-minute pipeline actually fired.
+- `GtfsEtaWorkerError` — a caught exception or a failed workflow dispatch:
+  `level`, `where` (e.g. `scheduled.dispatch:push-feed.yml`, `watchdog.alarm`,
+  `fetch`), `errorClass`, `message`, `stack`. A CPU-limit kill never reaches
+  it — the isolate dies before any handler runs; use `wrangler tail`.
 
 The push daemon reports the same way ([src/nr_events.py](src/nr_events.py),
 gated on the `NEW_RELIC_LICENSE_KEY` GitHub secret), tagged

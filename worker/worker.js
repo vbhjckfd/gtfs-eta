@@ -35,11 +35,10 @@
  * Required secret (set via `wrangler secret put GITHUB_TOKEN`):
  *   GITHUB_TOKEN — a GitHub PAT with the `workflow` scope.
  *
- * Optional secret (set via `wrangler secret put SENTRY_DSN`):
- *   SENTRY_DSN — enables exception reporting to Sentry via the envelope HTTP
- *   API (no SDK; see sendSentryEvent).  Every event is tagged
- *   service=gtfs-eta-worker so it's distinguishable in a Sentry project shared
- *   with other services.
+ * Optional secret (set via `wrangler secret put NEW_RELIC_LICENSE_KEY`):
+ *   NEW_RELIC_LICENSE_KEY — enables telemetry and error reporting to New Relic
+ *   (no SDK; see newrelic.js).  Errors are GtfsEtaWorkerError events tagged
+ *   service=gtfs-eta-worker.
  */
 
 import { DurableObject } from "cloudflare:workers";
@@ -60,10 +59,6 @@ const R2_PUBLIC_BASE = "https://eta.lad.lviv.ua/feed";
 // how good the live predictions really were.  These are immutable, small, and
 // expired by an R2 lifecycle rule (see docs/collector_rules.md).
 const PREDICTIONS_PREFIX = "predictions/";
-
-// This DSN is shared with other services (e.g. timetable-api-node); the
-// service tag below keeps the worker's events unmistakable in the issue stream.
-const SENTRY_SERVICE_TAG = "gtfs-eta-worker";
 
 // /health is layered:
 //   1. The feed must be *fresh* — the push pipeline (Cloudflare cron → GitHub
@@ -248,7 +243,7 @@ export function parseFeedStats(buf, targetStopId) {
  * stop_time_update and UTF-8-decodes every stop id on the way.  That walk
  * scales with the feed, so once the morning peak pushed it past Cloudflare's
  * CPU limit the 5-minute cron died *before* dispatchWorkflow, stalling the
- * publish pipeline with nothing in Sentry: the isolate is killed outright, so
+ * publish pipeline with no error reported: the isolate is killed outright, so
  * the handler's own error reporting never runs.
  *
  * Field 1 is the header and protobuf writers emit fields in order, so this
@@ -274,71 +269,26 @@ export function parseFeedTimestamp(buf) {
 }
 
 /**
- * POST a single event to Sentry's envelope API.  No-op without SENTRY_DSN.
- * Reporting must never break the worker, so all errors here are swallowed.
+ * One GtfsEtaWorkerError event to New Relic.  Never throws (see recordEvent).
+ *
+ *   SELECT * FROM GtfsEtaWorkerError SINCE 1 day ago
  */
-async function sendSentryEvent(env, fields) {
-  const dsn = env.SENTRY_DSN ?? "";
-  if (!dsn) return;
-  try {
-    // DSN: https://<public_key>@<host>/<project_id>
-    const [publicKey, hostPath] = dsn.split("://", 2)[1].split("@", 2);
-    const slash = hostPath.lastIndexOf("/");
-    const host = hostPath.slice(0, slash);
-    const projectId = hostPath.slice(slash + 1);
-    const envelopeUrl = `https://${host}/api/${projectId}/envelope/`;
-
-    const eventId = crypto.randomUUID().replaceAll("-", "");
-    const event = {
-      event_id: eventId,
-      timestamp: Date.now() / 1000,
-      platform: "javascript",
-      level: "error",
-      environment: env.SENTRY_ENVIRONMENT ?? "production",
-      server_name: SENTRY_SERVICE_TAG,
-      tags: { service: SENTRY_SERVICE_TAG },
-      ...fields,
-    };
-    if (env.SENTRY_RELEASE) event.release = env.SENTRY_RELEASE;
-
-    const body = [
-      JSON.stringify({ event_id: eventId, sent_at: new Date().toISOString() }),
-      JSON.stringify({ type: "event", content_type: "application/json" }),
-      JSON.stringify(event),
-    ].join("\n");
-
-    const resp = await fetch(envelopeUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-sentry-envelope",
-        "x-sentry-auth":
-          `Sentry sentry_version=7, sentry_key=${publicKey}, ` +
-          `sentry_client=${SENTRY_SERVICE_TAG}/1.0`,
-      },
-      body,
-    });
-    if (resp.status >= 300) {
-      console.error(`[sentry] envelope POST failed: HTTP ${resp.status}`);
-    }
-  } catch (reportExc) {
-    console.error(`[sentry] failed to report event: ${reportExc}`);
-  }
-}
-
 async function reportException(env, exc, where) {
-  await sendSentryEvent(env, {
-    exception: {
-      values: [{ type: exc?.name ?? "Error", value: String(exc?.message ?? exc) }],
-    },
-    extra: { where, stack: exc?.stack ?? "" },
+  await recordEvent(env, "GtfsEtaWorkerError", {
+    level: "error",
+    where,
+    errorClass: exc?.name ?? "Error",
+    message: String(exc?.message ?? exc).slice(0, 4000),
+    // NRDB rejects string attributes over 4 KB; keep the innermost frames.
+    stack: (exc?.stack ?? "").slice(0, 4000),
   });
 }
 
 async function reportMessage(env, message, where, level = "error") {
-  await sendSentryEvent(env, {
-    message: { formatted: message },
+  await recordEvent(env, "GtfsEtaWorkerError", {
     level,
-    extra: { where },
+    where,
+    message: String(message).slice(0, 4000),
   });
 }
 
@@ -388,7 +338,7 @@ async function archiveFeed(env) {
 /**
  * Trigger a GitHub Actions workflow via the REST dispatch API.  Used by the
  * cron handler for both push-feed.yml (every 5 min) and score-quality.yml
- * (daily).  A failed dispatch is surfaced to Sentry — it stalls whichever
+ * (daily).  A failed dispatch is reported to New Relic — it stalls whichever
  * pipeline it drives — but never throws back into the cron handler.
  */
 async function dispatchWorkflow(env, workflow) {
