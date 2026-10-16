@@ -145,6 +145,15 @@ def test_collapsed_pass_keeps_the_previous_blob(monkeypatch):
     assert "collapsed" in status["detail"]
 
 
+def test_collapsed_pass_reports_a_warning(monkeypatch):
+    events = []
+    monkeypatch.setattr(push_feed, "_report", lambda level, attrs: events.append((level, attrs)))
+    _run_push(monkeypatch, _FakeClient(), 500)
+    _run_push(monkeypatch, _FakeClient(), 5, {"vehicles_in": 300, "vehicles_stale": 300})
+    assert [(lvl, a["errorClass"]) for lvl, a in events] == [("warning", "FeedCollapse")]
+    assert "collapsed" in events[0][1]["message"]
+
+
 def test_recovery_publishes_again(monkeypatch):
     client = _FakeClient()
     _run_push(monkeypatch, client, 500)

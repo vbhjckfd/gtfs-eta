@@ -122,9 +122,23 @@ Two event types, both tagged `service = gtfs-eta-worker` and stamped with
   dispatched, whether the dispatch and the feed archive succeeded, `durationMs`.
   This is the only record that the 5-minute pipeline actually fired.
 
+The push daemon reports the same way ([src/nr_events.py](src/nr_events.py),
+gated on the `NEW_RELIC_LICENSE_KEY` GitHub secret), tagged
+`service = gtfs-eta-daemon` and stamped with the feed commit:
+
+- `GtfsEtaDaemonError` — `level = 'error'` for a failed push iteration
+  (`errorClass`, `message`, the last 4000 chars of `traceback`), and
+  `level = 'warning'` with `errorClass = 'FeedCollapse'` when the collapse
+  guard holds back a feed.
+- `GtfsEtaDaemonRun` — one per push-feed job: `pushes`, `failedPushes`,
+  `durationSec`. The only event a healthy run sends, so it doubles as the
+  daemon's heartbeat.
+
 ```sql
 SELECT max(ageSec) FROM GtfsEtaWorkerHealth TIMESERIES SINCE 1 day ago
 SELECT count(*) FROM GtfsEtaWorkerCron WHERE dispatched IS false SINCE 1 day ago
+SELECT count(*) FROM GtfsEtaDaemonError FACET level, errorClass SINCE 1 day ago
+SELECT sum(failedPushes) FROM GtfsEtaDaemonRun TIMESERIES SINCE 1 day ago
 ```
 
 The account is in New Relic's **EU** region: ingest goes to
