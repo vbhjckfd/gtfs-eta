@@ -23,8 +23,7 @@ stop_sequence, route and target stop (top 254) as native categoricals, the
 Usage:
     python -m src.train_live                       # latest 21 days, last 20% held out
     python -m src.train_live --days-back 28
-    python -m src.train_live --train 2026-09-19..2026-09-30 --test 2026-10-01..2026-10-03 \\
-        --compare-baseline                         # protocol check vs the legacy recipe
+    python -m src.train_live --train 2026-09-19..2026-09-30 --test 2026-10-01..2026-10-03 --no-save
 """
 
 from __future__ import annotations
@@ -41,7 +40,6 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src import train as legacy
 from src.features import BASE_FEATURE_COLS, TARGET_COL, apply_priors, compute_features_for_training
 from src.live_features import (
     HIST_DAYS, LIVE_COLS, LiveTables, derived_paths, geom_from_gtfs, replay_day,
@@ -50,9 +48,13 @@ from src.live_features import (
 
 TRAIN_DIR = Path(os.environ.get("GTFS_ETA_TRAIN_DIR", "data/training"))
 FEAT_DIR = Path(os.environ.get("GTFS_ETA_LIVE_FEAT_DIR", "data/features_live"))
-MODEL_DIR = legacy.MODEL_DIR
+MODEL_DIR = Path(__file__).parent.parent / "models"
 MODEL_PATH = MODEL_DIR / "eta_live.joblib"
 TABLES_PATH = MODEL_DIR / "live_tables.joblib"
+# Read by the export: the route×hour priors the base features were trained
+# with, and the held-out per-horizon bands (cold-start uncertainty fallback).
+PRIORS_PATH = MODEL_DIR / "route_hour_priors.joblib"
+UNCERTAINTY_PATH = MODEL_DIR / "uncertainty.joblib"
 
 FEATURE_SET = "live_v2"
 
@@ -73,6 +75,7 @@ MODEL_COLS = CAT_COLS + BASE_COLS + MODEL_LIVE_COLS
 N_STOP_CODES = 254          # top target stops get their own category, the rest share 254
 
 DEFAULT_DAYS_BACK = 21
+TEST_FRACTION = 0.2
 # Share of the snapshots in each day's parquet that become training rows. The
 # pipeline already keeps a sample of snapshots (run_pipeline --keep-pct), so
 # the share of *all* snapshots is the product of the two.
@@ -80,6 +83,15 @@ DEFAULT_SNAP_FRAC = 0.3
 TEST_SNAP_FRAC = 0.3
 
 _PASSTHROUGH = ("vehicle_id", "trip_id", "stop_id", "dist_along_m", "stop_dist_along_m", "snapshot_ts")
+
+# Routes with confirmed trip-matching failures (issue #2): their training rows
+# have bad anchors (vehicle matched to wrong trip/direction) that poison the
+# model. Exclude until the pipeline-level trip-matching filter is tightened.
+BAD_ROUTE_IDS: frozenset[str] = frozenset({"2299", "138"})
+
+# A horizon needs at least this many held-out rows before its error estimate is
+# trustworthy enough to publish as an uncertainty band.
+_MIN_HORIZON_SUPPORT = 200
 
 HGBT_PARAMS = dict(
     loss="absolute_error",
@@ -282,7 +294,7 @@ def load_days(days: list[str], frac: float, max_rows: int | None = None, seed: i
     del pieces
     df = df.dropna(subset=[TARGET_COL] + [c for c in BASE_FEATURE_COLS if c in df.columns])
     df = df[df[TARGET_COL].between(0, 3600)]
-    df = df[~df["route_id"].astype(str).isin(legacy._BAD_ROUTE_IDS)]
+    df = df[~df["route_id"].astype(str).isin(BAD_ROUTE_IDS)]
     if max_rows and len(df) > max_rows:
         print(f"  sampling {max_rows:,} of {len(df):,} rows (GTFS_ETA_LIVE_MAX_ROWS)", flush=True)
         df = df.sample(n=max_rows, random_state=seed)
@@ -292,6 +304,59 @@ def load_days(days: list[str], frac: float, max_rows: int | None = None, seed: i
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
+
+def build_sample_weights(df: pd.DataFrame) -> np.ndarray:
+    """Up-weight underrepresented hours to address time-of-day bias (issue #2).
+
+    Hours are UTC.  Lviv is UTC+2/+3, so:
+      UTC 14-16 ≈ local 17-19 (evening peak, congestion underestimated)
+      UTC 18-20 ≈ local 21-23 (late night, very few training rows)
+    """
+    w = np.ones(len(df), dtype=float)
+    hour = df["hour"].to_numpy()
+    w[(hour >= 14) & (hour <= 16)] = 1.5   # evening peak
+    w[(hour >= 18) | (hour <= 3)] = 2.0    # late night / early morning
+    return w
+
+
+def compute_route_hour_priors(train_df: pd.DataFrame) -> dict:
+    """Per-(route_id, hour) median observed speed and travel-time-per-stop.
+
+    travel-time-per-stop = seconds_to_arrival / stops_ahead — includes dwell,
+    signal delays, and speed variation; the trees use it to correct the
+    long-horizon optimism that pure-speed extrapolation creates.
+
+    Only rows with known speed are used for the speed median; all rows are used
+    for the per-stop time since low/unknown speed still has a valid target.
+    """
+    known_speed = train_df[train_df["progress_speed_mps"] > 0]
+    tps = train_df[TARGET_COL] / train_df["stops_ahead"].clip(lower=1)
+
+    speed_by_rh = (
+        known_speed.groupby(["route_id", "hour"])["progress_speed_mps"]
+        .median()
+        .rename("speed")
+    )
+    # Median per-stop dwell.  The p65 bump tried in 7e3abdd paired with the
+    # (stops_ahead-1) cut and together overshot into systematic optimism
+    # (issue #5); reverted to the median that calibrated near-zero in f5ed3f2.
+    tps_by_rh = tps.groupby([train_df["route_id"], train_df["hour"]]).median().rename("tps")
+    by_rh = pd.concat([speed_by_rh, tps_by_rh], axis=1).reset_index()
+
+    g_speed = float(known_speed["progress_speed_mps"].median())
+    g_tps   = float(tps.median())
+
+    lookup = {
+        (str(row["route_id"]), int(row["hour"])): (
+            float(row["speed"]) if pd.notna(row.get("speed")) else g_speed,
+            float(row["tps"])   if pd.notna(row.get("tps"))   else g_tps,
+        )
+        for _, row in by_rh.iterrows()
+    }
+    print(f"  Priors: {len(lookup)} route×hour entries  "
+          f"(global: speed={g_speed:.1f} m/s, tps={g_tps:.0f}s)")
+    return {"lookup": lookup, "global_speed": g_speed, "global_tps": g_tps}
+
 
 def encode(df: pd.DataFrame, route_codes: dict, stop_codes: dict) -> np.ndarray:
     """Feature matrix in MODEL_COLS order (df must already carry the priors)."""
@@ -307,14 +372,14 @@ def fit(train_df: pd.DataFrame, seed: int = 42) -> dict:
     """Fit on *train_df* (raw feature rows); returns the model bundle."""
     from sklearn.ensemble import HistGradientBoostingRegressor
 
-    priors = legacy._compute_route_hour_priors(train_df)
+    priors = compute_route_hour_priors(train_df)
     tr = apply_priors(train_df, priors)
     route_codes = {r: i for i, r in enumerate(sorted(tr["route_id"].astype(str).unique()))}
     top = tr["stop_id"].astype(str).value_counts().index[:N_STOP_CODES]
     stop_codes = {s: i for i, s in enumerate(top)}
     X = encode(tr, route_codes, stop_codes)
     y = tr[TARGET_COL].to_numpy(dtype=float)
-    w = legacy._build_sample_weights(tr)
+    w = build_sample_weights(tr)
     model = HistGradientBoostingRegressor(categorical_features=[0, 1], random_state=seed, **HGBT_PARAMS)
     t0 = time.monotonic()
     model.fit(X, y, sample_weight=w)
@@ -364,23 +429,27 @@ def _fmt(m: dict) -> str:
             f"sa5 {sa.get(5, float('nan')):.1f}  sa10 {sa.get(10, float('nan')):.1f}")
 
 
-def _baseline(train_df: pd.DataFrame, test_df: pd.DataFrame, seed: int) -> np.ndarray:
-    """The legacy production recipe (src/train.py) on the same rows."""
-    from src.features import FEATURE_COLS
-    priors = legacy._compute_route_hour_priors(train_df)
-    tr = apply_priors(train_df, priors)
-    te = apply_priors(test_df, priors)
-    pipe = legacy._build_pipeline()
-    pipe.set_params(model__random_state=seed)
-    t0 = time.monotonic()
-    pipe.fit(tr[FEATURE_COLS], tr[TARGET_COL].astype(float),
-             model__sample_weight=legacy._build_sample_weights(tr))
-    print(f"  baseline fit: {pipe.named_steps['model'].n_iter_} trees ({time.monotonic() - t0:.0f}s)", flush=True)
-    return pipe.predict(te[FEATURE_COLS])
-
-
 def uncertainty_table(test_df: pd.DataFrame, pred: np.ndarray) -> dict:
-    return legacy._compute_uncertainty(test_df, test_df[TARGET_COL].to_numpy(dtype=float), pred)
+    """Per-horizon ± band (seconds) for the served predictions.
+
+    Uses held-out absolute error grouped by ``stops_ahead`` — the model is
+    trained with absolute_error loss, so its mean-absolute error is the natural,
+    self-consistent confidence band to publish as GTFS-RT
+    StopTimeEvent.uncertainty. Horizons with too few test rows are dropped;
+    inference reuses the widest measured band beyond the largest key.
+    """
+    resid = np.abs(test_df[TARGET_COL].to_numpy(dtype=float) - np.asarray(pred, dtype=float))
+    work = pd.DataFrame({"stops_ahead": test_df["stops_ahead"].to_numpy(), "resid": resid})
+    table: dict[int, int] = {}
+    for horizon, sub in work.groupby("stops_ahead"):
+        if len(sub) >= _MIN_HORIZON_SUPPORT:
+            table[int(horizon)] = int(round(float(sub["resid"].mean())))
+    if table:
+        bands = ", ".join(f"{h}:{s}s" for h, s in sorted(table.items()))
+        print(f"  Uncertainty (per-horizon MAE): {bands}")
+    else:
+        print("  Uncertainty: insufficient test rows per horizon — none saved")
+    return table
 
 
 # ---------------------------------------------------------------------------
@@ -398,8 +467,6 @@ def main(argv=None) -> dict:
     ap.add_argument("--test-snap-frac", type=float, default=TEST_SNAP_FRAC)
     ap.add_argument("--parallel", type=int, default=1)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--compare-baseline", action="store_true",
-                    help="also fit the legacy recipe on the same rows and judge the protocol")
     ap.add_argument("--no-save", action="store_true", help="evaluate only, write no model files")
     ap.add_argument("--results", help="append a JSON line with the metrics to this file")
     args = ap.parse_args(argv)
@@ -412,7 +479,7 @@ def main(argv=None) -> dict:
         days = ready_days()[-args.days_back:]
         if len(days) < 5:
             raise SystemExit(f"only {len(days)} ready day(s) under {TRAIN_DIR} — need >= 5")
-        n_test = max(1, int(round(len(days) * legacy.TEST_FRACTION)))
+        n_test = max(1, int(round(len(days) * TEST_FRACTION)))
         train_days, test_days = days[:-n_test], days[-n_test:]
     print(f"Train days {train_days[0]}..{train_days[-1]} ({len(train_days)}), "
           f"test {test_days[0] + '..' + test_days[-1] if test_days else '-'} ({len(test_days)})", flush=True)
@@ -436,27 +503,6 @@ def main(argv=None) -> dict:
         result["live_v2"] = m
         print(f"live_v2   {_fmt(m)}", flush=True)
         unc = uncertainty_table(test_df, pred)
-        if args.compare_baseline:
-            bpred = _baseline(train_df, test_df, args.seed)
-            b = metrics(test_df, bpred)
-            result["baseline"] = b
-            print(f"baseline  {_fmt(b)}", flush=True)
-            worst = max((m["mae_by_stops_ahead"][k] - b["mae_by_stops_ahead"][k]) / b["mae_by_stops_ahead"][k]
-                        for k in b["mae_by_stops_ahead"] if k in m["mae_by_stops_ahead"])
-            d_mae = (m["mae"] - b["mae"]) / b["mae"]
-            result["judge"] = {
-                "mae_change_pct": 100 * d_mae,
-                "p90_change_pct": 100 * (m["p90_ae"] - b["p90_ae"]) / b["p90_ae"],
-                "worst_bucket_change_pct": 100 * worst,
-                "wins": bool(d_mae <= -0.03 and m["p90_ae"] <= b["p90_ae"] and worst <= 0.05),
-            }
-            print("judge:", json.dumps(result["judge"]), flush=True)
-            for k in sorted(m["mae_by_stops_ahead"]):
-                print(f"  sa{k:>2}: baseline {b['mae_by_stops_ahead'][k]:6.1f}  live_v2 {m['mae_by_stops_ahead'][k]:6.1f}")
-            for d in m["mae_by_day"]:
-                print(f"  {d}: baseline {b['mae_by_day'][d]:6.1f}  live_v2 {m['mae_by_day'][d]:6.1f}  n {m['n_by_day'][d]:,}")
-            print("  worst routes baseline:", b["worst_routes"])
-            print("  worst routes live_v2: ", m["worst_routes"])
 
     if not args.no_save:
         last = (test_days or train_days)[-1]
@@ -469,9 +515,9 @@ def main(argv=None) -> dict:
         joblib.dump(tables.to_dict(), TABLES_PATH)
         # The export reads these two for every model: the route×hour priors the
         # base features were trained with, and the held-out per-horizon bands.
-        joblib.dump(bundle["priors"], legacy.PRIORS_PATH)
+        joblib.dump(bundle["priors"], PRIORS_PATH)
         if unc:
-            joblib.dump(unc, legacy.UNCERTAINTY_PATH)
+            joblib.dump(unc, UNCERTAINTY_PATH)
         print(f"Saved {MODEL_PATH}, {TABLES_PATH} ({len(tables.hist_k):,} links, "
               f"{len(tables.dwell):,} dwell locations), priors, uncertainty", flush=True)
 

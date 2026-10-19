@@ -470,8 +470,9 @@ class TestBiasAccumulation:
 
     def test_fingerprint_tracks_the_trees_only(self):
         fp = self._mod()._model_fingerprint
-        a = {"baseline": 1.0, "learning_rate": 0.1, "trees": [{"v": [1, 2]}]}
-        b = {"baseline": 1.0, "learning_rate": 0.1, "trees": [{"v": [1, 3]}]}
+        import numpy as np
+        a = {"baseline": 1.0, "flat": {"value": np.array([1.0, 2.0])}}
+        b = {"baseline": 1.0, "flat": {"value": np.array([1.0, 3.0])}}
         assert fp(a) == fp(dict(a, bias_by_horizon={1: 84}))   # bands are not the model
         assert fp(a) != fp(b)
 

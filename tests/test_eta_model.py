@@ -288,6 +288,23 @@ def _compact_data(gtfs: FakeGTFS, route_type: int | None = None,
     return data
 
 
+def _constant_model(seconds: float) -> dict:
+    """A live_v2 serving dict with no trees: predicts *seconds* for every stop."""
+    i32, f64, b = np.int32, np.float64, bool
+    return {
+        "feature_set": "live_v2",
+        "route_codes": {}, "stop_codes": {},
+        "cat_maps": [np.zeros(0), np.zeros(0)],
+        "baseline": seconds,
+        "flat": {
+            "roots": np.zeros(0, i32), "f_idx": np.zeros(0, i32), "thr": np.zeros(0, f64),
+            "left": np.zeros(0, i32), "right": np.zeros(0, i32), "is_leaf": np.zeros(0, b),
+            "value": np.zeros(0, f64), "miss_left": np.zeros(0, b), "is_cat": np.zeros(0, b),
+            "bitset": np.zeros(0, i32), "bits": np.zeros((0, 8), np.uint32),
+        },
+    }
+
+
 class TestCompactInference:
     def test_vehicle_dist_along(self, gtfs):
         data = _compact_data(gtfs)
@@ -391,64 +408,6 @@ class TestCompactInference:
 # ---------------------------------------------------------------------------
 # Exported-tree parity with sklearn
 # ---------------------------------------------------------------------------
-
-class TestTreeExportParity:
-    def test_predict_rows_matches_sklearn_predict(self):
-        """The compact tree traversal must reproduce sklearn's predict exactly.
-
-        Regression: HistGradientBoosting leaf values already include the
-        learning rate (shrinkage is applied at fit time); multiplying by it
-        again during traversal collapsed every prediction to ≈ baseline.
-        """
-        import os
-        # export_worker_data reads R2 credentials at import time
-        for var in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
-            os.environ.setdefault(var, "test-dummy")
-        from scripts.export_worker_data import _extract_trees
-        from src.inference import predict_rows
-        from src.train import _build_pipeline
-
-        rng = np.random.default_rng(42)
-        n = 2000
-        stops_ahead    = rng.integers(1, 11, n)
-        remaining_dist = rng.uniform(0, 5000, n)
-        speed_mps      = rng.uniform(-1, 15, n)
-        hist_speed     = rng.uniform(3, 10, n)
-        hist_tps       = rng.uniform(20, 80, n)
-        eff_speed      = np.where(speed_mps > 0, speed_mps, hist_speed)
-        df = pd.DataFrame({
-            "route_id": rng.choice(["10", "25", "117"], n),
-            "stop_sequence": rng.integers(1, 60, n),
-            "stops_ahead": stops_ahead,
-            "hour": rng.integers(5, 23, n),
-            "day_of_week": rng.integers(0, 7, n),
-            "month": rng.integers(1, 13, n),
-            "is_weekend": rng.integers(0, 2, n),
-            "is_holiday": np.zeros(n, dtype=int),
-            "remaining_dist_m": remaining_dist,
-            "progress_speed_mps": speed_mps,
-            "stops_remaining": rng.integers(1, 40, n),
-            "trip_progress_frac": rng.uniform(0, 1, n),
-            "dist_per_stop_m": remaining_dist / np.maximum(1, stops_ahead),
-            "speed_eta_warm": remaining_dist / np.maximum(eff_speed, 0.1),
-            "hist_speed_mps": hist_speed,
-            "hist_travel_time_est": stops_ahead * hist_tps,
-            # Mostly moving, with a stopped minority — the real shape of this
-            # feature, so the traversal is exercised on both sides of its splits.
-            "stationary_sec": np.where(rng.random(n) < 0.1, rng.uniform(0, 2400, n), 0.0),
-        })
-        y = (df["remaining_dist_m"] / 6.0 + rng.normal(0, 10, n)).clip(0)
-
-        pipeline = _build_pipeline()
-        pipeline.set_params(model__max_iter=25, model__early_stopping=False)
-        pipeline.fit(df[FEATURE_COLS], y)
-
-        tree_data = _extract_trees(pipeline)
-        sample = df[FEATURE_COLS].head(100)
-        compact = predict_rows(tree_data, sample.values.tolist())
-        expected = pipeline.predict(sample)
-        np.testing.assert_allclose(compact, expected, rtol=1e-9, atol=1e-6)
-
 
 # ---------------------------------------------------------------------------
 # Schedule interpolation helper
@@ -707,7 +666,7 @@ class TestNotDepartedGate:
     def _model(self):
         # Constant +300 s predictor (no trees), so any emitted prediction lands
         # in the future and survives encoding — lets us count gated vehicles.
-        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+        return _constant_model(300.0)
 
     def _entities(self, vp):
         from google.transit import gtfs_realtime_pb2
@@ -747,7 +706,7 @@ class TestTerminusSchedule:
     TRAM, TROLLEYBUS, BUS = 0, 11, 3
 
     def _model(self):
-        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+        return _constant_model(300.0)
 
     def _data(self, gtfs, route_type, depart_in_sec, now):
         """Compact data whose trip departs *depart_in_sec* from *now*."""
@@ -968,7 +927,7 @@ class TestUncertainty:
 
 class TestVehiclePositions:
     def _model(self):
-        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+        return _constant_model(300.0)
 
     def test_run_inference_returns_both_feeds(self, gtfs):
         from google.transit import gtfs_realtime_pb2
@@ -1114,7 +1073,7 @@ class TestSkewedFeedInference:
     what it saw so /health can name the upstream as the cause."""
 
     def _model(self):
-        return {"route_to_int": {ROUTE_ID: 0}, "baseline": 300.0, "trees": []}
+        return _constant_model(300.0)
 
     def _vp(self, now, *, vehicle_age):
         from google.transit import gtfs_realtime_pb2

@@ -3,7 +3,7 @@ Export GTFS static data + trained model to R2 for the Cloudflare Worker.
 
 Produces two R2 objects:
   worker/gtfs_worker_data.pkl  — compact GTFS dict (shapes, trips, stops, distances)
-  worker/eta_pipeline.pkl      — sklearn Pipeline (pickle, joblib-free)
+  worker/eta_pipeline.pkl      — live_v2 model as flat tree arrays (src/train_live.flatten_model)
 
 Usage:
     python scripts/export_worker_data.py
@@ -17,15 +17,13 @@ import io
 import os
 import pickle
 from datetime import date, timedelta
-from pathlib import Path
 
 import boto3
 import joblib
 from dotenv import load_dotenv
 
 from src.gtfs_static import get_gtfs
-from src.train import MODEL_PATH, PRIORS_PATH, UNCERTAINTY_PATH
-from src.train_live import MODEL_PATH as LIVE_MODEL_PATH, TABLES_PATH as LIVE_TABLES_PATH
+from src.train_live import MODEL_PATH, PRIORS_PATH, TABLES_PATH, UNCERTAINTY_PATH
 
 load_dotenv()
 
@@ -174,25 +172,12 @@ def _starting_bias(live_model: dict, new_trees: bool) -> tuple[dict | None, str 
 
 def _model_fingerprint(tree_data: dict) -> str:
     """Stable digest of the serving trees, to tell a real retrain from a re-export."""
-    if tree_data.get("feature_set") == "live_v2":
-        h = hashlib.sha256(repr(tree_data.get("baseline")).encode())
-        for k in sorted(tree_data["flat"]):
-            h.update(k.encode())
-            h.update(tree_data["flat"][k].tobytes())
-        return h.hexdigest()
-    payload = pickle.dumps(
-        (tree_data.get("baseline"), tree_data.get("learning_rate"), tree_data.get("trees")),
-        protocol=4,
-    )
-    return hashlib.sha256(payload).hexdigest()
+    h = hashlib.sha256(repr(tree_data.get("baseline")).encode())
+    for k in sorted(tree_data["flat"]):
+        h.update(k.encode())
+        h.update(tree_data["flat"][k].tobytes())
+    return h.hexdigest()
 
-
-# Which local model to export. "auto" prefers the live_v2 model
-# (src/train_live.py) when one has been trained, else the legacy pipeline.
-# The live_v2 format needs the daemon from the same commit (src/inference
-# predict_live + the live state in scripts/push_feed.py): an older daemon
-# cannot read it.
-EXPORT_MODEL = os.environ.get("EXPORT_MODEL", "auto")
 
 # Keys a live_v2 export carries besides the shared calibration fields.
 _LIVE_MODEL_KEYS = ("feature_set", "cols", "route_codes", "stop_codes", "n_stop_codes",
@@ -202,24 +187,20 @@ _LIVE_MODEL_KEYS = ("feature_set", "cols", "route_codes", "stop_codes", "n_stop_
 
 def _local_tree_data() -> dict | None:
     """Serving dict for the locally trained model, or None when there is none."""
-    use_live = EXPORT_MODEL == "live" or (EXPORT_MODEL == "auto" and LIVE_MODEL_PATH.exists())
-    if use_live:
-        from src.train_live import flatten_model
-        bundle = joblib.load(LIVE_MODEL_PATH)
-        data = flatten_model(bundle)
-        data["live_tables"] = joblib.load(LIVE_TABLES_PATH)
-        data["trained_through"] = bundle.get("trained_through")
-        data["tables_through"] = bundle.get("tables_through")
-        n_nodes = len(data["flat"]["value"])
-        print(f"  live_v2 model: {data['n_trees']} trees, {n_nodes:,} nodes, "
-              f"{len(data['route_codes'])} routes, {len(data['live_tables'].get('hist_k', {})):,} "
-              f"links, {len(data['live_tables'].get('dwell', {})):,} dwell locations; "
-              f"trained through {data['trained_through']}, tables through {data['tables_through']}")
-        return data
-    model_path = Path(MODEL_PATH)
-    if model_path.exists():
-        return _extract_trees(joblib.load(model_path))
-    return None
+    if not MODEL_PATH.exists():
+        return None
+    from src.train_live import flatten_model
+    bundle = joblib.load(MODEL_PATH)
+    data = flatten_model(bundle)
+    data["live_tables"] = joblib.load(TABLES_PATH)
+    data["trained_through"] = bundle.get("trained_through")
+    data["tables_through"] = bundle.get("tables_through")
+    n_nodes = len(data["flat"]["value"])
+    print(f"  live_v2 model: {data['n_trees']} trees, {n_nodes:,} nodes, "
+          f"{len(data['route_codes'])} routes, {len(data['live_tables'].get('hist_k', {})):,} "
+          f"links, {len(data['live_tables'].get('dwell', {})):,} dwell locations; "
+          f"trained through {data['trained_through']}, tables through {data['tables_through']}")
+    return data
 
 
 def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
@@ -346,68 +327,6 @@ def build_gtfs_worker_data(gtfs, existing_priors: dict | None = None) -> dict:
     return data
 
 
-def _extract_trees(pipeline) -> dict:
-    """
-    Convert sklearn Pipeline → plain-Python tree dict for Pyodide inference.
-
-    Schema:
-      route_to_int  : {route_id_str: int_index}   (OrdinalEncoder mapping)
-      baseline      : float                        (_baseline_prediction)
-      learning_rate : float
-      trees         : list of list of 6-tuples
-                      (feat_idx, threshold, left, right, is_leaf, value)
-
-    Feature vector order after ColumnTransformer (matches FEATURE_COLS in
-    src/features.py — keep in sync with build_features in src/inference.py):
-      0  route_id (encoded)
-      1  stop_sequence
-      2  stops_ahead
-      3  hour
-      4  day_of_week
-      5  month
-      6  is_weekend
-      7  is_holiday
-      8  remaining_dist_m
-      9  progress_speed_mps
-      10 stops_remaining
-      11 trip_progress_frac
-      12 dist_per_stop_m
-      13 speed_eta_warm       (remaining_dist / effective_speed, warm-started)
-      14 hist_speed_mps       (route+hour historical median speed)
-      15 hist_travel_time_est (stops_ahead * hist seconds-per-stop, dwell-aware)
-      16 stationary_sec       (seconds since the vehicle last advanced >25 m)
-    """
-    prep = pipeline.named_steps["prep"]
-    model = pipeline.named_steps["model"]
-
-    encoder = prep.transformers_[0][1]
-    route_to_int = {str(r): i for i, r in enumerate(encoder.categories_[0])}
-
-    baseline = float(model._baseline_prediction.flat[0])
-    learning_rate = float(model.learning_rate)
-
-    trees = []
-    for estimators_at_iter in model._predictors:
-        predictor = estimators_at_iter[0]
-        nodes = predictor.nodes
-        trees.append([
-            (int(n["feature_idx"]), float(n["num_threshold"]),
-             int(n["left"]), int(n["right"]),
-             bool(n["is_leaf"]), float(n["value"]))
-            for n in nodes
-        ])
-
-    n_trees = len(trees)
-    n_nodes = sum(len(t) for t in trees)
-    print(f"  {n_trees} trees, {n_nodes} nodes, {len(route_to_int)} routes")
-    return {
-        "route_to_int": route_to_int,
-        "baseline": baseline,
-        "learning_rate": learning_rate,
-        "trees": trees,
-    }
-
-
 def main():
     client = _make_client()
 
@@ -473,7 +392,7 @@ def main():
             new_trees = True
     else:
         # refresh-gtfs.yml (daily CI) checks out the repo only — it never has a
-        # local models/eta_pipeline.joblib (gitignored, only produced by a real
+        # local models/eta_live.joblib (gitignored, only produced by a real
         # `make train`). This used to `return` here, so every CI run silently
         # skipped the model upload entirely — the live-calibrated bands below
         # (uncertainty, bias) never refreshed in CI at all, only whenever
@@ -483,12 +402,7 @@ def main():
         # existing_priors above.
         try:
             existing_model = live_model or {}
-            keys = (
-                [k for k in _LIVE_MODEL_KEYS if k in existing_model]
-                if existing_model.get("feature_set") == "live_v2"
-                else ("route_to_int", "baseline", "learning_rate", "trees")
-            )
-            tree_data = {k: existing_model[k] for k in keys}
+            tree_data = {k: existing_model[k] for k in _LIVE_MODEL_KEYS if k in existing_model}
             model_since = existing_model.get("model_since")
             fingerprint = existing_model.get("model_fingerprint") or _model_fingerprint(tree_data)
             print("  No local model — reusing trees already live "

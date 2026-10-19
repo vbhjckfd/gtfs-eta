@@ -20,7 +20,7 @@ from google.transit import gtfs_realtime_pb2
 # e.g. "29734_3_1".  Any other format means our inference produced garbage.
 _LVIV_TRIP_ID_RE = re.compile(r"^\d+_\d+_\d+$")
 
-# Worker caps upcoming stops per trip (src/predict.py: MAX_STOPS_AHEAD).
+# Worker caps upcoming stops per trip (src/inference.py: MAX_STOPS_AHEAD).
 MAX_STOPS_AHEAD = 10
 
 _NO_DATA = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.NO_DATA

@@ -1,10 +1,10 @@
 /**
  * New Relic custom-event reporting over the raw Event API.
  *
- * Same reasoning as sendSentryEvent in worker.js: no SDK.  The New Relic Node
- * APM agent cannot run in a Worker at all — it is CommonJS, spawns background
- * harvest timers and reads Node internals that do not exist in a V8 isolate —
- * so this posts custom events directly over HTTP.
+ * No SDK.  The New Relic Node APM agent cannot run in a Worker at all — it is
+ * CommonJS, spawns background harvest timers and reads Node internals that do
+ * not exist in a V8 isolate — so this posts custom events directly over HTTP.
+ * worker.js also reports its errors this way (GtfsEtaWorkerError).
  *
  * Events land in NRDB as their own eventType and are queryable by NRQL, e.g.
  *   SELECT count(*) FROM GtfsEtaWorkerHealth FACET status SINCE 6 hours ago
@@ -12,8 +12,7 @@
  *
  * Optional secret (set via `wrangler secret put NEW_RELIC_LICENSE_KEY`):
  *   NEW_RELIC_LICENSE_KEY — the 40-char ingest licence key (starts eu01xx for
- *   this account), NOT an NRAK-... user API key.  Without it reporting is off,
- *   exactly like SENTRY_DSN gates Sentry.
+ *   this account), NOT an NRAK-... user API key.  Without it reporting is off.
  */
 
 // The account is in New Relic's EU region, so ingest must go to the EU
@@ -23,7 +22,7 @@ const EVENT_API_HOST = "https://insights-collector.eu01.nr-data.net";
 const ACCOUNT_ID = "3352365";
 
 // Tags every event, so this worker stays distinguishable in an account shared
-// with timetable-api-node and timetable-pulse (cf. SENTRY_SERVICE_TAG).
+// with timetable-api-node and timetable-pulse.
 const SERVICE_TAG = "gtfs-eta-worker";
 
 /**

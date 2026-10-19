@@ -591,8 +591,8 @@ def _worst_routes(joined: pd.DataFrame, top: int = 8, min_n: int = 50) -> list[d
 
     Each entry also carries its own by_stops_ahead breakdown: issue #5's
     regression was a horizon-growing bias hiding inside an unremarkable overall
-    number, so the worst routes get the same per-horizon check the offline
-    validator (validate_horizon_bias.py) runs — but live, per-route, every day.
+    number, so the worst routes get a per-horizon check — live, per-route,
+    every day.
     """
     rows = []
     for route, g in joined.groupby("route_id", observed=True):

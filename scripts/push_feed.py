@@ -24,6 +24,7 @@ Environment (read from .env):
     FEED_KEY        (default: feed/trip_updates.pb)
     STATUS_KEY      (default: feed/status.json)
     GTFS_RT_URL     upstream vehicle-position feed
+    NEW_RELIC_LICENSE_KEY  optional — errors to New Relic (src/nr_events.py)
 """
 
 from __future__ import annotations
@@ -42,12 +43,12 @@ sys.path.insert(0, ".")
 
 import boto3
 import requests
-import sentry_sdk
 from dotenv import load_dotenv
 from google.protobuf.message import DecodeError
 from google.transit import gtfs_realtime_pb2
 
-from src.inference import is_live_model, run_inference
+from src.inference import run_inference
+from src.nr_events import exception_attributes, record_event
 
 load_dotenv()
 
@@ -149,6 +150,11 @@ LIVE_STATE_MAX_AGE_SEC = 3 * 3600
 COLLAPSE_MIN_PREV_ENTITIES = 20  # below this the ratio is noise (night service)
 COLLAPSE_RATIO = 0.3
 
+# The stop /health checks for predicted arrivals (stop code 60, the busiest in
+# Lviv). Must match HEALTH_CHECK_STOP_ID in worker/worker.js; the worker only
+# trusts the stamped count when the stamped id matches its own.
+HEALTH_STOP_ID = os.environ.get("HEALTH_STOP_ID", "4577")
+
 # How stale the served feed may be and still seed the collapse guard at startup
 # (see _load_prev_entities). This bounds both sides of one tradeoff: a longer
 # window protects a longer upstream outage, and is also the longest a wrongly
@@ -161,9 +167,6 @@ COLLAPSE_SEED_MAX_AGE_SEC = 900
 # Seeded from the served feed at startup, because this process is replaced every
 # ~5.5 min and a None baseline publishes anything (see _should_publish).
 _last_published_entities: int | None = None
-
-SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
-
 
 def _git_commit() -> str:
     """Short commit of the inference code producing this feed.
@@ -194,29 +197,15 @@ def __reset_cache() -> None:
     _last_published_entities = None
 
 
-def _init_sentry() -> None:
-    """Enable Sentry error reporting when SENTRY_DSN is configured.
+# Tags every New Relic event, so the daemon stays distinguishable from the
+# worker (gtfs-eta-worker) in an account shared with other services.
+NR_SERVICE = "gtfs-eta-daemon"
 
-    No-op without a DSN, so local runs and tests stay unchanged. Only
-    exceptions are reported (no performance tracing) to keep quota usage low.
-    """
-    if not SENTRY_DSN:
-        return
-    # A missing DSN is the normal "disabled" path above; a *malformed* one must
-    # also never take down the feed pipeline, so fall back to silent no-logging.
-    try:
-        sentry_sdk.init(
-            dsn=SENTRY_DSN,
-            environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
-            release=os.environ.get("SENTRY_RELEASE"),
-            traces_sample_rate=0.0,
-        )
-        # This DSN is shared with other services (e.g. timetable-api-node), so
-        # tag every event to make gtfs-eta's daemon issues unmistakable.
-        sentry_sdk.set_tag("service", "gtfs-eta-daemon")
-        print("Sentry error reporting enabled (service=gtfs-eta-daemon).", flush=True)
-    except Exception as exc:  # noqa: BLE001 — Sentry must never break startup
-        print(f"[warn] Sentry init failed, continuing without it: {exc!r}", flush=True)
+
+def _report(level: str, attributes: dict) -> None:
+    """One GtfsEtaDaemonError event to New Relic (no-op without a licence key)."""
+    record_event("GtfsEtaDaemonError", {"level": level, **attributes},
+                 service=NR_SERVICE, commit=FEED_COMMIT)
 
 
 def _make_client():
@@ -300,6 +289,25 @@ def _feed_stats(pb_bytes: bytes) -> tuple[int, int]:
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.ParseFromString(pb_bytes)
     return int(feed.header.timestamp), len(feed.entity)
+
+
+def _stop_arrivals(pb_bytes: bytes, stop_id: str) -> int:
+    """How many stop_time_updates predict an arrival at *stop_id*.
+
+    The worker's /health used to work this out itself by walking the whole
+    ~200 KB feed in JS, which ran past Cloudflare's free-plan CPU limit at the
+    daily peak (100+ killed checks a day). Counted here instead and stamped on
+    the blob as metadata, so /health needs only an R2 HEAD. NO_DATA (2) marks
+    the stops past the prediction horizon, so it is not an arrival.
+    """
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(pb_bytes)
+    return sum(
+        1
+        for ent in feed.entity
+        for stu in ent.trip_update.stop_time_update
+        if stu.stop_id == stop_id and stu.schedule_relationship != 2
+    )
 
 
 def _should_publish(prev_entities: int | None, new_entities: int) -> bool:
@@ -459,9 +467,7 @@ def _save_tracker_state(client, trackers: dict) -> None:
 
 
 def _make_live_state(model_data: dict, gtfs_data: dict):
-    """A LiveState for a live_v2 model (None for the legacy one)."""
-    if not is_live_model(model_data):
-        return None
+    """The live_v2 model's LiveState, seeded with its static tables."""
     from src.live_features import LiveState, LiveTables, geom_from_worker_data
     live = LiveState(LiveTables.from_dict(model_data.get("live_tables")))
     live.geom = geom_from_worker_data(gtfs_data)
@@ -487,8 +493,6 @@ def _load_live_state(client, live) -> None:
 
 def _save_live_state(client, live) -> None:
     """Persist *live* for the next run. Never raises — losing it costs accuracy, not the feed."""
-    if live is None:
-        return
     try:
         now = time.time()
         live.prune(now)
@@ -531,7 +535,7 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=N
             f"stale upstream) — keeping the previous blob"
         )
         print(f"[warn] {msg}", flush=True)
-        sentry_sdk.capture_message(msg, level="warning")
+        _report("warning", {"errorClass": "FeedCollapse", "message": msg})
         _put_status(client, {
             "feed_timestamp": feed_ts,
             "entities": entities,
@@ -559,6 +563,10 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=N
             # ~5.5 min restart, and a HEAD on this key is the cheapest way to
             # get it (no 200 KB body, no protobuf decode).
             "entities": str(entities),
+            # Read by the worker's /health in place of decoding this body.
+            "feed_timestamp": str(feed_ts),
+            "health_stop_id": HEALTH_STOP_ID,
+            "health_stop_arrivals": str(_stop_arrivals(tu_result, HEALTH_STOP_ID)),
             "vehicles_in": str(stats.get("vehicles_in", 0)),
             "vehicles_stale": str(stats.get("vehicles_stale", 0)),
             "feed_skew_sec": str(stats.get("feed_skew_sec", 0)),
@@ -604,14 +612,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    _init_sentry()
-
     client = _make_client()
     gtfs_data, model_data = _load_resources(client)
     trackers: dict = _load_tracker_state(client)
     live = _make_live_state(model_data, gtfs_data)
-    if live is not None:
-        _load_live_state(client, live)
+    _load_live_state(client, live)
 
     # Carry the collapse guard's baseline across the restart, so an upstream
     # outage cannot slip an empty feed through on this process's first pass.
@@ -620,17 +625,20 @@ def main() -> None:
 
     if args.loop:
         n = 0
+        failed = 0
+        run_start = time.monotonic()
         print(f"Looping every {args.loop:.0f}s — Ctrl-C to stop.", flush=True)
         while True:
             # A single failed iteration (inference bug, transient R2 error) is
-            # reported to Sentry but must not kill the daemon — the next cycle
+            # reported to New Relic but must not kill the daemon — the next cycle
             # usually recovers, keeping the feed fresh.
             iter_start = time.monotonic()
             try:
                 _push_once(client, gtfs_data, model_data, trackers, live)
             except Exception as exc:  # noqa: BLE001 — daemon must stay alive
-                sentry_sdk.capture_exception(exc)
+                _report("error", exception_attributes(exc))
                 print(f"[error] push iteration failed: {exc!r}", flush=True)
+                failed += 1
             n += 1
             # Checkpoint periodically as well as at exit: this job is killed
             # outright if it overruns its timeout, and anchors lost that way
@@ -651,12 +659,19 @@ def main() -> None:
             time.sleep(max(0.0, args.loop - elapsed))
         _save_tracker_state(client, trackers)
         _save_live_state(client, live)
+        # One per run: the record that the daemon ran at all, and the only
+        # event a healthy run sends — its acceptance proves the key works.
+        if record_event("GtfsEtaDaemonRun", {
+            "pushes": n, "failedPushes": failed,
+            "durationSec": round(time.monotonic() - run_start, 1),
+        }, service=NR_SERVICE, commit=FEED_COMMIT):
+            print(f"[newrelic] GtfsEtaDaemonRun accepted ({n} pushes, {failed} failed)", flush=True)
     else:
         # One-shot mode: report, then re-raise so the exit code reflects failure.
         try:
             _push_once(client, gtfs_data, model_data, trackers, live)
         except Exception as exc:  # noqa: BLE001
-            sentry_sdk.capture_exception(exc)
+            _report("error", exception_attributes(exc))
             raise
         _save_tracker_state(client, trackers)
         _save_live_state(client, live)

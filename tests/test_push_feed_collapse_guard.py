@@ -145,6 +145,15 @@ def test_collapsed_pass_keeps_the_previous_blob(monkeypatch):
     assert "collapsed" in status["detail"]
 
 
+def test_collapsed_pass_reports_a_warning(monkeypatch):
+    events = []
+    monkeypatch.setattr(push_feed, "_report", lambda level, attrs: events.append((level, attrs)))
+    _run_push(monkeypatch, _FakeClient(), 500)
+    _run_push(monkeypatch, _FakeClient(), 5, {"vehicles_in": 300, "vehicles_stale": 300})
+    assert [(lvl, a["errorClass"]) for lvl, a in events] == [("warning", "FeedCollapse")]
+    assert "collapsed" in events[0][1]["message"]
+
+
 def test_recovery_publishes_again(monkeypatch):
     client = _FakeClient()
     _run_push(monkeypatch, client, 500)
@@ -224,6 +233,30 @@ def test_published_feed_carries_its_entity_count(monkeypatch):
 
     feed_put = next(p for p in client.puts if p["Key"] == push_feed.FEED_KEY)
     assert feed_put["Metadata"]["entities"] == "500"
+
+
+def test_published_feed_carries_the_health_stats(monkeypatch):
+    # The worker's /health reads these with a HEAD instead of decoding the body.
+    client = _FakeClient()
+    _run_push(monkeypatch, client, 3)
+
+    meta = next(p for p in client.puts if p["Key"] == push_feed.FEED_KEY)["Metadata"]
+    assert meta["feed_timestamp"] == "1786000000"
+    assert meta["health_stop_id"] == push_feed.HEALTH_STOP_ID
+    assert meta["health_stop_arrivals"] == "0"
+
+
+def test_stop_arrivals_skips_no_data_updates():
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.header.gtfs_realtime_version = "2.0"
+    for i, (stop, rel) in enumerate([("4577", 0), ("4577", 0), ("4577", 2), ("1", 0)]):
+        tu = feed.entity.add(id=f"t{i}").trip_update
+        tu.trip.trip_id = f"{1000 + i}_1_1"
+        stu = tu.stop_time_update.add()
+        stu.stop_id = stop
+        stu.schedule_relationship = rel
+
+    assert push_feed._stop_arrivals(feed.SerializeToString(), "4577") == 2
 
 
 def test_seeded_baseline_blocks_an_empty_first_push(monkeypatch):

@@ -1,5 +1,5 @@
-.PHONY: install pipeline pipeline-date train train-legacy learn export deploy r2-lifecycle \
-        sanity validate-off-route validate-horizon compare-models \
+.PHONY: install pipeline pipeline-date train learn export deploy r2-lifecycle \
+        sanity validate-off-route \
         check-gtfs check-snapshots \
         push-feed serve-feed smoke score route-mae review-quality diagnose \
         measure-dwell help
@@ -43,10 +43,6 @@ pipeline-date:
 train:
 	$(KEEP_AWAKE) python -m src.train_live --parallel $(PARALLEL)
 
-## Train the legacy single-snapshot model (rollback path)
-train-legacy:
-	$(KEEP_AWAKE) python -m src.train data/training/
-
 ## Full learning cycle: regenerate training data (parallel) + train the model
 learn: pipeline train
 
@@ -56,16 +52,6 @@ learn: pipeline train
 ## after a large batch of new training days.
 measure-dwell:
 	$(KEEP_AWAKE) python scripts/measure_dwell.py --days 14 --out models/dwell.joblib
-
-## Report held-out bias + MAE per stops_ahead (curve should stay flat, near zero)
-validate-horizon:
-	python scripts/validate_horizon_bias.py
-
-## Score the production model against a segment-additive challenger on one
-## identical split: make compare-models [DAYS=30] [KEEP_PCT=2]
-compare-models:
-	$(KEEP_AWAKE) python scripts/compare_models.py --days $(or $(DAYS),30) \
-		--keep-pct $(or $(KEEP_PCT),2) --out compare_models.json
 
 # ── Cloudflare Worker ──────────────────────────────────────────────────────
 
@@ -149,10 +135,7 @@ help:
 	@echo "  pipeline             Run pipeline for all days (incremental, PARALLEL=$(PARALLEL))"
 	@echo "  pipeline-date DATE=  Run pipeline for a single date"
 	@echo "  train                Train the live_v2 model (latest 21 days)"
-	@echo "  train-legacy         Train the legacy single-snapshot model"
 	@echo "  learn                pipeline + train in one step"
-	@echo "  validate-horizon     Held-out bias + MAE per stops_ahead (post-retrain check)"
-	@echo "  compare-models       Production model vs segment-additive challenger, one split"
 	@echo ""
 	@echo "  export               Upload GTFS + model to R2"
 	@echo "  deploy               Deploy Cloudflare Worker"
