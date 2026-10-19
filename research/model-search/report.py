@@ -191,8 +191,9 @@ TL_HEAD = """
 Protocol baseline = `lv2` (production live_v2 recipe, `python -m src.train_live`) on the same split and seed;
 `legacy` = src/train.py recipe on the same rows (`--compare-baseline`). Feature rows from the full
 production pipeline (`run_pipeline.py --keep-pct 10`, train / test at 0.3 of those snapshots).
-Splits: `A` = train 10-01..10-09, test 10-10 (Sat) .. 10-13 (Tue); `B` = train 10-01..10-08, test 10-09 (Fri) .. 10-11 (Sun).
-Arms: `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv2x_pa` = one group each (GTFS_ETA_LIVE_DROP).
+Splits: `A` = train 10-01..10-09, test 10-10 (Sat) .. 10-13 (Tue); `B` = train 10-01..10-08, test 10-09 (Fri) .. 10-11 (Sun);
+`C` (run 45, `rfb.py`) = train 10-05..10-14, test 10-15 (Thu) .. 10-18 (Sun), seed 42.
+Arms: `rfb` = + the model's own matured errors (vehicle 600 / 1800 s, route 600 s; out-of-fold on train days); `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv2x_pa` = one group each (GTFS_ETA_LIVE_DROP).
 
 | split | arm | seed | n_train | n_test | MAE | median | p90 | bias | sa1 | sa10 | ΔMAE | Δp90 | worst bucket Δ | win | serving |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -200,7 +201,8 @@ Arms: `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv
 TL_SERVING = {"lv2": "prod (live_v2)", "legacy": "prod rollback",
               "lv2x_dutypa": "as lv2 + duty fields in the persisted state + per-cycle link occupancy dict; < 0.5 day",
               "lv2x_duty": "as lv2 + 2 per-vehicle fields in the persisted state; trivial",
-              "lv2x_pa": "as lv2 + per-cycle link occupancy dict; < 0.5 day"}
+              "lv2x_pa": "as lv2 + per-cycle link occupancy dict; < 0.5 day",
+              "rfb": "as lv2 + per-vehicle / per-route ring of (crossing time, served pred - actual); stage-1 model served alongside (2x trees) or own-feedback; ~1 day"}
 
 
 def tl_rows() -> list[str]:

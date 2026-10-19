@@ -82,6 +82,7 @@ ds4shift 83.95 → 83.62 (−0.39%), every bucket and p90 better on both splits;
 - Pace target (s per metre of remaining_dist_m, weight × distance so the loss stays L1 in seconds; `sc_big_duty_pace`): +4.1 / +4.7%, sa1 +21% (run 33). Short-horizon dwell / stop time blows up per-metre targets.
 - Stacking 40/60 min odometer onto duty (`sc_big_fo_all`): −0.08 / −0.34%, noise (run 33). The optional add-ons have stopped stacking.
 - Arms removed in run 35 (lost on both splits / superseded): sc_big_mf3_age_fo2 + addon_v28b.py, sc_big_fo_gap / fo_v29, sc_big_fo_pan / fo_v31, sc_big_fo_brk / fo_v32, sc_big_duty_pace.
+- Residual feedback (run 45, `rfb.py`): the model's own matured errors per vehicle (600 / 1800 s) and route (600 s) as features: +0.08% MAE, +0.2% p90 on split C. Live state already explains them.
 - Odometer-based crossing times in the link store: reasoned out (run 31). Snapshots are ~10 s apart and both odometer and dist_along interpolate linearly in between, so crossing times barely move.
 
 ### Production status (run 41)
@@ -97,6 +98,13 @@ ds4shift 83.95 → 83.62 (−0.39%), every bucket and p90 better on both splits;
 - live_v2 holds on unseen days: split A (test 10-10..10-13) legacy 126.7 → live_v2 99.0 (−22%), p90 270.2 → 201.4.
 - `_DUTY` + `_PA` ported into src/live_features.py behind GTFS_ETA_LIVE_EXTRA (off by default): −1.1% on A and B, p90 −1.5 / −1.2%;
   `_PA` alone −0.9%, `_DUTY` alone −0.2%. Below the 3% bar → optional only (needs: duty fields in the persisted state, per-cycle occupancy dict).
+
+### Data-quality flag (run 45) — for the owner
+- **Duplicated raw snapshots 10-12 (from ≈ 09 UTC), 10-13, 10-14**: R2 `raw/` holds ≈ 720 objects/h instead of ≈ 360 (11193 / 14336 / 13833 per day
+  vs ≈ 7190), as if a second collector ran. The pipeline then emits each vehicle-snapshot twice for ≈ 19% of 10-12's rows (1.22M of 3.14M); the
+  second copy has `progress_speed_mps = -1` (zero dt), the other columns are identical. That is the "row-count jump" run 44 saw. Back to normal from 10-15.
+  The weekly retrain over 10-12..10-14 trains on these (over-weighted days + fake "speed unknown" rows). Suggest de-duplicating snapshots by feed
+  header timestamp in src/snapshots.py, and checking what wrote the extra objects. Not fixed here (research branch, no production changes).
 
 ### Open next steps
 1. Hand-off of `sc_big_fo_long` (+ optional V30 `sc_big_fo_pa`, + optional V32 duty `sc_big_fo_duty`) is the owner's call. **Strongly recommend pausing the schedule**: run 33 found nothing; runs 16–32 moved the leader by ≈ 4.5% in total,
@@ -152,3 +160,41 @@ duty_t0 / duty_odo0 in LiveState.dump/load; inference needs no other change sinc
 2. If continued: re-use this recipe (pipeline 27 days ≈ 3.7 h, feature build ≈ 25 min, six fits ≈ 4 h); the harness/addon chain is superseded.
 3. Check the 10-12 / 10-13 row-count jump (≈ 1.6–2x) before the next weekly retrain.
 4. Housekeeping due run 45: archive runs 38–44; prune ds.sh / run.sh / harness add-ons superseded by the production-trainer path.
+
+## 2026-10-19 — run 45 (housekeeping; residual feedback on fresh days; no winner)
+
+Lock taken 06:07 UTC (background refresh every 50 min). Main had moved (legacy model removed, New Relic); merged cleanly.
+R2 credentials present. **Housekeeping** (own commit): main's removal of `src/train.py` broke harness.py, so the whole harness-era chain moved to
+`archive/harness-v1/`; `resultslib.py` now carries `load_results` / `judge` for `report.py` (LEADERBOARD.md regenerates byte-identical);
+runs 38–43 → `archive/JOURNAL-runs-38-43.md`; tl.sh lost the removed `--compare-baseline`.
+
+**Data.** `python scripts/run_pipeline.py --all --parallel 3 --keep-pct 10 --since 2026-09-21 --until 2026-10-18` — 28 days in ≈ 6 h:
+the pool broke (OOM, the doubled 10-12..10-14 days need more RAM) and retried the last 8 days serially. Use `--parallel 2` when those days are in range.
+
+**Arm `rfb`** (research/model-search/rfb.py): at serving time the daemon knows what it predicted earlier for every stop a vehicle has since reached.
+Features = mean signed / relative error of matured predictions (target stop reached ≥ 30 s ago) per vehicle over 600 / 1800 s, the latest one and
+its age, and per route over 600 s (10 cols, sentinel −9999). Stage 1 = production `tl.fit`; train-day errors out-of-fold (3 folds by day,
+OOF MAE 96.2), test-day errors from the baseline fit on all train days; features computed on all rows before the 5M cap (density matches test).
+Command: `python research/model-search/rfb.py --train 2026-10-05..2026-10-14 --test 2026-10-15..2026-10-18 --seed 42 --split C`
+(stage-1 predictions cached in data/rfb/C_s42; first attempt OOM-killed in the candidate fit, fixed by dropping the full frame first).
+
+**Split C** = train 10-05..10-14 (5.0M of ≈ 7.0M rows, capped), test 10-15 Thu / 10-16 Fri / 10-17 Sat / 10-18 Sun (1.97M rows), seed 42.
+
+| arm | MAE | median | p90 | bias | sa1 | sa5 | sa10 | ΔMAE | Δp90 | worst bucket |
+|---|---|---|---|---|---|---|---|---|---|---|
+| lv2 (prod) | 102.2 | 45.4 | 198.2 | −33.5 | 70.3 | 103.4 | 138.9 | — | — | — |
+| rfb | 102.3 | 45.4 | 198.6 | −33.5 | 70.4 | 103.6 | 139.0 | +0.08% | +0.19% | +0.23% (sa1..sa10 all within ±0.2%) |
+
+Per day (lv2 → rfb; rows): 10-15 85.3 → 85.6 (611k), 10-16 129.9 → 130.3 (569k), 10-17 79.6 → 79.5 (412k), 10-18 112.4 → 111.8 (381k).
+Worst routes (lv2): 122 267, 133 248, 137 172, 106 163, 143 152, 88 133, 881 133, 94 133, 2460 132, 111 131 (rfb: same order, ±3).
+Coverage on test: vehicle 600 s window 84%, 1800 s 95%, route 99%.
+
+**Conclusion.** No signal: once the live state (link store, own laps, odometer, dwell table) is in the features, the model's own recent errors
+add nothing. Ruled out; no notification. 10-16 (Fri) at 130 s MAE stands out vs 85 s on Thu — worth a look in the quality reports.
+Also found the duplicated-snapshot issue above (data-quality flag).
+
+### Next steps
+1. **Recommend pausing the schedule** (owner's call): runs 41–45 tested every remaining feed-feature family on the production trainer; best is
+   `_PA` + `_DUTY` at −1.1% (optional, below the bar). The tail (122 / 133 / 137) needs operator break / layover data.
+2. Owner: de-duplicate raw snapshots (see the data-quality flag) before the next weekly retrain covers 10-12..10-14.
+3. Next housekeeping due run 50.

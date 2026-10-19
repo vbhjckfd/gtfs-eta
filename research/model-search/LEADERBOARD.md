@@ -95,8 +95,9 @@ snapshots/day, test 3% (pipeline_lite 10% → prep 3% → run).
 Protocol baseline = `lv2` (production live_v2 recipe, `python -m src.train_live`) on the same split and seed;
 `legacy` = src/train.py recipe on the same rows (`--compare-baseline`). Feature rows from the full
 production pipeline (`run_pipeline.py --keep-pct 10`, train / test at 0.3 of those snapshots).
-Splits: `A` = train 10-01..10-09, test 10-10 (Sat) .. 10-13 (Tue); `B` = train 10-01..10-08, test 10-09 (Fri) .. 10-11 (Sun).
-Arms: `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv2x_pa` = one group each (GTFS_ETA_LIVE_DROP).
+Splits: `A` = train 10-01..10-09, test 10-10 (Sat) .. 10-13 (Tue); `B` = train 10-01..10-08, test 10-09 (Fri) .. 10-11 (Sun);
+`C` (run 45, `rfb.py`) = train 10-05..10-14, test 10-15 (Thu) .. 10-18 (Sun), seed 42.
+Arms: `rfb` = + the model's own matured errors (vehicle 600 / 1800 s, route 600 s; out-of-fold on train days); `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv2x_pa` = one group each (GTFS_ETA_LIVE_DROP).
 
 | split | arm | seed | n_train | n_test | MAE | median | p90 | bias | sa1 | sa10 | ΔMAE | Δp90 | worst bucket Δ | win | serving |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -107,3 +108,5 @@ Arms: `lv2x_dutypa` = + duty_* + pa_* (GTFS_ETA_LIVE_EXTRA=1); `lv2x_duty` / `lv
 | A | lv2x_pa | 42 | 4,937,670 | 2,898,302 | 98.1 | 45.5 | 198.7 | -27.8 | 64.8 | 135.8 | -0.9% | -1.3% | -0.6% | no | as lv2 + per-cycle link occupancy dict; < 0.5 day |
 | B | lv2 | 11 | 4,344,765 | 1,379,889 | 96.6 | 44.5 | 199.9 | -33.0 | 62.3 | 136.3 | — | — | — | — | prod (live_v2) |
 | B | lv2x_dutypa | 11 | 4,344,765 | 1,379,889 | 95.5 | 44.2 | 197.5 | -32.4 | 61.7 | 135.6 | -1.1% | -1.2% | -0.5% | no | as lv2 + duty fields in the persisted state + per-cycle link occupancy dict; < 0.5 day |
+| C | lv2 | 42 | 5,000,000 | 1,972,774 | 102.2 | 45.4 | 198.2 | -33.5 | 70.3 | 138.9 | — | — | — | — | prod (live_v2) |
+| C | rfb | 42 | 5,000,000 | 1,972,774 | 102.3 | 45.4 | 198.6 | -33.5 | 70.4 | 139.0 | +0.1% | +0.2% | +0.2% | no | as lv2 + per-vehicle / per-route ring of (crossing time, served pred - actual); stage-1 model served alongside (2x trees) or own-feedback; ~1 day |
