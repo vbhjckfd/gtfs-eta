@@ -16,6 +16,7 @@ Stage-1 predictions are cached in data/rfb/<split>_s<seed>/ so a re-run only ref
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -172,9 +173,15 @@ def main():
     # Candidate: production recipe + RFB cols.
     drop = {c for c in args.drop.split(",") if c}
     extra = [c for c in RFB_COLS if c not in drop]
-    tr = pd.concat([tr, rfb_features(full, oof).loc[idx].reset_index(drop=True)], axis=1)
-    del full
-    te = pd.concat([te, rfb_features(te, pred_te)], axis=1)
+    rf = rfb_features(full, oof).loc[idx].reset_index(drop=True).astype(np.float32)
+    del full, oof
+    gc.collect()
+    keep = ["route_id", "stop_id", "date", "day", TARGET_COL] + tl.BASE_COLS + tl.MODEL_LIVE_COLS
+    keep = [c for c in tr.columns if c in set(keep) or c in BASE_FEATURE_COLS]
+    tr = pd.concat([tr[keep], rf], axis=1)
+    del rf
+    te = pd.concat([te, rfb_features(te, pred_te).astype(np.float32)], axis=1)
+    gc.collect()
     for c in extra:
         cov = (te[c] != SENT).mean()
         print(f"  {c}: test coverage {cov:.1%}  median {te.loc[te[c] != SENT, c].median():.3g}", flush=True)
