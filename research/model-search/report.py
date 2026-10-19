@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from harness import judge, load_results
+from resultslib import judge, load_results
 
 HERE = Path(__file__).parent
 SERVING = {

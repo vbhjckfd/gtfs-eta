@@ -5,23 +5,21 @@ Harness: `harness.py` (prep/run), arms in `arms.py`, live features in
 `features_live.py` (+ add-on scripts `addon_v*.py` that append cols to an existing
 feature dir). Results: one compact JSON line per fit in `results.jsonl` (keyed by `name` = arm_tag_sSEED; written by `harness.save_result`); `report.py` regenerates
 LEADERBOARD.md (current tags) and archive/LEADERBOARD-old.md (superseded tags).
-Full run entries are archived in `archive/JOURNAL-runs-1-12.md`, `-13-16.md`, `-17-18.md`, `-19-20.md`, `-21-23.md`, `-24-27.md`, `-28-32.md`, `-33-37.md`.
+Full run entries are archived in `archive/JOURNAL-runs-1-12.md`, `-13-16.md`, `-17-18.md`, `-19-20.md`, `-21-23.md`, `-24-27.md`, `-28-32.md`, `-33-37.md`, `-38-43.md`.
 
-## State of the search (updated run 40)
+## State of the search (updated run 45)
 
-### Protocol set-up (fixed)
-- Results live in `results.jsonl` (owner asked for this on 2026-09-28, run 20). Where the routine prompt says "keep results/*.json", read it
-  as "keep results.jsonl". Never recreate per-fit JSON files; `harness.py run` appends through `save_result`.
-- Fresh box: `pip install -e . tzdata` (without tzdata every pipeline day fails).
-- One runner since run 35: `sh research/model-search/ds.sh` = pipeline_lite `--parallel 3` (≈ 2–2.5 h) in the background, feed-clock prep into
-  ms_features_v10 as days land (≈ 2.5 min/day), the addon chain v26, v28–v32 → ms_features_v32, then fits (ARMS_A on ds4, ARMS_B on ds4shift; defaults
-  = baseline + fo_long / fo_pa / fo_duty). New day set: override DAYS / ADDON_DAYS / TRAIN_* / TEST_* / PFX_* (see its header). run.sh does the work.
-  The box memcg limit is 14 GB: pipeline_lite OOMs at `--parallel 4`. Never run a prep or smoke test next to it by hand.
-- Splits: ds4 = train 09-15..09-26, test 09-27 Sun / 09-28 Mon / 09-29 Tue, seed 42 (train 2.21M / test 1.61M rows);
-  ds4shift = train 09-15..09-25, test 09-26 Sat / 09-27 / 09-28, seed 11 (2.06M / 1.42M). Train 1% of snapshots/day, test 3%.
-  09-08..09-14 only feed the 14-day history tables. Reproduction controls: ds4 baseline 113.946, sc_big_fo_long 85.65, sc_big_fo_pa 85.197, sc_big_fo_duty 84.770.
-- Fits: ~5 min baseline, ~12–15 min for 255-leaf arms. Background loop refreshes LOCK every 50 min (runs last > 3 h).
-- `sh` reads scripts incrementally: never edit a runner while it runs. run.sh exits on PREP FAIL but ds.sh still prints "DS ALL DONE".
+### Protocol set-up (since run 45: production trainer only)
+- **Baseline = `python -m src.train_live`** (live_v2, the production recipe) on the same rows. The harness/addon chain of runs 1–43
+  (harness.py, arms.py, features_live.py, addon_v*.py, pipeline_lite.py, ds.sh, run.sh, …) moved to `archive/harness-v1/` in run 45:
+  it imported `src.train`, which main removed with the legacy model, so it no longer runs. Its results stay in `results.jsonl`
+  (`report.py` reads them through `resultslib.py`); production-trainer fits go to `results_tl.jsonl` via `tl.sh`.
+- Fresh box: `python -m pip install -e . tzdata` (without tzdata every pipeline day fails; plain `pip` may be another interpreter).
+- Data: `python scripts/run_pipeline.py --all --parallel 3 --keep-pct 10 --since A --until B` (≈ 8 min/day wall at 3 workers; 14 GB memcg,
+  `--parallel 4` OOMs). Need 14 prior days before the first train day for the history tables.
+- Arms: flags in src/live_features.py / src/train_live.py (`GTFS_ETA_LIVE_EXTRA`, `GTFS_ETA_LIVE_DROP`); one fit per `tl.sh` call
+  (≈ 34 min at 5M train rows). Use one feature cache for all arms so rows are identical.
+- Harness-era splits and controls (ds1..ds4, runs 1–43) are in the archived journals; they cannot be re-run without the archived code.
 
 ### Current hand-off recipe: `sc_big_fo_long` (run 29)
 ds4 113.95 → 85.65 (−24.8%), p90 241.6 → 177.1; ds4shift 109.95 → 84.20 (−23.4%), p90 228.7 → 170.6; every stops_ahead bucket and every test day better.
@@ -108,67 +106,6 @@ ds4shift 83.95 → 83.62 (−0.39%), every bucket and p90 better on both splits;
    shift split train ..10-07, test 10-08..10-10) and re-check baseline vs fo_long / fo_pa / fo_duty on unseen days. Until then runs exit early.
 4. Cleanup debt: addon_v29 / v31 / v32 still compute the pruned cols (_ODOG, _PAN, _BRK). Strip them on the next full rebuild, when the controls
    above can confirm the kept cols are bit-identical (not done blind in run 35).
-
-## 2026-10-04 — run 38 (early exit, no fresh day set)
-
-Lock taken at 12:14 UTC. Main had not moved. R2 credentials present. Newest possible complete day is 10-03; a fresh split needs ≥ 10-12 (state step 3),
-so no experiment, no result rows, no notification. No housekeeping due (last done run 35).
-
-### Next steps
-1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC); then ds5 via ds.sh.
-
-## 2026-10-04 — run 39 (early exit, no fresh day set)
-
-Lock taken at 16:14 UTC. Main had not moved. R2 credentials present. Newest possible complete day is 10-03; a fresh split needs ≥ 10-12 (state step 3),
-so no experiment, no result rows, no notification. Housekeeping due next run (run 40, 5th since run 35).
-
-### Next steps
-1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC); then ds5 via ds.sh.
-
-## 2026-10-04 — run 40 (housekeeping; early exit, no fresh day set)
-
-Lock taken at 20:13 UTC. Main had not moved. R2 credentials present. Newest possible complete day is 10-03; a fresh split needs ≥ 10-12 (state step 3),
-so no experiment, no result rows, no notification.
-**Housekeeping** (5th run since run 35, own commit): runs 33–37 → `archive/JOURNAL-runs-33-37.md`; arms.py drops sc_big_fo_novl and sc_big_fo_pax
-(each lost on ds4 and ds4shift; nothing imports them; _ODOX kept for sc_big_fo_all; report.py keeps their descriptions for the archived rows).
-Only three .sh files remain (ds.sh, run.sh, queue.sh), so no runner pruning. Checks: `python report.py` regenerates LEADERBOARD.md unchanged;
-baseline and sc_big_fo_duty fit and predict on a synthetic 3000-row frame (no data on this box).
-
-### Next steps
-1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC); then ds5 via ds.sh.
-2. Next housekeeping due run 45.
-
-## 2026-10-05 — run 41 (early exit; hand-off landed on main)
-
-Lock taken at 00:14 UTC. R2 credentials present. Main moved: it now ships `live_v2` = this branch's `sc_big_fo_long` (see "Production status").
-Merged origin/main into the branch (clean). No experiment: the newest complete day is 10-04, and every fresh-split idea now has to beat live_v2 by ≥ 3%,
-which no recorded candidate does. No result rows, no notification.
-
-### Next steps
-1. **Recommend pausing the schedule** (owner's call): the search's hand-off is in production, and the remaining ideas need new data (operator break
-   schedules for 133 / 137 / 122) rather than features.
-2. If it continues: from ≥ 10-12, build a fresh day set with the production pipeline (`make pipeline`; `python -m src.train_live --train … --test …`)
-   to measure live_v2 on unseen days, then try `_PA` + `_DUTY` ported into src/live_features.py behind a flag (expected ≈ −1%, below the win bar;
-   only worth it as a cheap optional add-on).
-3. Next housekeeping due run 45.
-
-## 2026-10-05 — run 42 (early exit, no fresh day set)
-
-Lock taken at 04:13 UTC. Main had not moved since run 41. R2 credentials present. Newest complete day is 10-04; a fresh split needs ≥ 10-12
-(state step 3 / run 41 step 2), so no experiment, no result rows, no notification.
-
-### Next steps
-1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC).
-2. Next housekeeping due run 45.
-
-## 2026-10-05 — run 43 (early exit, no fresh day set)
-
-Lock taken at 08:14 UTC. Main had not moved since run 41. R2 credentials present. Newest complete day is 10-04; a fresh split needs ≥ 10-12
-(state step 3 / run 41 step 2), so no experiment, no result rows, no notification.
-
-### Next steps
-1. Unchanged: pause the schedule (owner's call), or keep exiting early until ≥ 10-12 is in R2 (earliest useful run: 2026-10-12 UTC).
-2. Next housekeeping due run 45.
 
 ## 2026-10-14 — run 44 (fresh days on the production trainer; no winner)
 
