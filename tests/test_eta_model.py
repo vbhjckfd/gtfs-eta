@@ -160,6 +160,17 @@ class TestTrainingRows:
             rows["seconds_to_arrival"], expected, atol=3.0
         )
 
+    def test_duplicated_snapshot_adds_no_rows(self, gtfs):
+        # The same feed stored twice (2026-10-12..14 collector double-fire):
+        # rows must match the clean trajectory, with no zero-dt speed rows.
+        traj = _trajectory()
+        clean = build_training_rows(traj, gtfs)
+        doubled = build_training_rows(
+            pd.concat([traj, traj], ignore_index=True), gtfs
+        )
+        pd.testing.assert_frame_equal(doubled, clean)
+        assert not doubled.duplicated(["vehicle_id", "snapshot_ts", "stop_id"]).any()
+
     def test_bus_dwelling_at_stop_gets_near_zero_target(self, gtfs):
         # Vehicle dwells three snapshots ~3 m short of stop2 (≈1000 m), then
         # moves on. Training rows must include near-zero remaining distances,

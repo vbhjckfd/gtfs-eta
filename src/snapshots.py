@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Iterable, Iterator
 
 import boto3
 import pandas as pd
@@ -149,6 +150,68 @@ def _fetch_and_parse(client, key: str) -> list[dict]:
     return rows
 
 
+def drop_repeated_snapshots(snapshots: Iterable[list[dict]]) -> Iterator[list[dict]]:
+    """Skip parsed snapshots whose feed header timestamp was already seen.
+
+    The collector keys raw/ objects by fetch wall-clock, not by feed timestamp,
+    so one upstream feed can land under several keys: the first poll of each
+    cron fire repeats the previous one when the feed has not advanced, and
+    2026-10-12 09:30 .. 10-14 19:30 UTC Cloudflare fired the collector cron
+    twice a minute, doubling every snapshot. A repeat adds no positions; kept,
+    it turns into zero-dt "speed unknown" training rows and double weight.
+    """
+    seen: set = set()
+    for rows in snapshots:
+        if rows:
+            ts = rows[0]["timestamp"]
+            if ts in seen:
+                continue
+            seen.add(ts)
+        yield rows
+
+
+# The collector stores ~360 snapshots per hour (one 10 s poller); normal hours
+# measure 355-365. Hours far above that come from overlapping pollers —
+# 2026-10-12..14 ran ~716/h — and are thinned back to the single-poller cadence.
+DENSE_KEYS_PER_HOUR = 400
+THIN_MIN_GAP_SEC = 7.0
+
+
+def _key_hour(key: str) -> str:
+    """'raw/2026-10-13/2026-10-13T10:00:03.070Z.pb' -> '2026-10-13T10'."""
+    return key.rsplit("/", 1)[-1][:13]
+
+
+def thin_dense_hours(
+    keys: list[str],
+    snapshots: Iterable[list[dict]],
+    max_per_hour: int = DENSE_KEYS_PER_HOUR,
+    min_gap_sec: float = THIN_MIN_GAP_SEC,
+) -> Iterator[list[dict]]:
+    """Thin over-sampled hours back to the collector's normal ~10 s cadence.
+
+    ``snapshots`` are the parsed row lists of ``keys``, in the same order. In an
+    hour with more than ``max_per_hour`` keys, a snapshot is kept only when its
+    feed timestamp is at least ``min_gap_sec`` after the last kept one. The
+    upstream feed advances every ~5-6 s, so two phase-shifted pollers catch
+    ~1.5x the distinct feeds of one: without thinning such a day carries 1.5x
+    the training weight, and progress_speed_mps is measured over ~5 s instead
+    of the ~10 s the push daemon sees. Normal hours pass through untouched, so
+    their training rows do not change.
+    """
+    per_hour = Counter(_key_hour(k) for k in keys)
+    dense = {h for h, n in per_hour.items() if n > max_per_hour}
+    last_kept = None
+    for key, rows in zip(keys, snapshots):
+        if rows:
+            ts = rows[0]["timestamp"]
+            if (_key_hour(key) in dense and last_kept is not None
+                    and (ts - last_kept).total_seconds() < min_gap_sec):
+                continue
+            last_kept = ts
+        yield rows
+
+
 def iter_snapshots(keys: list[str], max_workers: int = 8) -> Iterator[list[dict]]:
     """Yield parsed row lists for each key, in order, fetched concurrently."""
     client = _make_client()
@@ -181,8 +244,8 @@ def load_snapshots_df(
     client = _make_client()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_fetch_and_parse, client, k) for k in keys]
-        for fut in futures:
-            all_rows.extend(fut.result())
+        for rows in drop_repeated_snapshots(fut.result() for fut in futures):
+            all_rows.extend(rows)
 
     df = pd.DataFrame(all_rows, columns=_COLUMNS)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)

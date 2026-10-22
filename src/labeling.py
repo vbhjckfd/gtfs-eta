@@ -560,6 +560,10 @@ def build_training_rows(
     """
     if "off_route" in df.columns:
         df = df[~df["off_route"]].copy()
+    # One position per vehicle per feed snapshot. A feed stored twice
+    # (src.snapshots.drop_repeated_snapshots) would otherwise emit every row
+    # twice, the copy with a zero-dt "speed unknown" progress_speed_mps.
+    df = df.drop_duplicates(["vehicle_id", "timestamp"])
 
     groups = df.groupby(["vehicle_id", trip_col], sort=False)
     pieces: list[pd.DataFrame] = []

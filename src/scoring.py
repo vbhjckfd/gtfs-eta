@@ -35,7 +35,9 @@ from tqdm import tqdm
 
 from src.gtfs_static import _parse_gtfs_time_utc
 from src.labeling import build_labels
-from src.snapshots import R2_BUCKET, _fetch_and_parse, _make_client, list_snapshot_keys
+from src.snapshots import (
+    R2_BUCKET, _fetch_and_parse, _make_client, drop_repeated_snapshots, list_snapshot_keys,
+)
 from src.trip_inference import infer_trips
 
 PREDICTIONS_PREFIX = "predictions/"
@@ -197,7 +199,7 @@ def load_actuals(date_str: str, gtfs, client=None, max_workers: int = 12) -> pd.
     raw_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         it = ex.map(lambda k: _fetch_and_parse(client, k), keys)
-        for r in _progress(it, len(keys), "positions"):
+        for r in drop_repeated_snapshots(_progress(it, len(keys), "positions")):
             raw_rows.extend(r)
 
     df = pd.DataFrame(raw_rows)
