@@ -20,7 +20,9 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
-from src.snapshots import list_snapshot_days, list_snapshot_keys, _make_client, _fetch_and_parse
+from src.snapshots import (
+    list_snapshot_days, list_snapshot_keys, _make_client, _fetch_and_parse, drop_repeated_snapshots,
+)
 from src.trip_inference import infer_trips
 from src.labeling import build_training_rows
 from src.live_features import side_paths, write_side_tables
@@ -68,7 +70,7 @@ def process_day(date_str: str, gtfs, client, max_workers: int = 12,
     say("downloading…", end=" ", flush=True)
     rows = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for r in ex.map(lambda k: _fetch_and_parse(client, k), keys):
+        for r in drop_repeated_snapshots(ex.map(lambda k: _fetch_and_parse(client, k), keys)):
             rows.extend(r)
 
     df = pd.DataFrame(rows)

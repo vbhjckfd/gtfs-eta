@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Iterable, Iterator
 
 import boto3
 import pandas as pd
@@ -149,6 +149,26 @@ def _fetch_and_parse(client, key: str) -> list[dict]:
     return rows
 
 
+def drop_repeated_snapshots(snapshots: Iterable[list[dict]]) -> Iterator[list[dict]]:
+    """Skip parsed snapshots whose feed header timestamp was already seen.
+
+    The collector keys raw/ objects by fetch wall-clock, not by feed timestamp,
+    so one upstream feed can land under several keys: the first poll of each
+    cron fire repeats the previous one when the feed has not advanced, and
+    2026-10-12 09:30 .. 10-14 19:30 UTC Cloudflare fired the collector cron
+    twice a minute, doubling every snapshot. A repeat adds no positions; kept,
+    it turns into zero-dt "speed unknown" training rows and double weight.
+    """
+    seen: set = set()
+    for rows in snapshots:
+        if rows:
+            ts = rows[0]["timestamp"]
+            if ts in seen:
+                continue
+            seen.add(ts)
+        yield rows
+
+
 def iter_snapshots(keys: list[str], max_workers: int = 8) -> Iterator[list[dict]]:
     """Yield parsed row lists for each key, in order, fetched concurrently."""
     client = _make_client()
@@ -181,8 +201,8 @@ def load_snapshots_df(
     client = _make_client()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_fetch_and_parse, client, k) for k in keys]
-        for fut in futures:
-            all_rows.extend(fut.result())
+        for rows in drop_repeated_snapshots(fut.result() for fut in futures):
+            all_rows.extend(rows)
 
     df = pd.DataFrame(all_rows, columns=_COLUMNS)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
