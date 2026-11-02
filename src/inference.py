@@ -77,6 +77,25 @@ _SPATIAL_W  = 0.4
 _BEARING_W  = 0.3
 _PROGRESS_W = 0.3
 
+# Schedule fit is judged in *time*: how late or early the vehicle would be if it
+# were running this trip (see schedule_deviation).  It used to be judged in
+# distance — vehicle position vs where the schedule puts the trip now — but that
+# position is clamped to the shape's ends outside the trip's own run, so every
+# run that had already finished "expected" the vehicle at the terminus.  A bus
+# near the end of its route then fit a run from hours earlier perfectly: the
+# live feed carried ~5 % of stop updates over 1 h off schedule, up to 8 h.
+#
+# The progress term saturates at this deviation.
+_PROGRESS_TIME_CAP_SEC = 1800.0
+# The operator's reported trip_id is taken without scoring only when it is also
+# this close to schedule.  Upstream routinely reports the previous or next run.
+_REPORTED_MAX_DEVIATION_SEC = 1200.0
+# No match at all beyond this.  A route with few trips used to force its only
+# candidate onto a vehicle at any hour (11 h+ mismatches, see
+# src/scoring.SCHEDULE_WINDOW_MARGIN_SEC); a wrong trip is worse than none.
+# Lviv buses do run ±30 min late (p10/p90), so this stays well clear of that.
+_MAX_MATCH_DEVIATION_SEC = 3600.0
+
 # Idling-at-origin guard: a vehicle parked at (≈) the shape start with no
 # measurable forward motion is waiting for its departure.  How that departure is
 # estimated depends on the mode — see the two blocks below — but a vehicle idling
@@ -458,6 +477,42 @@ def _expected_dist_along(
     return result
 
 
+def schedule_deviation(
+    trip_id: str, dist_along: float, now_sec: float, data: dict,
+) -> float | None:
+    """Seconds the vehicle is behind schedule if it is running *trip_id*.
+
+    Interpolates the scheduled time at the vehicle's distance along the shape
+    and compares it with now — late positive, the same sign as TripUpdate.delay.
+    Past either end of the trip it is the time to the first or last stop, so a
+    run that finished hours ago is hours off, not a perfect fit.  The result
+    is wrapped into ±12 h so a trip scheduled across midnight compares with
+    the right day.  None when the trip has no usable schedule.
+    """
+    arrays = _trip_sched_arrays(trip_id, data)
+    if arrays is None:
+        return None
+    dists, times = arrays
+    if dist_along <= dists[0]:
+        t = times[0]
+    elif dist_along >= dists[-1]:
+        t = times[-1]
+    else:
+        t = times[-1]
+        for i in range(len(dists) - 1):
+            a, b = dists[i], dists[i + 1]
+            if a <= dist_along <= b:
+                frac = (dist_along - a) / (b - a) if b > a else 0.0
+                t = times[i] + frac * (times[i + 1] - times[i])
+                break
+    dev = now_sec - t
+    while dev > _HALF_DAY_SEC:
+        dev -= _DAY_SEC
+    while dev <= -_HALF_DAY_SEC:
+        dev += _DAY_SEC
+    return dev
+
+
 def _interp_expected_dist(arrays, now_sec: float) -> float | None:
     if arrays is None:
         return None
@@ -483,9 +538,29 @@ def _interp_expected_dist(arrays, now_sec: float) -> float | None:
 
 def infer_trip(
     route_id, reported_trip_id, vx, vy, bearing, data,
-    active_service_ids=None, now_sec=None, expected_cache=None,
+    active_service_ids=None, now_sec=None,
 ):
     """Best (trip_id, spatial_dist, tangent_bearing) for a vehicle snapshot.
+
+    See _infer_trip_ranked, which this wraps without its rank and exclusions.
+    """
+    tid, d, tangent, _rank = _infer_trip_ranked(
+        route_id, reported_trip_id, vx, vy, bearing, data,
+        active_service_ids, now_sec,
+    )
+    return tid, d, tangent
+
+
+def _infer_trip_ranked(
+    route_id, reported_trip_id, vx, vy, bearing, data,
+    active_service_ids=None, now_sec=None, exclude=frozenset(),
+):
+    """``(trip_id, spatial_dist, tangent_bearing, rank)`` for a vehicle snapshot.
+
+    *rank* orders competing claims on one trip (see assign_trips): a trusted
+    reported trip ranks ahead of any scored match, then lower deviation or
+    score wins.  Trips in *exclude* — already owned by another vehicle — are
+    never returned, so a vehicle that lost its best run settles on its next.
 
     Combines spatial distance with heading alignment so opposite-direction
     shape variants — which sit on top of each other and defeat pure
@@ -502,20 +577,22 @@ def infer_trip(
     when given, adds a schedule-progress term so that among same-day
     candidates sharing a shape — e.g. route 105's back-to-back weekday runs
     on the one shape it didn't stop sharing with the weekend calendar —
-    matching prefers the trip whose scheduled position is actually close to
-    the vehicle, not just whichever happens to score best on position and
-    heading alone.
-
-    ``expected_cache`` is passed straight to _expected_dist_along — see there.
+    matching prefers the run the vehicle is closest to on time
+    (schedule_deviation), not just whichever happens to score best on
+    position and heading alone.  It also gates the reported-trip fast path and
+    rules out any candidate more than _MAX_MATCH_DEVIATION_SEC off schedule,
+    so a vehicle with no plausible run matches nothing.
     """
     candidates = data["route_trips"].get(str(route_id), [])
+    if exclude:
+        candidates = [tid for tid in candidates if tid not in exclude]
     if active_service_ids is not None:
         candidates = [
             tid for tid in candidates
             if data["trip_index"].get(tid, {}).get("service_id") in active_service_ids
         ]
     if not candidates:
-        return None, 9999.0, 0.0
+        return None, 9999.0, 0.0, None
 
     # poly_match walks every point of a shape, and depends only on the shape and
     # this one vehicle's position — but a Lviv route averages 216 trips over
@@ -533,7 +610,8 @@ def infer_trip(
 
     # Fast path: trust the reported trip only if it is both near AND not headed
     # the wrong way down its shape.
-    if reported_trip_id and reported_trip_id in data["trip_index"]:
+    if (reported_trip_id and reported_trip_id in data["trip_index"]
+            and reported_trip_id not in exclude):
         reported_info = data["trip_index"][reported_trip_id]
         reported_active = (
             active_service_ids is None
@@ -541,12 +619,16 @@ def infer_trip(
         )
         match = _match(reported_info["shape_id"]) if reported_active else None
         if match is not None:
-            d, tangent, _ = match
+            d, tangent, dist_along = match
+            dev = (
+                schedule_deviation(reported_trip_id, dist_along, now_sec, data)
+                if now_sec is not None else None
+            )
             if d < _REPORTED_DIST_OK and (
                 bearing is None
                 or _bearing_diff(bearing, tangent) <= _BEARING_WRONG_DEG
-            ):
-                return reported_trip_id, d, tangent
+            ) and (dev is None or abs(dev) <= _REPORTED_MAX_DEVIATION_SEC):
+                return reported_trip_id, d, tangent, (0, abs(dev) if dev is not None else 0.0)
 
     # Bounding boxes let a shape be ruled out without walking it. The bearing
     # and progress terms are each in [0, 1] and non-negative, so a shape whose
@@ -573,13 +655,14 @@ def infer_trip(
             continue
         d, tangent, dist_along = match
 
-        if now_sec is not None:
-            expected = _expected_dist_along(tid, now_sec, data, expected_cache)
-        else:
-            expected = None
-        if expected is not None:
-            shape_len = data["shape_lengths"].get(trip["shape_id"], 0.0)
-            progress_score = min(abs(dist_along - expected) / max(shape_len, 1.0), 1.0)
+        dev = (
+            schedule_deviation(tid, dist_along, now_sec, data)
+            if now_sec is not None else None
+        )
+        if dev is not None:
+            if abs(dev) > _MAX_MATCH_DEVIATION_SEC:
+                continue
+            progress_score = min(abs(dev) / _PROGRESS_TIME_CAP_SEC, 1.0)
         else:
             progress_score = 0.5
 
@@ -590,7 +673,52 @@ def infer_trip(
         )
         if score < best_score:
             best_score, best_dist, best_id, best_tangent = score, d, tid, tangent
-    return best_id, best_dist, best_tangent
+    return best_id, best_dist, best_tangent, (1, best_score)
+
+
+def assign_trips(requests: list[dict], data: dict, active_service_ids=None,
+                 now_sec=None) -> dict:
+    """Match every vehicle of one snapshot, giving each trip to one vehicle.
+
+    *requests* are ``{"key", "route_id", "reported", "vx", "vy", "bearing"}``;
+    returns ``key -> (trip_id, spatial_dist, tangent)`` for the vehicles that
+    matched.
+
+    Matched one at a time, bunched vehicles all land on the same run: each
+    picks the run it is closest to on time, and two buses minutes apart are
+    both closest to the same one.  Publishing both is invalid GTFS-RT, and
+    dropping the loser loses a vehicle whose ETAs are perfectly good — only its
+    trip label was contested.  So the best claim (_infer_trip_ranked's rank)
+    keeps each run and every loser is re-matched with the taken runs excluded,
+    landing on the run before or after; repeated until no conflicts remain.
+    A loser with no plausible run left matches nothing.
+    """
+    def match(r, exclude=frozenset()):
+        return _infer_trip_ranked(
+            r["route_id"], r["reported"], r["vx"], r["vy"], r["bearing"], data,
+            active_service_ids, now_sec, exclude,
+        )
+
+    results = {r["key"]: match(r) for r in requests}
+    by_key = {r["key"]: r for r in requests}
+    pending = list(by_key)
+    taken: dict[str, object] = {}
+    while pending:
+        claims: dict[str, list] = {}
+        for k in pending:
+            tid, _d, _t, rank = results[k]
+            if tid is not None:
+                claims.setdefault(tid, []).append((rank, k))
+        losers = []
+        for tid, cs in claims.items():
+            cs.sort(key=lambda c: c[0])
+            taken[tid] = cs[0][1]
+            losers.extend(k for _rank, k in cs[1:])
+        exclude = frozenset(taken)
+        for k in losers:
+            results[k] = match(by_key[k], exclude)
+        pending = losers
+    return {k: v[:3] for k, v in results.items() if v[0] is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -1411,18 +1539,28 @@ def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
         entity = feed.entity.add()
         entity.id = r["vehicle_id"]
         vp = entity.vehicle
-        vp.trip.trip_id = r["trip_id"]
-        vp.trip.schedule_relationship = gtfs_realtime_pb2.TripDescriptor.SCHEDULED
-        if r.get("route_id"):
-            vp.trip.route_id = r["route_id"]
         vp.vehicle.id = r["vehicle_id"]
+        # A vehicle that lost its trip instance to another (see
+        # trip_instance_winners) keeps its position but claims no trip: two
+        # vehicles on one run is the same error here as in TripUpdates, and the
+        # stop progress below belongs to the trip it no longer claims.
+        claims_trip = r.get("claims_trip", True)
+        if claims_trip:
+            vp.trip.trip_id = r["trip_id"]
+            vp.trip.schedule_relationship = gtfs_realtime_pb2.TripDescriptor.SCHEDULED
+            if r.get("route_id"):
+                vp.trip.route_id = r["route_id"]
+            if r.get("start_date"):
+                vp.trip.start_date = r["start_date"]
+            if r.get("start_time"):
+                vp.trip.start_time = r["start_time"]
         vp.position.latitude = r["lat"]
         vp.position.longitude = r["lon"]
         if r.get("bearing") is not None:
             vp.position.bearing = r["bearing"]
         if r.get("speed") is not None:
             vp.position.speed = r["speed"]
-        if r.get("stop_id") is not None:
+        if claims_trip and r.get("stop_id") is not None:
             vp.stop_id = r["stop_id"]
             vp.current_stop_sequence = r["stop_sequence"]
             vp.current_status = r["status"]
@@ -1435,8 +1573,9 @@ def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
     return feed.SerializeToString()
 
 
-def dedupe_trip_instances(updates: list[dict]) -> list[dict]:
-    """Keep one update per trip instance — the vehicle closest to its timetable.
+def trip_instance_winners(records: list[dict]) -> dict[tuple, str]:
+    """``(trip_id, start_date) -> vehicle_id`` of the one vehicle allowed to claim
+    each trip instance.
 
     GTFS-RT identifies a run by ``(trip_id, start_date)``, and a feed may
     describe each run once.  Upstream routinely reports the same trip_id on two
@@ -1445,21 +1584,33 @@ def dedupe_trip_instances(updates: list[dict]) -> list[dict]:
     duplicated instances per snapshot.  Consumers treat that as an error and
     may drop both updates, losing the one that was right.
 
-    The survivor is the vehicle whose next arrival deviates least from the
-    schedule (``schedule_deviation``, absolute seconds) — the one actually
-    running *this* run rather than the one before or after it.  Without a
-    deviation to compare, the freshest fix wins.  First-seen order is kept.
+    The winner is the vehicle closest to the schedule (``schedule_deviation``,
+    absolute seconds) — the one actually running *this* run rather than the one
+    before or after it.  Without a deviation to compare, the freshest fix wins.
     """
-    best: dict[tuple, int] = {}
-    for i, u in enumerate(updates):
-        key = (u["trip_id"], u.get("start_date"))
-        j = best.get(key)
-        if j is None or _instance_rank(u) < _instance_rank(updates[j]):
-            best[key] = i
-    if len(best) == len(updates):
-        return updates
-    keep = set(best.values())
-    return [u for i, u in enumerate(updates) if i in keep]
+    best: dict[tuple, dict] = {}
+    for r in records:
+        key = (r["trip_id"], r.get("start_date"))
+        cur = best.get(key)
+        if cur is None or _instance_rank(r) < _instance_rank(cur):
+            best[key] = r
+    return {k: r["vehicle_id"] for k, r in best.items()}
+
+
+def dedupe_trip_instances(updates: list[dict],
+                          winners: dict[tuple, str] | None = None) -> list[dict]:
+    """Keep only the updates whose vehicle won its trip instance.
+
+    *winners* defaults to trip_instance_winners over *updates* themselves;
+    run_inference passes the ones decided over every matched vehicle, so
+    TripUpdates and VehiclePositions agree on who runs each trip.  First-seen
+    order is kept.
+    """
+    if winners is None:
+        winners = trip_instance_winners(updates)
+    kept = [u for u in updates
+            if winners.get((u["trip_id"], u.get("start_date"))) == u["vehicle_id"]]
+    return updates if len(kept) == len(updates) else kept
 
 
 def _instance_rank(u: dict) -> tuple:
@@ -1628,7 +1779,36 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     vehicles_stale = 0
     updates = []
     vp_records: list[dict] = []
-    for entity in vp_feed.entity:
+    claims: list[dict] = []
+
+    # Trips are assigned for the whole snapshot up front, so two vehicles never
+    # claim one run (see assign_trips).  Same filters as the loop below, minus
+    # its side effects; keyed by entity position since vehicle ids can repeat.
+    requests = []
+    for i, entity in enumerate(vp_feed.entity):
+        if not entity.HasField("vehicle"):
+            continue
+        v = entity.vehicle
+        if not (v.HasField("position") and v.HasField("trip")):
+            continue
+        pos, trp = v.position, v.trip
+        route_id = str(trp.route_id)
+        if not route_id or not pos.latitude or not pos.longitude:
+            continue
+        if route_id in _BAD_ROUTE_IDS:
+            continue
+        if (v.HasField("timestamp")
+                and stale_ref - int(v.timestamp) > STALE_VEHICLE_MAX_AGE_SEC):
+            continue
+        vx, vy = project_xy(pos.longitude, pos.latitude)
+        requests.append({
+            "key": i, "route_id": route_id, "reported": str(trp.trip_id),
+            "vx": vx, "vy": vy,
+            "bearing": float(pos.bearing) if pos.HasField("bearing") else None,
+        })
+    assigned = assign_trips(requests, gtfs_data, active_service_ids, now_sec)
+
+    for i, entity in enumerate(vp_feed.entity):
         if not entity.HasField("vehicle"):
             continue
         v   = entity.vehicle
@@ -1650,7 +1830,6 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         bearing       = float(pos.bearing) if pos.HasField("bearing") else None
         gps_speed     = float(pos.speed)   if pos.HasField("speed")   else None
         route_id      = str(trp.route_id) if trp else None
-        reported_tid  = str(trp.trip_id)  if trp else None
         vid           = v.vehicle.id if v.HasField("vehicle") else entity.id
 
         if not route_id or not lat or not lon:
@@ -1665,12 +1844,9 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             continue
 
         vx, vy = project_xy(lon, lat)
-        trip_id, min_dist, tangent = infer_trip(
-            route_id, reported_tid, vx, vy, bearing, gtfs_data,
-            active_service_ids, now_sec, expected_cache,
-        )
-        if trip_id is None:
+        if i not in assigned:
             continue
+        trip_id, min_dist, tangent = assigned[i]
         bearing_diff = (
             _bearing_diff(bearing, tangent) if bearing is not None else None
         )
@@ -1704,10 +1880,29 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             trip_id, v_dist, speed, snap_ts, gtfs_data, still
         )
 
+        if not feature_rows:
+            continue
+
+        # Instance identity, and how far off schedule this vehicle is on it —
+        # the rank trip_instance_winners uses to settle which of several
+        # vehicles reporting one run actually owns it.
+        start_date, start_time, sched_epoch = trip_instance_context(
+            trip_id, snap_ts, gtfs_data, now_sec, feed_tz, instance_cache
+        )
+        deviation = schedule_deviation(trip_id, v_dist, now_sec, gtfs_data)
+        claim = {
+            "vehicle_id": vid,
+            "trip_id": trip_id,
+            "start_date": start_date,
+            "schedule_deviation": abs(deviation) if deviation is not None else None,
+            "trip_ts": vehicle_ts if vehicle_ts is not None else feed_ts,
+        }
+        claims.append(claim)
+
         # Cleaned vehicle position: emitted for every on-route matched vehicle,
         # including ones whose ETAs we withhold below — the position itself is
         # still good and is what the VehiclePositions feed exists to serve.
-        if with_vehicle_positions and feature_rows:
+        if with_vehicle_positions:
             next_feat, next_stop_id, next_stop_seq = feature_rows[0]
             next_rem = next_feat[8]  # remaining_dist_m to the next stop
             hist_speed = priors.get(
@@ -1715,8 +1910,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             )[0]
             VP = gtfs_realtime_pb2.VehiclePosition
             vp_records.append({
-                "vehicle_id": vid,
-                "trip_id":    trip_id,
+                **claim,
+                "start_time": start_time,
                 "route_id":   route_id,
                 "lat":        float(lat),
                 "lon":        float(lon),
@@ -1738,15 +1933,9 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 "vehicle_ts": vehicle_ts if vehicle_ts is not None else feed_ts,
             })
 
-        if not feature_rows:
-            continue
-
         # Trip-level fields shared by both prediction paths below. horizon_end
         # is the first stop we deliberately say nothing about; trip_ts is the
         # age of the fix these numbers rest on (see encode_trip_updates).
-        start_date, start_time, sched_epoch = trip_instance_context(
-            trip_id, snap_ts, gtfs_data, now_sec, feed_tz, instance_cache
-        )
         route_type = gtfs_data.get("route_types", {}).get(route_id)
         instance_fields = {
             "start_date":   start_date,
@@ -1772,7 +1961,6 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 trip_id, snap_ts, gtfs_data, feature_rows, v_dist, min_dist
             )
             if sched_preds:
-                sched_delay = _delay_for(sched_preds, snap_ts, sched_epoch)
                 updates.append({
                     "vehicle_id": vid,
                     "trip_id":    trip_id,
@@ -1782,8 +1970,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                     # Not model output — the per-horizon model bands don't
                     # describe these, so carry their own.
                     "uncertainty": _TERMINUS_UNCERTAINTY_SEC,
-                    "delay": sched_delay if delay_ok else None,
-                    "schedule_deviation": abs(sched_delay) if sched_delay is not None else None,
+                    "delay": _delay_for(sched_preds, snap_ts, sched_epoch) if delay_ok else None,
                     **instance_fields,
                 })
                 continue
@@ -1797,7 +1984,6 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
              "seconds": float(sec) - _bias_correction_for(bias_table, int(r[0][2]))}
             for r, sec in zip(feature_rows, preds_sec)
         ]
-        model_delay = _delay_for(model_preds, snap_ts, sched_epoch)
         updates.append({
             "vehicle_id": vid,
             "trip_id":    trip_id,
@@ -1806,10 +1992,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             "predictions": model_preds,
             # None for a moving vehicle → the per-horizon model bands apply.
             "uncertainty": terminus_unc,
-            "delay": model_delay if delay_ok else None,
-            # Internal: ranks vehicles sharing a trip (dedupe_trip_instances),
-            # whatever the mode — unlike delay, which only some modes publish.
-            "schedule_deviation": abs(model_delay) if model_delay is not None else None,
+            "delay": _delay_for(model_preds, snap_ts, sched_epoch) if delay_ok else None,
             **instance_fields,
         })
 
@@ -1823,10 +2006,17 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             "feed_skew_sec": feed_skew,
         })
 
+    # One vehicle per trip instance, decided once over every matched vehicle so
+    # both feeds name the same one — including when the winner's ETAs were
+    # withheld, which then leaves the run without a TripUpdate rather than
+    # handing it to a vehicle the VehiclePositions feed says is not on it.
+    winners = trip_instance_winners(claims)
     tu_bytes = encode_trip_updates(
-        dedupe_trip_instances(updates), feed_ts,
+        dedupe_trip_instances(updates, winners), feed_ts,
         model_data.get("uncertainty_by_horizon"),
     )
     if with_vehicle_positions:
+        for r in vp_records:
+            r["claims_trip"] = winners.get((r["trip_id"], r["start_date"])) == r["vehicle_id"]
         return tu_bytes, encode_vehicle_positions(vp_records, feed_ts)
     return tu_bytes

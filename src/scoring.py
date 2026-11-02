@@ -74,8 +74,10 @@ PAST_CROSSING_TOLERANCE_SEC = 60
 # A prediction is only scored if it was generated while its matched trip_id
 # could plausibly have been running — this many seconds either side of that
 # trip's own scheduled [first_departure, last_arrival]. Live serving's trip
-# matcher (src/inference.py's infer_trip) has no schedule-time check at all,
-# so a route/direction/shape with only one (or few) static trips gets that
+# matcher (src/inference.py's infer_trip) had no schedule-time check at all
+# until 2026-11 (it now refuses runs over _MAX_MATCH_DEVIATION_SEC off
+# schedule; this filter still guards archives from before that), so a
+# route/direction/shape with only one (or few) static trips got that
 # one trip_id force-matched onto ANY vehicle on that shape at ANY hour —
 # found 2026-07-28: a prediction generated 21:00 Kyiv joined against a trip
 # scheduled 06:00-06:40, an 11h+ mismatch. The join can't tell that from a

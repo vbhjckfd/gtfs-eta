@@ -553,6 +553,51 @@ class TestScheduleProgressMatcher:
         tid, _, _ = infer_trip("R", None, 500.0, 0.0, None, data, now_sec=1200.0)
         assert tid == "late"
 
+    def test_finished_run_does_not_fit_a_vehicle_at_the_terminus(self):
+        # At x=1000 (the last stop) at now_sec=1500, "late" arrives there right
+        # on time.  "early" finished at 600 — its clamped expected position is
+        # also x=1000, which used to make it an equally perfect fit.
+        data = self._data()
+        data["route_trips"]["R"] = ["early", "late"]
+        tid, _, _ = infer_trip("R", None, 1000.0, 0.0, None, data, now_sec=1500.0)
+        assert tid == "late"
+
+    def test_reported_wrong_run_is_overridden(self):
+        data = self._data()
+        # Upstream says "early", but at x=500 it would be 1400 s late (past the
+        # 1200 s trust gate) while "late" is only 500 s late there.
+        tid, _, _ = infer_trip("R", "early", 500.0, 0.0, None, data, now_sec=1700.0)
+        assert tid == "late"
+
+    def test_reported_run_kept_when_plausible(self):
+        data = self._data()
+        # 5 min late on the reported run: trusted even though "late" is closer.
+        tid, _, _ = infer_trip("R", "early", 500.0, 0.0, None, data, now_sec=600.0)
+        assert tid == "early"
+
+    def test_nothing_within_an_hour_matches_nothing(self):
+        data = self._data()
+        tid, _, _ = infer_trip("R", None, 500.0, 0.0, None, data, now_sec=6 * 3600.0)
+        assert tid is None
+
+
+def test_schedule_deviation_sign_ends_and_midnight():
+    from src.inference import schedule_deviation
+    data = {
+        "stop_distances": {("s", "A"): 0.0, ("s", "B"): 1000.0},
+        "trip_index": {
+            "t": {"shape_id": "s", "start_sec": 3600.0,
+                  "stop_times": [("A", 1, 0.0), ("B", 2, 600.0)]},
+            "night": {"shape_id": "s", "start_sec": 23.5 * 3600,
+                      "stop_times": [("A", 1, 0.0), ("B", 2, 3600.0)]},
+        },
+    }
+    assert schedule_deviation("t", 500.0, 3600.0 + 400, data) == pytest.approx(100.0)
+    # Past the last stop: measured against the last stop's time, not clamped to 0.
+    assert schedule_deviation("t", 1000.0, 3 * 3600.0, data) == pytest.approx(3 * 3600 - 4200)
+    # 00:10 next day, halfway along a 23:30→00:30 run: 10 min late.
+    assert schedule_deviation("night", 500.0, 600.0, data) == pytest.approx(600.0)
+
 
 class TestAmbiguousShapeProjection:
     """Self-intersecting shapes (out-and-back routes, tram turnarounds — e.g.
@@ -798,14 +843,20 @@ class TestTerminusSchedule:
         assert not arr.HasField("uncertainty")   # no table passed → no field
 
     def test_departure_too_far_away_falls_back_to_the_model(self, gtfs):
-        """An hour of parking means the matched trip is the wrong instance, so
-        the timetable is dropped — but the tram is still served, like a bus."""
+        """40 min of parking means the matched trip may be the wrong instance,
+        so the timetable is dropped — but the tram is still served, like a bus."""
         now = datetime.now(timezone.utc)
-        feed = self._feed(gtfs, self.TRAM, 3600.0, now)
+        feed = self._feed(gtfs, self.TRAM, 2400.0, now)
         assert len(feed.entity) == 1
         stus = feed.entity[0].trip_update.stop_time_update
         assert stus[0].arrival.time == pytest.approx(now.timestamp() + 300, abs=2)
         assert stus[0].arrival.uncertainty == _TERMINUS_MODEL_UNCERTAINTY_SEC
+
+    def test_no_plausible_run_matches_nothing(self, gtfs):
+        """Over an hour from the only run on the shape, nothing is published:
+        that run is not the one the vehicle is on."""
+        now = datetime.now(timezone.utc)
+        assert len(self._feed(gtfs, self.TRAM, 2 * 3600.0, now).entity) == 0
 
     def test_slightly_overdue_departure_leaves_now(self, gtfs):
         now = datetime.now(timezone.utc)
@@ -960,6 +1011,47 @@ class TestVehiclePositions:
         assert v.HasField("current_stop_sequence")
         # Next stop after 1200 m is stop3 (at 1500 m) → IN_TRANSIT_TO it.
         assert v.current_status == gtfs_realtime_pb2.VehiclePosition.IN_TRANSIT_TO
+
+    def _two_on_one_trip(self, data):
+        """Both feeds for two vehicles that upstream reports on the same trip."""
+        from google.transit import gtfs_realtime_pb2
+        now = datetime.now(timezone.utc)
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(_vp_bytes(LAT, _lon_at(1200.0), ts=now, bearing=90.0))
+        second = feed.entity.add()
+        second.CopyFrom(feed.entity[0])
+        second.id = second.vehicle.vehicle.id = "v2"
+        second.vehicle.position.longitude = _lon_at(600.0)
+        tu_bytes, vp_bytes = run_inference(
+            data, self._model(), {}, feed.SerializeToString(),
+            with_vehicle_positions=True,
+        )
+        tu = gtfs_realtime_pb2.FeedMessage()
+        tu.ParseFromString(tu_bytes)
+        vpos = gtfs_realtime_pb2.FeedMessage()
+        vpos.ParseFromString(vp_bytes)
+        return tu, vpos
+
+    def test_one_trip_two_vehicles_one_owner(self, gtfs):
+        """With no other run to fall back to, only one vehicle is matched —
+        and both feeds name the same one."""
+        tu, vpos = self._two_on_one_trip(_compact_data(gtfs))
+        assert len(tu.entity) == 1 and len(vpos.entity) == 1
+        assert (tu.entity[0].trip_update.vehicle.id
+                == vpos.entity[0].vehicle.vehicle.id)
+
+    def test_loser_takes_the_next_run(self, gtfs):
+        """A second run on the same shape absorbs the losing vehicle instead of
+        dropping it."""
+        import copy
+        data = _compact_data(gtfs)
+        data["trip_index"]["t2"] = copy.deepcopy(data["trip_index"][TRIP_ID])
+        data["route_trips"][ROUTE_ID] = [TRIP_ID, "t2"]
+        tu, vpos = self._two_on_one_trip(data)
+        tu_trips = {e.trip_update.vehicle.id: e.trip_update.trip.trip_id for e in tu.entity}
+        vp_trips = {e.vehicle.vehicle.id: e.vehicle.trip.trip_id for e in vpos.entity}
+        assert set(tu_trips.values()) == {TRIP_ID, "t2"}
+        assert tu_trips == vp_trips
 
     def test_withheld_vehicle_still_gets_position(self, gtfs):
         """A vehicle whose ETAs are withheld — idling short of the terminus

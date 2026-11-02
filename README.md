@@ -251,10 +251,11 @@ Inference runs in `scripts/push_feed.py` (the GitHub Actions push pipeline), usi
 
 Per cycle (every ~10 s):
 1. Fetch the current vehicle positions GTFS-RT feed from upstream.
-2. For each vehicle: project lat/lon to UTM, match to the best trip shape (off-route filter with hysteresis), project the vehicle's exact position along the shape, and measure progress speed vs the previous cycle.
-3. Build feature rows for the next ≤10 stops, anchored at the vehicle's projected position.
-4. Run the serialised GBT model.
-5. Encode a GTFS-RT TripUpdates protobuf and a cleaned VehiclePositions protobuf, and upload both to R2.
+2. Match every vehicle to a trip: shape distance, heading, and how far off schedule it would be on that run (no run over 1 h off is accepted). Trips are assigned for the whole snapshot at once, so each run goes to one vehicle and a bunched second vehicle takes the run before or after.
+3. For each vehicle: off-route filter with hysteresis, project the vehicle's exact position along the shape, and measure progress speed vs the previous cycle.
+4. Build feature rows for the next ≤10 stops, anchored at the vehicle's projected position.
+5. Run the serialised GBT model.
+6. Encode a GTFS-RT TripUpdates protobuf and a cleaned VehiclePositions protobuf, and upload both to R2.
 
 A Lviv route averages 216 trips over just 2.5 distinct shapes, so trip matching
 memoises the polyline walk per shape, caches the schedule-progress lookup per
@@ -288,7 +289,7 @@ renumbered every later stop. The quality scorer reads the horizon from exactly
 that position, so serving and calibration had been keying their per-horizon
 uncertainty and bias tables off horizons that differed by one.
 
-The **cleaned VehiclePositions feed** (`feed/vehicle_positions.pb`) re-emits the upstream positions enriched with this project's corrected trip match (often better than the operator's reported `trip_id`), the next stop + `current_status` (STOPPED_AT / IN_TRANSIT_TO), and a `congestion_level` derived from observed-vs-historical speed. It is a by-product of the same inference pass, so it costs no extra geometry work.
+The **cleaned VehiclePositions feed** (`feed/vehicle_positions.pb`) re-emits the upstream positions enriched with this project's corrected trip match (often better than the operator's reported `trip_id`; each trip instance goes to one vehicle, with `start_date`/`start_time`, the same one TripUpdates names), the next stop + `current_status` (STOPPED_AT / IN_TRANSIT_TO), and a `congestion_level` derived from observed-vs-historical speed. It is a by-product of the same inference pass, so it costs no extra geometry work.
 
 The feeds are served from the **R2 public custom domain** `eta.lad.lviv.ua`, which Cloudflare edge-caches natively (`Cache-Control: max-age=10` stamped on the objects), so they cost no worker invocation or R2 read per poll:
 - `https://eta.lad.lviv.ua/feed/trip_updates.pb`
