@@ -57,11 +57,13 @@ export function healthPoint(env, httpStatus, body) {
 /**
  * index1 = "cron"
  *   blob2 cron expression   blob3 workflow
+ *   blob4 gtfsRefresh: fresh | cooldown | dispatched | dispatch_failed | error
+ *         (empty on the daily score cron)
  *   double1 dispatched (0/1)  double2 archived (0/1, -1 = not attempted)
  *   double3 durationMs
  */
-export function cronPoint(env, { cron, workflow, dispatched, archived, durationMs }) {
-  writePoint(env, "cron", [cron, workflow], [dispatched, archived, durationMs]);
+export function cronPoint(env, { cron, workflow, dispatched, archived, durationMs, gtfsRefresh }) {
+  writePoint(env, "cron", [cron, workflow, gtfsRefresh], [dispatched, archived, durationMs]);
 }
 
 /**

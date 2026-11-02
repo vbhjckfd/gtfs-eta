@@ -837,6 +837,51 @@ def _sched_sec_at_dist(stop_dists: list, sched_cums: list, d: float) -> float:
     return sched_cums[-1]
 
 
+def _sequence_consistent(entries: list) -> list:
+    """Drop the stops whose distance along the shape contradicts their sequence.
+
+    ``stop_distances`` is keyed by ``(shape_id, stop_id)``, so a stop the trip
+    visits twice (a loop, a turnaround) gets one distance for both visits, and a
+    stop that projects onto the wrong leg of a self-overlapping shape lands far
+    from its neighbours.  Sorted by distance, such a stop shows up out of
+    sequence order — observed live as ``230, 224, 231`` — and GTFS-RT requires
+    StopTimeUpdates sorted by stop_sequence (validator E002), so consumers
+    reject the whole update.
+
+    Keeps the longest run of entries whose stop_sequence strictly increases with
+    distance (patience-sorting LIS, O(n log n)).  On a well-formed trip that is
+    every entry and the list comes back unchanged; otherwise only the misplaced
+    visits go, rather than everything after the first one, as a running-max
+    filter would do.
+    """
+    if not entries:
+        return entries
+    seqs = [int(e[2]) for e in entries]
+    tails: list[int] = []        # tails[k]: index ending the best run of length k+1
+    prev = [-1] * len(entries)
+    for i, q in enumerate(seqs):
+        lo, hi = 0, len(tails)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if seqs[tails[mid]] < q:
+                lo = mid + 1
+            else:
+                hi = mid
+        prev[i] = tails[lo - 1] if lo else -1
+        if lo == len(tails):
+            tails.append(i)
+        else:
+            tails[lo] = i
+    if len(tails) == len(entries):
+        return entries
+    keep = []
+    i = tails[-1]
+    while i != -1:
+        keep.append(entries[i])
+        i = prev[i]
+    return keep[::-1]
+
+
 def _trip_stop_entries(trip_id: str, data: dict) -> list:
     """A trip's stops as ``[(dist_along, stop_id, stop_sequence, orig_idx), ...]``,
     sorted by distance along the shape.
@@ -852,10 +897,10 @@ def _trip_stop_entries(trip_id: str, data: dict) -> list:
         if trip is None:
             return []
         sts = trip["stop_times"]  # [(stop_id, seq, sched_cum_sec), ...]
-        entries = sorted(
+        entries = _sequence_consistent(sorted(
             (data["stop_distances"].get((trip["shape_id"], st[0]), 0.0), st[0], st[1], i)
             for i, st in enumerate(sts)
-        )
+        ))
         cache[trip_id] = entries
     return entries
 
@@ -1243,7 +1288,8 @@ def encode_trip_updates(
         # Enforce non-decreasing arrival times with an isotonic fit rather than a
         # one-sided running max (which biases far stops late).
         iso_secs = _isotonic([p["seconds"] for p in u["predictions"]])
-        for pred, sec in zip(u["predictions"], iso_secs):
+        arrivals = []
+        for sec in iso_secs:
             # Direct multi-horizon seconds from the snapshot; the final max only
             # repairs integer-rounding ties (the isotonic fit is already monotone).
             arr_ts = max(int(t0.timestamp() + sec), last_arr_ts)
@@ -1258,12 +1304,23 @@ def encode_trip_updates(
             # horizon N-1 and then served at horizon N.
             arr_ts = max(arr_ts, now_ts + 1)
             last_arr_ts = arr_ts
+            arrivals.append(arr_ts)
+        dwell = int(u.get("dwell") or _DWELL_SECS)
+        for i, (pred, arr_ts) in enumerate(zip(u["predictions"], arrivals)):
             stu = tu.stop_time_update.add()
             stu.stop_id = pred["stop_id"]
             stu.stop_sequence = pred["stop_sequence"]
             stu.schedule_relationship = gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.SCHEDULED
             stu.arrival.time = arr_ts
-            stu.departure.time = arr_ts + int(u.get("dwell") or _DWELL_SECS)
+            # The model predicts each arrival directly, so two stops can sit
+            # closer together than one dwell — a departure past the next stop's
+            # arrival is a time going backwards (validator E022, ~3 % of stop
+            # updates live).  The vehicle cannot leave a stop after reaching the
+            # next one, so the next arrival bounds the dwell.
+            dep_ts = arr_ts + dwell
+            if i + 1 < len(arrivals):
+                dep_ts = min(dep_ts, arrivals[i + 1])
+            stu.departure.time = dep_ts
             # Publish the model's confidence so consumers can widen the window
             # for far-horizon stops. Keyed by the true horizon when carried,
             # else by emitted position (matches the scorer's stops_ahead proxy).
@@ -1376,6 +1433,38 @@ def encode_vehicle_positions(records: list[dict], feed_ts: int) -> bytes:
         # back to the batch feed_ts only when it didn't.
         vp.timestamp = r.get("vehicle_ts", feed_ts)
     return feed.SerializeToString()
+
+
+def dedupe_trip_instances(updates: list[dict]) -> list[dict]:
+    """Keep one update per trip instance — the vehicle closest to its timetable.
+
+    GTFS-RT identifies a run by ``(trip_id, start_date)``, and a feed may
+    describe each run once.  Upstream routinely reports the same trip_id on two
+    or three vehicles (bunched buses, a relief vehicle, a stale assignment), and
+    the fast path in infer_trip trusts that report, so the feed carried ~10
+    duplicated instances per snapshot.  Consumers treat that as an error and
+    may drop both updates, losing the one that was right.
+
+    The survivor is the vehicle whose next arrival deviates least from the
+    schedule (``schedule_deviation``, absolute seconds) — the one actually
+    running *this* run rather than the one before or after it.  Without a
+    deviation to compare, the freshest fix wins.  First-seen order is kept.
+    """
+    best: dict[tuple, int] = {}
+    for i, u in enumerate(updates):
+        key = (u["trip_id"], u.get("start_date"))
+        j = best.get(key)
+        if j is None or _instance_rank(u) < _instance_rank(updates[j]):
+            best[key] = i
+    if len(best) == len(updates):
+        return updates
+    keep = set(best.values())
+    return [u for i, u in enumerate(updates) if i in keep]
+
+
+def _instance_rank(u: dict) -> tuple:
+    dev = u.get("schedule_deviation")
+    return (dev is None, dev if dev is not None else 0, -(u.get("trip_ts") or 0))
 
 
 def _congestion_level(speed: float, hist_speed: float):
@@ -1683,6 +1772,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 trip_id, snap_ts, gtfs_data, feature_rows, v_dist, min_dist
             )
             if sched_preds:
+                sched_delay = _delay_for(sched_preds, snap_ts, sched_epoch)
                 updates.append({
                     "vehicle_id": vid,
                     "trip_id":    trip_id,
@@ -1692,7 +1782,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                     # Not model output — the per-horizon model bands don't
                     # describe these, so carry their own.
                     "uncertainty": _TERMINUS_UNCERTAINTY_SEC,
-                    "delay": _delay_for(sched_preds, snap_ts, sched_epoch) if delay_ok else None,
+                    "delay": sched_delay if delay_ok else None,
+                    "schedule_deviation": abs(sched_delay) if sched_delay is not None else None,
                     **instance_fields,
                 })
                 continue
@@ -1706,6 +1797,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
              "seconds": float(sec) - _bias_correction_for(bias_table, int(r[0][2]))}
             for r, sec in zip(feature_rows, preds_sec)
         ]
+        model_delay = _delay_for(model_preds, snap_ts, sched_epoch)
         updates.append({
             "vehicle_id": vid,
             "trip_id":    trip_id,
@@ -1714,7 +1806,10 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
             "predictions": model_preds,
             # None for a moving vehicle → the per-horizon model bands apply.
             "uncertainty": terminus_unc,
-            "delay": _delay_for(model_preds, snap_ts, sched_epoch) if delay_ok else None,
+            "delay": model_delay if delay_ok else None,
+            # Internal: ranks vehicles sharing a trip (dedupe_trip_instances),
+            # whatever the mode — unlike delay, which only some modes publish.
+            "schedule_deviation": abs(model_delay) if model_delay is not None else None,
             **instance_fields,
         })
 
@@ -1729,7 +1824,8 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
         })
 
     tu_bytes = encode_trip_updates(
-        updates, feed_ts, model_data.get("uncertainty_by_horizon")
+        dedupe_trip_instances(updates), feed_ts,
+        model_data.get("uncertainty_by_horizon"),
     )
     if with_vehicle_positions:
         return tu_bytes, encode_vehicle_positions(vp_records, feed_ts)

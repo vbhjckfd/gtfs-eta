@@ -18,6 +18,8 @@
  *   the GitHub Actions push-feed workflow via the GitHub API.  The workflow runs
  *   for ~4 minutes pushing a fresh feed to R2 every 10 s — Cloudflare's cron is
  *   far more reliable than GitHub's own scheduled triggers on low-activity repos.
+ *   The same cron dispatches refresh-gtfs.yml when the operator's static zip is
+ *   newer than our export of it (see GTFS_STATIC_URL).
  *
  * FeedWatchdog (Durable Object): between those 5-minute crons an alarm checks
  *   every WATCHDOG_INTERVAL_SEC that the feed blob is still being rewritten and
@@ -51,6 +53,22 @@ const FEED_KEY = "feed/trip_updates.pb";
 // handler 301-redirects the worker's legacy feed paths here; archival and
 // /health still read the blob directly via the R2 binding, not this URL.
 const R2_PUBLIC_BASE = "https://eta.lad.lviv.ua/feed";
+
+// Static GTFS freshness.  refresh-gtfs.yml re-exports the compact static the
+// push daemon predicts against (worker/gtfs_worker_data.pkl) on a daily GitHub
+// cron — which GitHub may start hours late (2026-11-02: due 02:00, ran 09:07).
+// When the operator republishes static in between, every trip it renamed is
+// matched against our old copy and published with a trip_id the new static no
+// longer has (validator E003: Google drops those updates outright).  So the
+// 5-minute cron HEADs the upstream zip too and dispatches the refresh as soon
+// as it is newer than our export.  A fresh push-feed run loads the new export
+// within one cron period, so the window shrinks from hours to minutes.
+const GTFS_STATIC_URL = "https://track.ua-gis.com/gtfs/lviv/static.zip";
+const GTFS_KEY = "worker/gtfs_worker_data.pkl";
+// One refresh run takes ~2 min.  The cooldown keeps a failing export, or an
+// upstream that bumps Last-Modified without changing anything, from being
+// re-dispatched every cron.
+const REFRESH_COOLDOWN_SEC = 1800;
 
 // Prefix under which the served feed is archived for offline quality scoring.
 // On every cron fire we copy the *currently served* blob to
@@ -336,6 +354,49 @@ async function archiveFeed(env) {
 }
 
 /**
+ * Whether the upstream static zip was published after our export of it.
+ * *lastModified* is the upstream HTTP header (string, may be null); *uploaded*
+ * the export blob's R2 upload time (Date, or null when it is missing — which
+ * counts as stale).  An unparseable or absent header never triggers a refresh:
+ * without a timestamp there is nothing to compare, and the daily cron still
+ * runs.
+ */
+export function staticIsNewer(lastModified, uploaded) {
+  const published = Date.parse(lastModified ?? "");
+  if (!Number.isFinite(published)) return false;
+  if (!uploaded) return true;
+  return published > uploaded.getTime();
+}
+
+/**
+ * Dispatch refresh-gtfs.yml when the upstream static is newer than our export
+ * (see GTFS_STATIC_URL).  Returns what it did, for the cron event:
+ * "fresh", "cooldown", "dispatched" or "dispatch_failed".  Throws on R2 or
+ * network errors — the caller isolates it from the rest of the cron.
+ */
+async function refreshStaticIfStale(env, watchdog) {
+  const upstream = await fetch(env.GTFS_STATIC_URL ?? GTFS_STATIC_URL, {
+    method: "HEAD",
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!upstream.ok) return "fresh";
+  const exported = await env.R2.head(env.GTFS_KEY ?? GTFS_KEY);
+  const lastModified = upstream.headers.get("last-modified");
+  if (!staticIsNewer(lastModified, exported?.uploaded ?? null)) return "fresh";
+
+  const cooldownMs = numVar(env, "REFRESH_COOLDOWN_SEC", REFRESH_COOLDOWN_SEC) * 1000;
+  if (!(await watchdog.claimRefresh(Date.now(), cooldownMs))) return "cooldown";
+  const workflow = env.REFRESH_WORKFLOW ?? "refresh-gtfs.yml";
+  const dispatched = await dispatchWorkflow(env, workflow);
+  console.warn(
+    `[scheduled] static ${lastModified} newer than export ` +
+    `${exported?.uploaded?.toISOString() ?? "missing"} — ${workflow} ` +
+    (dispatched ? "dispatched" : "dispatch failed"),
+  );
+  return dispatched ? "dispatched" : "dispatch_failed";
+}
+
+/**
  * Trigger a GitHub Actions workflow via the REST dispatch API.  Used by the
  * cron handler for both push-feed.yml (every 5 min) and score-quality.yml
  * (daily).  A failed dispatch is reported to New Relic — it stalls whichever
@@ -606,6 +667,18 @@ export class FeedWatchdog extends DurableObject {
     return false;
   }
 
+  /**
+   * Single-flight guard for the static refresh dispatch: true (and recorded)
+   * when none was claimed within *cooldownMs*.  Lives here because this object
+   * is the only durable state the worker has.
+   */
+  async claimRefresh(nowMs, cooldownMs) {
+    const last = (await this.ctx.storage.get("lastRefreshMs")) ?? 0;
+    if (nowMs - last < cooldownMs) return false;
+    await this.ctx.storage.put("lastRefreshMs", nowMs);
+    return true;
+  }
+
   async #arm() {
     const intervalSec = numVar(this.env, "WATCHDOG_INTERVAL_SEC", WATCHDOG_INTERVAL_SEC);
     await this.ctx.storage.setAlarm(Date.now() + intervalSec * 1000);
@@ -718,12 +791,20 @@ export default {
 
     // Keep the watchdog armed and tell it about this dispatch.  After the
     // dispatch for the same reason as the archive: nothing may delay that.
+    const stub = env.WATCHDOG.get(env.WATCHDOG.idFromName("feed"));
     try {
-      const stub = env.WATCHDOG.get(env.WATCHDOG.idFromName("feed"));
       await stub.cronTick(dispatched ? Date.now() : 0);
     } catch (exc) {
       console.error(`[scheduled] watchdog tick raised: ${exc}`);
       await reportException(env, exc, "scheduled.watchdog");
+    }
+
+    let gtfsRefresh = "error";
+    try {
+      gtfsRefresh = await refreshStaticIfStale(env, stub);
+    } catch (exc) {
+      console.error(`[scheduled] static freshness check raised: ${exc}`);
+      await reportException(env, exc, "scheduled.gtfs_refresh");
     }
 
     let archived = true;
@@ -742,6 +823,7 @@ export default {
       workflow,
       dispatched,
       archived,
+      gtfsRefresh,
       durationMs: Date.now() - started,
     };
     cronPoint(env, attrs);

@@ -1352,3 +1352,99 @@ class TestMatcherMemoisation:
         b["trip_index"]["t1"]["start_sec"] = None
         assert _trip_sched_arrays("t1", a) is not None
         assert _trip_sched_arrays("t1", b) is None
+
+
+# ---------------------------------------------------------------------------
+# GTFS-RT conformance: departure/arrival order, stop order, one entity per run
+# ---------------------------------------------------------------------------
+
+
+class TestDepartureBoundedByNextArrival:
+    """A dwell must not push a departure past the next stop's arrival (E022)."""
+
+    def _stus(self, predictions, dwell=30):
+        from google.transit import gtfs_realtime_pb2
+        now = datetime.now(tz=timezone.utc)
+        updates = [{
+            "vehicle_id": "v1", "trip_id": TRIP_ID, "route_id": ROUTE_ID,
+            "snap_ts": now, "predictions": predictions, "dwell": dwell,
+        }]
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(encode_trip_updates(updates, int(now.timestamp())))
+        return feed.entity[0].trip_update.stop_time_update
+
+    def test_close_stops_cap_departure(self):
+        stus = self._stus([
+            {"stop_id": "s1", "stop_sequence": 1, "seconds": 100.0},
+            {"stop_id": "s2", "stop_sequence": 2, "seconds": 110.0},
+            {"stop_id": "s3", "stop_sequence": 3, "seconds": 300.0},
+        ])
+        times = []
+        for s in stus:
+            assert s.departure.time >= s.arrival.time
+            times += [s.arrival.time, s.departure.time]
+        assert times == sorted(times)
+        assert stus[0].departure.time == stus[1].arrival.time
+        # Far enough apart: the full dwell still applies, last stop included.
+        assert stus[1].departure.time - stus[1].arrival.time == 30
+        assert stus[2].departure.time - stus[2].arrival.time == 30
+
+
+class TestSequenceConsistentStops:
+    """Distance-sorted stops must also be in stop_sequence order (E002)."""
+
+    def test_misplaced_visit_dropped(self):
+        from src.inference import _sequence_consistent
+        entries = [(0.0, "a", 1, 0), (100.0, "b", 2, 1), (150.0, "z", 9, 8),
+                   (200.0, "c", 3, 2), (300.0, "d", 4, 3)]
+        assert [e[2] for e in _sequence_consistent(entries)] == [1, 2, 3, 4]
+
+    def test_early_outlier_does_not_cost_the_rest(self):
+        # A running max would keep 9 and drop every stop after it.
+        from src.inference import _sequence_consistent
+        entries = [(0.0, "a", 1, 0), (50.0, "z", 9, 8), (100.0, "b", 2, 1),
+                   (200.0, "c", 3, 2), (300.0, "d", 4, 3)]
+        assert [e[2] for e in _sequence_consistent(entries)] == [1, 2, 3, 4]
+
+    def test_well_formed_trip_unchanged(self):
+        from src.inference import _sequence_consistent
+        entries = [(float(i), str(i), i + 1, i) for i in range(20)]
+        assert _sequence_consistent(entries) is entries
+
+    def test_repeated_stop_keeps_one_visit(self):
+        # A loop stop visited twice shares one (shape, stop) distance.
+        from src.inference import _trip_stop_entries
+        data = {
+            "trip_index": {"t": {"shape_id": "sh", "stop_times": [
+                ("a", 1, 0), ("b", 2, 60), ("a", 3, 120), ("c", 4, 180)]}},
+            "stop_distances": {("sh", "a"): 0.0, ("sh", "b"): 100.0, ("sh", "c"): 300.0},
+        }
+        seqs = [e[2] for e in _trip_stop_entries("t", data)]
+        assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+        assert seqs[-2:] == [2, 4]
+
+
+class TestDedupeTripInstances:
+    """Each (trip_id, start_date) appears in at most one TripUpdate."""
+
+    def _u(self, vid, trip="t1", date="20261102", dev=None, ts=0):
+        return {"vehicle_id": vid, "trip_id": trip, "start_date": date,
+                "schedule_deviation": dev, "trip_ts": ts}
+
+    def test_keeps_vehicle_closest_to_schedule(self):
+        from src.inference import dedupe_trip_instances
+        out = dedupe_trip_instances([
+            self._u("far", dev=900), self._u("other", trip="t2"),
+            self._u("near", dev=30), self._u("unknown", dev=None, ts=99),
+        ])
+        assert [u["vehicle_id"] for u in out] == ["other", "near"]
+
+    def test_freshest_fix_breaks_missing_deviation(self):
+        from src.inference import dedupe_trip_instances
+        out = dedupe_trip_instances([self._u("old", ts=10), self._u("new", ts=20)])
+        assert [u["vehicle_id"] for u in out] == ["new"]
+
+    def test_different_service_days_are_different_runs(self):
+        from src.inference import dedupe_trip_instances
+        ups = [self._u("a", date="20261101"), self._u("b", date="20261102")]
+        assert dedupe_trip_instances(ups) is ups

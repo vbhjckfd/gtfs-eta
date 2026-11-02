@@ -28,6 +28,8 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
 
 **Cron reliability trick**: GitHub Actions scheduled triggers are unreliable on low-activity repos. Instead, a Cloudflare Worker cron fires every 5 minutes and dispatches the `push-feed.yml` GitHub Actions workflow, which pushes a fresh feed snapshot every 10 seconds for ~4 minutes.
 
+**Static refresh**: the same 5-minute cron HEADs the operator's `static.zip` and dispatches `refresh-gtfs.yml` when it is newer than our `worker/gtfs_worker_data.pkl` (30 min cooldown, `REFRESH_COOLDOWN_SEC`). The daily 02:00 refresh cron alone left the feed predicting against a stale static for hours whenever the operator republished mid-day — or GitHub started the cron late — and every renamed trip went out with a trip_id the new static no longer has.
+
 **Feed watchdog**: between those crons a Durable Object alarm (`FeedWatchdog` in [worker/worker.js](worker/worker.js)) HEADs the feed blob every 30 s. If no push has landed for 90 s (a run died mid-cycle), it dispatches `push-feed.yml` immediately instead of waiting up to 5 minutes for the next cron. There is a 180 s cooldown after any dispatch. The cron re-arms the alarm on every fire, so the chain starts by itself after a deploy. Tune or disable it via the `WATCHDOG_*` vars in `wrangler.toml` (`WATCHDOG_DISABLED = "true"` stops it). Everything it uses is on the Workers Free plan.
 
 ## Repository layout
@@ -118,7 +120,8 @@ Three event types, all tagged `service = gtfs-eta-worker` and stamped with
   the `/health` body. The legacy redirect paths are deliberately not
   instrumented — they are edge-cacheable and carry no signal.
 - `GtfsEtaWorkerCron` — one per cron fire: which `cron` matched, the `workflow`
-  dispatched, whether the dispatch and the feed archive succeeded, `durationMs`.
+  dispatched, whether the dispatch and the feed archive succeeded, what the
+  static freshness check did (`gtfsRefresh`), `durationMs`.
   This is the only record that the 5-minute pipeline actually fired.
 - `GtfsEtaWorkerError` — a caught exception or a failed workflow dispatch:
   `level`, `where` (e.g. `scheduled.dispatch:push-feed.yml`, `watchdog.alarm`,
@@ -155,7 +158,7 @@ The same signals also go to Workers Analytics Engine (free, no secret, no outbou
 | `index1` | blobs | doubles |
 |---|---|---|
 | `health` | `blob2` status, `blob3` feedCommit | `double1` httpStatus, `double2` ageSec, `double3` entities, `double4` arrivals, `double5` workingHours, `double6` vehiclesIn, `double7` vehiclesStale, `double8` feedSkewSec |
-| `cron` | `blob2` cron, `blob3` workflow | `double1` dispatched, `double2` archived, `double3` durationMs |
+| `cron` | `blob2` cron, `blob3` workflow, `blob4` gtfsRefresh | `double1` dispatched, `double2` archived, `double3` durationMs |
 | `watchdog` | `blob2` action (`ok`/`cooldown`/`dispatched`/`dispatch_failed`/`error`) | `double1` feed ageSec, `double2` dispatched |
 
 Unknown numbers are written as `-1`. Query over the SQL API with an API token that has *Account Analytics: Read*:
