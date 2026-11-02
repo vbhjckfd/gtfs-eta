@@ -25,11 +25,19 @@ jobs:
           cutoff=$(date -u -d "$KEEP_DAYS days ago" +%Y-%m-%dT%H:%M:%SZ)
           echo "Deleting completed runs created before $cutoff"
           # The API returns at most 1000 results per query, so repeat until none are left.
+          # A big backlog can exhaust the GITHUB_TOKEN rate limit; stop then and let the
+          # next daily run continue instead of failing.
           while :; do
-            gh api --paginate "repos/$REPO/actions/runs?status=completed&created=<$cutoff&per_page=100" \
-              --jq '.workflow_runs[].id' > ids.txt
+            if ! gh api --paginate "repos/$REPO/actions/runs?status=completed&created=<$cutoff&per_page=100" \
+              --jq '.workflow_runs[].id' > ids.txt; then
+              echo "::warning::Listing runs failed (likely rate limit); the next run continues"
+              break
+            fi
             n=$(wc -l < ids.txt)
             echo "$n runs to delete"
             [ "$n" -eq 0 ] && break
-            xargs -P 8 -I{} gh api -X DELETE "repos/$REPO/actions/runs/{}" --silent < ids.txt
+            if ! xargs -P 8 -I{} gh api -X DELETE "repos/$REPO/actions/runs/{}" --silent < ids.txt; then
+              echo "::warning::Some deletes failed (likely rate limit); the next run continues"
+              break
+            fi
           done
