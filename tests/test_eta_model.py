@@ -575,6 +575,40 @@ class TestScheduleProgressMatcher:
         tid, _, _ = infer_trip("R", "early", 500.0, 0.0, None, data, now_sec=600.0)
         assert tid == "early"
 
+    def _assign(self, data, now_sec, prev=None, reported=None):
+        from src.inference import assign_trips
+        out = assign_trips([{"key": 0, "route_id": "R", "reported": reported,
+                             "vx": 500.0, "vy": 0.0, "bearing": None,
+                             "prev": prev}], data, now_sec=now_sec)
+        return out[0][0]
+
+    def test_previous_run_kept_when_only_slightly_worse(self):
+        # now 800 at x=500: "early" 500 s late, "late" 400 s early — "late"
+        # fits 100 s better, inside the sticky credit.
+        data = self._data()
+        assert self._assign(data, 800.0) == "late"
+        assert self._assign(data, 800.0, prev="early") == "early"
+
+    def test_previous_run_dropped_when_clearly_worse(self):
+        # now 1100: "early" 800 s late, "late" 100 s early — 700 s better.
+        data = self._data()
+        assert self._assign(data, 1100.0, prev="early") == "late"
+
+    def test_contested_run_stays_with_its_holder(self):
+        from src.inference import assign_trips
+        data = self._data()
+        # Two vehicles 50 m apart both fit "late" best; the one already on it
+        # keeps it even though the newcomer is marginally closer on time.
+        reqs = [
+            {"key": "new", "route_id": "R", "reported": None, "vx": 550.0,
+             "vy": 0.0, "bearing": None, "prev": None},
+            {"key": "old", "route_id": "R", "reported": None, "vx": 500.0,
+             "vy": 0.0, "bearing": None, "prev": "late"},
+        ]
+        out = assign_trips(reqs, data, now_sec=1230.0)
+        assert out["old"][0] == "late"
+        assert out["new"][0] == "early"
+
     def test_nothing_within_an_hour_matches_nothing(self):
         data = self._data()
         tid, _, _ = infer_trip("R", None, 500.0, 0.0, None, data, now_sec=6 * 3600.0)

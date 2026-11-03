@@ -95,6 +95,18 @@ _REPORTED_MAX_DEVIATION_SEC = 1200.0
 # src/scoring.SCHEDULE_WINDOW_MARGIN_SEC); a wrong trip is worse than none.
 # Lviv buses do run ±30 min late (p10/p90), so this stays well clear of that.
 _MAX_MATCH_DEVIATION_SEC = 3600.0
+# A vehicle's run from the previous push is credited this much schedule
+# deviation, in matching and in contested claims.  Without it two bunched buses
+# swapped runs whenever their deviations crossed — ~2 % of trips changed
+# vehicle between consecutive pushes — so a run switches only when another fits
+# clearly better.  Replayed over 60 pushes (2026-11-03 08:00Z): 300 s → 0.74 %,
+# 600 s → 0.50 %, 900 s → 0.28 % with schedule fit unchanged.  600 s bounds how
+# long a bus that overtook another can keep the wrong run to about one headway.
+# Ignored once the previous match is older than _STICKY_MAX_AGE_SEC (a vehicle
+# that vanished and came back starts fresh).
+_STICKY_SEC = 600.0
+_STICKY_MAX_AGE_SEC = 180.0
+_STICKY_SCORE = _PROGRESS_W * _STICKY_SEC / _PROGRESS_TIME_CAP_SEC
 
 # Idling-at-origin guard: a vehicle parked at (≈) the shape start with no
 # measurable forward motion is waiting for its departure.  How that departure is
@@ -553,7 +565,7 @@ def infer_trip(
 
 def _infer_trip_ranked(
     route_id, reported_trip_id, vx, vy, bearing, data,
-    active_service_ids=None, now_sec=None, exclude=frozenset(),
+    active_service_ids=None, now_sec=None, exclude=frozenset(), prev_trip=None,
 ):
     """``(trip_id, spatial_dist, tangent_bearing, rank)`` for a vehicle snapshot.
 
@@ -561,6 +573,8 @@ def _infer_trip_ranked(
     reported trip ranks ahead of any scored match, then lower deviation or
     score wins.  Trips in *exclude* — already owned by another vehicle — are
     never returned, so a vehicle that lost its best run settles on its next.
+    *prev_trip*, the vehicle's match on the previous push, is credited
+    _STICKY_SEC of deviation.
 
     Combines spatial distance with heading alignment so opposite-direction
     shape variants — which sit on top of each other and defeat pure
@@ -628,7 +642,10 @@ def _infer_trip_ranked(
                 bearing is None
                 or _bearing_diff(bearing, tangent) <= _BEARING_WRONG_DEG
             ) and (dev is None or abs(dev) <= _REPORTED_MAX_DEVIATION_SEC):
-                return reported_trip_id, d, tangent, (0, abs(dev) if dev is not None else 0.0)
+                rank = abs(dev) if dev is not None else 0.0
+                if reported_trip_id == prev_trip:
+                    rank -= _STICKY_SEC
+                return reported_trip_id, d, tangent, (0, rank)
 
     # Bounding boxes let a shape be ruled out without walking it. The bearing
     # and progress terms are each in [0, 1] and non-negative, so a shape whose
@@ -637,6 +654,10 @@ def _infer_trip_ranked(
     # exact, not approximate — the chosen trip and its reported distance are
     # unchanged. Absent from an older export, in which case nothing is pruned.
     bboxes = data.get("shape_bboxes") or {}
+    # The sticky credit can take a score below its bbox floor, so the previous
+    # run's shape is never pruned — keeps the pruning exact.
+    prev_info = data["trip_index"].get(prev_trip) if prev_trip else None
+    prev_shape = prev_info["shape_id"] if prev_info else None
 
     best_id, best_dist, best_tangent, best_score = None, math.inf, 0.0, math.inf
     for tid in candidates:
@@ -646,7 +667,7 @@ def _infer_trip_ranked(
         shape_id = trip["shape_id"]
         if shape_id not in shape_match:
             bbox = bboxes.get(shape_id)
-            if bbox is not None and best_score < math.inf:
+            if bbox is not None and best_score < math.inf and shape_id != prev_shape:
                 floor = _SPATIAL_W * min(bbox_min_distance(bbox, vx, vy) / _MATCH_DIST_CAP, 5.0)
                 if floor >= best_score:
                     continue
@@ -671,6 +692,8 @@ def _infer_trip_ranked(
             + _BEARING_W * _bearing_score(bearing, tangent)
             + _PROGRESS_W * progress_score
         )
+        if tid == prev_trip:
+            score -= _STICKY_SCORE
         if score < best_score:
             best_score, best_dist, best_id, best_tangent = score, d, tid, tangent
     return best_id, best_dist, best_tangent, (1, best_score)
@@ -680,7 +703,8 @@ def assign_trips(requests: list[dict], data: dict, active_service_ids=None,
                  now_sec=None) -> dict:
     """Match every vehicle of one snapshot, giving each trip to one vehicle.
 
-    *requests* are ``{"key", "route_id", "reported", "vx", "vy", "bearing"}``;
+    *requests* are ``{"key", "route_id", "reported", "vx", "vy", "bearing"}``,
+    plus an optional ``"prev"`` (the vehicle's previous run, see _STICKY_SEC);
     returns ``key -> (trip_id, spatial_dist, tangent)`` for the vehicles that
     matched.
 
@@ -696,7 +720,7 @@ def assign_trips(requests: list[dict], data: dict, active_service_ids=None,
     def match(r, exclude=frozenset()):
         return _infer_trip_ranked(
             r["route_id"], r["reported"], r["vx"], r["vy"], r["bearing"], data,
-            active_service_ids, now_sec, exclude,
+            active_service_ids, now_sec, exclude, r.get("prev"),
         )
 
     results = {r["key"]: match(r) for r in requests}
@@ -1801,10 +1825,15 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
                 and stale_ref - int(v.timestamp) > STALE_VEHICLE_MAX_AGE_SEC):
             continue
         vx, vy = project_xy(pos.longitude, pos.latitude)
+        prev = trackers.get(
+            v.vehicle.id if v.HasField("vehicle") else entity.id, {}
+        ).get("pos")
         requests.append({
             "key": i, "route_id": route_id, "reported": str(trp.trip_id),
             "vx": vx, "vy": vy,
             "bearing": float(pos.bearing) if pos.HasField("bearing") else None,
+            "prev": (prev[2] if prev is not None
+                     and feed_ts - prev[0] <= _STICKY_MAX_AGE_SEC else None),
         })
     assigned = assign_trips(requests, gtfs_data, active_service_ids, now_sec)
 
