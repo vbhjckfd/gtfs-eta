@@ -15,6 +15,9 @@ path.
 Usage:
     python scripts/push_feed.py              # push once and exit
     python scripts/push_feed.py --loop 10   # push every 10 seconds
+    python scripts/push_feed.py --loop 20 --poll 2 --duration 330
+                                            # push on each upstream change (at
+                                            # least every 20 s) for 5.5 min — CI
 
 Environment (read from .env):
     R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
@@ -31,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import pickle
@@ -63,16 +67,23 @@ VP_FEED_KEY         = os.environ.get("VP_FEED_KEY", "feed/vehicle_positions.pb")
 # Cache-Control stamped on every feed object so Cloudflare's edge caches it when
 # served via the R2 public custom domain (eta.lad.lviv.ua) — R2 honors the
 # object's own header natively, no Cache Rule needed.
-#   max-age=10               — fresh window, matches the ~10 s republish cadence.
-#   stale-while-revalidate=10 — serve the cached copy instantly for up to 10 s
+#   max-age=3                — fresh window.  Was 10, the whole republish
+#                               period, so the edge alone could add up to 10 s
+#                               on top of the feed's own age; with pushes now
+#                               following upstream within seconds (--poll),
+#                               that cache was the largest delay left.  3 s
+#                               still collapses every consumer poll inside the
+#                               window into one R2 read per edge location.
+#   stale-while-revalidate=2 — serve the cached copy instantly for up to 2 s
 #                               past expiry while Cloudflare refreshes from R2 in
-#                               the background, so a slow/missed push cycle never
-#                               costs a request a refetch latency blip.
+#                               the background, so a refetch never costs a
+#                               request latency; kept short because every
+#                               second of it is a second of extra staleness.
 #   stale-if-error=60        — if R2 ever 5xxs, keep serving the last good feed
 #                               for up to 60 s instead of failing the request.
 # (Async stale-while-revalidate is honored on Free/Pro/Business zones.)
 FEED_CACHE_CONTROL  = os.environ.get(
-    "FEED_CACHE_CONTROL", "public, max-age=10, stale-while-revalidate=10, stale-if-error=60"
+    "FEED_CACHE_CONTROL", "public, max-age=3, stale-while-revalidate=2, stale-if-error=60"
 )
 VP_URL              = os.environ.get(
     "GTFS_RT_URL", "https://track.ua-gis.com/gtfs/lviv/vehicle_position"
@@ -111,7 +122,7 @@ STATUS_KEY = os.environ.get("STATUS_KEY", "feed/status.json")
 # Per-vehicle "stopped since" anchors, carried across daemon runs.
 #
 # This process is started fresh by every push-feed cron tick (`--loop 10
-# --count 33`, ~5.5 min) so its in-memory trackers die with it. That is fine for
+# --poll 2 --duration 330`, ~5.5 min) so its in-memory trackers die with it. That is fine for
 # progress_speed, which only looks one push back, but not for stationary_sec:
 # training measures it over a whole day's trajectory (values reach ~4 h), and a
 # tracker that resets every 5.5 min could never report more than ~330 s. The
@@ -284,6 +295,23 @@ def _get_vp_bytes() -> bytes:
         raise
 
 
+def _vp_fingerprint(vp_bytes: bytes) -> bytes:
+    """Digest of the feed's vehicle entities, ignoring its header.
+
+    Tells a new upstream snapshot from a repeat of the one already pushed. The
+    header is left out because its timestamp alone may move without any vehicle
+    moving, which would turn every poll into a push.
+    """
+    feed = gtfs_realtime_pb2.FeedMessage()
+    feed.ParseFromString(vp_bytes)
+    # Entity by entity: header is a required field, so the message itself
+    # cannot be serialised without it.
+    digest = hashlib.sha1()
+    for entity in feed.entity:
+        digest.update(entity.SerializeToString(deterministic=True))
+    return digest.digest()
+
+
 def _feed_stats(pb_bytes: bytes) -> tuple[int, int]:
     """(header timestamp, entity count) of a serialized FeedMessage."""
     feed = gtfs_realtime_pb2.FeedMessage()
@@ -328,7 +356,7 @@ def _load_prev_entities(client) -> int | None:
 
     _should_publish only blocks a collapse when it knows what the previous pass
     produced, and that baseline lived in process memory — but this process is
-    replaced every ~5.5 min (`--loop 10 --count 33`). An upstream outage
+    replaced every ~5.5 min (`--duration 330`). An upstream outage
     outlasting one cycle therefore beat the guard entirely: the fresh process
     started with no baseline and published the empty feed straight over the good
     one, which is how /health went 503 on 2026-08-26 while the guard had held
@@ -509,17 +537,22 @@ def _save_live_state(client, live) -> None:
         print(f"[warn] could not persist live state: {exc!r}", flush=True)
 
 
-def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=None) -> None:
+def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=None,
+               vp_bytes: bytes | None = None) -> None:
+    """One inference pass and publish; fetches the upstream feed unless given one."""
     global _last_published_entities
 
     t0 = time.monotonic()
-    vp_bytes = _get_vp_bytes()
+    if vp_bytes is None:
+        vp_bytes = _get_vp_bytes()
+    t_fetched = time.monotonic()
 
     stats: dict = {}
     tu_result, vp_result = run_inference(
         gtfs_data, model_data, trackers, vp_bytes,
         with_vehicle_positions=True, stats=stats, live=live,
     )
+    t_inferred = time.monotonic()
 
     feed_ts, entities = _feed_stats(tu_result)
     upstream = {
@@ -590,12 +623,83 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=N
         "published": True,
         **upstream,
     })
-    elapsed = (time.monotonic() - t0) * 1000
+    t_done = time.monotonic()
     print(
         f"Pushed {len(tu_result):,} B → R2:{FEED_KEY}, "
-        f"{len(vp_result):,} B → R2:{VP_FEED_KEY}  ({elapsed:.0f} ms)",
+        f"{len(vp_result):,} B → R2:{VP_FEED_KEY}  ({(t_done - t0) * 1000:.0f} ms: "
+        f"fetch {(t_fetched - t0) * 1000:.0f}, infer {(t_inferred - t_fetched) * 1000:.0f}, "
+        f"upload {(t_done - t_inferred) * 1000:.0f})",
         flush=True,
     )
+
+
+def _run_loop(push, checkpoint, *, loop: float, poll: float | None = None,
+              count: int | None = None, duration: float | None = None,
+              fetch=None, fingerprint=None, clock=time.monotonic,
+              sleep=time.sleep) -> tuple[int, int]:
+    """Push repeatedly until ``count`` pushes or ``duration`` seconds; returns
+    ``(pushes, failed)``.
+
+    Without ``poll``: one push every ``loop`` seconds, drift-free (the interval
+    covers fetch+inference+upload).
+
+    With ``poll``: the upstream feed is re-read every ``poll`` seconds between
+    pushes and a push starts as soon as its vehicles change. A fixed 10 s loop
+    ran out of step with upstream's own ~10 s refresh, so a new snapshot sat
+    for 0-10 s (5 s on average) before we even fetched it. A push still happens
+    every ``loop`` seconds without a change, so the header timestamp keeps
+    moving (worker /health reads it) and a failing upstream still goes through
+    _push_once's stale fallback and error reporting as before. Keep ``loop``
+    well above upstream's refresh period: a heartbeat push that starts just
+    before an upstream change holds that change back for a whole push.
+
+    A single failed push (inference bug, transient R2 error) is reported to
+    New Relic but must not kill the daemon — the next cycle usually recovers,
+    keeping the feed fresh.
+    """
+    fetch = fetch or _get_vp_bytes
+    fingerprint = fingerprint or _vp_fingerprint
+    start = clock()
+    n = failed = 0
+    last_fp: bytes | None = None
+    last_push = float("-inf")
+
+    while True:
+        if count and n >= count:
+            break
+        if duration and clock() - start >= duration:
+            break
+
+        vp_bytes = None
+        fp = None
+        if poll:
+            try:
+                vp_bytes = fetch()
+                fp = fingerprint(vp_bytes)
+            except Exception as exc:  # noqa: BLE001 — the heartbeat push reports it
+                print(f"[warn] upstream poll failed: {exc!r}", flush=True)
+                vp_bytes = None
+            changed = fp is not None and fp != last_fp
+            if not changed and clock() - last_push < loop:
+                sleep(poll)
+                continue
+
+        iter_start = clock()
+        try:
+            push(vp_bytes)
+        except Exception as exc:  # noqa: BLE001 — daemon must stay alive
+            _report("error", exception_attributes(exc))
+            print(f"[error] push iteration failed: {exc!r}", flush=True)
+            failed += 1
+        n += 1
+        last_push = iter_start
+        if fp is not None:
+            last_fp = fp
+        checkpoint(n)
+
+        if not poll and not (count and n >= count):
+            sleep(max(0.0, loop - (clock() - iter_start)))
+    return n, failed
 
 
 def main() -> None:
@@ -609,6 +713,15 @@ def main() -> None:
     parser.add_argument(
         "--count", metavar="N", type=int, default=None,
         help="Stop after N pushes (use with --loop to cap a CI job)",
+    )
+    parser.add_argument(
+        "--poll", metavar="SECONDS", type=float, default=None,
+        help="With --loop: poll upstream every SECONDS and push as soon as it "
+             "changes; --loop then only bounds the gap between pushes",
+    )
+    parser.add_argument(
+        "--duration", metavar="SECONDS", type=float, default=None,
+        help="Stop after SECONDS of looping (use with --loop to cap a CI job)",
     )
     args = parser.parse_args()
 
@@ -624,22 +737,17 @@ def main() -> None:
     _last_published_entities = _load_prev_entities(client)
 
     if args.loop:
-        n = 0
-        failed = 0
         run_start = time.monotonic()
-        print(f"Looping every {args.loop:.0f}s — Ctrl-C to stop.", flush=True)
-        while True:
-            # A single failed iteration (inference bug, transient R2 error) is
-            # reported to New Relic but must not kill the daemon — the next cycle
-            # usually recovers, keeping the feed fresh.
-            iter_start = time.monotonic()
-            try:
-                _push_once(client, gtfs_data, model_data, trackers, live)
-            except Exception as exc:  # noqa: BLE001 — daemon must stay alive
-                _report("error", exception_attributes(exc))
-                print(f"[error] push iteration failed: {exc!r}", flush=True)
-                failed += 1
-            n += 1
+        if args.poll:
+            print(f"Polling upstream every {args.poll:g}s, pushing on change "
+                  f"(at least every {args.loop:g}s) — Ctrl-C to stop.", flush=True)
+        else:
+            print(f"Looping every {args.loop:.0f}s — Ctrl-C to stop.", flush=True)
+
+        def push(vp_bytes: bytes | None) -> None:
+            _push_once(client, gtfs_data, model_data, trackers, live, vp_bytes)
+
+        def checkpoint(n: int) -> None:
             # Checkpoint periodically as well as at exit: this job is killed
             # outright if it overruns its timeout, and anchors lost that way
             # would restart every stopped vehicle's dwell clock at zero. The
@@ -650,13 +758,11 @@ def main() -> None:
                 _save_tracker_state(client, trackers)
             if n % 5 == 0:
                 _save_live_state(client, live)
-            if args.count and n >= args.count:
-                break
-            # Drift-free cadence: the interval covers fetch+inference+upload,
-            # so N pushes take ~N×loop seconds (keeps the CI job inside its
-            # 5-minute cron window).
-            elapsed = time.monotonic() - iter_start
-            time.sleep(max(0.0, args.loop - elapsed))
+
+        n, failed = _run_loop(
+            push, checkpoint, loop=args.loop, poll=args.poll,
+            count=args.count, duration=args.duration,
+        )
         _save_tracker_state(client, trackers)
         _save_live_state(client, live)
         # One per run: the record that the daemon ran at all, and the only

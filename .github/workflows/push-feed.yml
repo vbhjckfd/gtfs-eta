@@ -101,14 +101,20 @@ jobs:
       - name: Activate venv
         run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
-      # Load GTFS + model from R2 once, push 33 times at 10 s intervals (~5.5
-      # min). The loop is drift-free (the interval includes inference time), so
-      # the run overruns the 5-minute cron period by roughly its own boot cost —
-      # which is the point: the next run is already booting while this one still
+      # Load GTFS + model from R2 once, then publish for 330 s (~5.5 min):
+      # poll upstream every 2 s and push as soon as its vehicles change, with
+      # a push at least every 20 s regardless. That floor is deliberately
+      # longer than upstream's ~10-11 s refresh: at 10 s it would fire just
+      # before most upstream updates and hold each one back for a whole
+      # push (~5 s). Following upstream instead of a
+      # fixed 10 s clock removes the 0-10 s a new snapshot used to wait for our
+      # next fetch. The run is time-capped rather than push-capped, so it still
+      # overruns the 5-minute cron period by roughly its own boot cost — which
+      # is the point: the next run is already booting while this one still
       # publishes, so the feed never goes unrefreshed. Resources stay in memory
       # across pushes; only one R2 load per job.
-      - name: Push feed every 10 s
-        run: python scripts/push_feed.py --loop 10 --count 33
+      - name: Push feed on every upstream change
+        run: python scripts/push_feed.py --loop 20 --poll 2 --duration 330
         env:
           R2_ACCOUNT_ID:        ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
