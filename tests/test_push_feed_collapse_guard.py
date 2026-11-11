@@ -274,3 +274,46 @@ def test_seeded_baseline_blocks_an_empty_first_push(monkeypatch):
     status = json.loads(restarted.body(push_feed.STATUS_KEY))
     assert status["published"] is False
     assert "collapsed to 0 trips from 530" in status["detail"]
+
+
+# ── parallel uploads ─────────────────────────────────────────────────────────
+
+class _BarrierClient(_FakeClient):
+    """Each put waits until all three are in flight at once.
+
+    Uploads made one after another would never meet at the barrier, so its
+    timeout turns a regression back to serial uploads into a test failure.
+    """
+
+    def __init__(self, fail_key: str | None = None):
+        super().__init__()
+        import threading
+
+        self._barrier = threading.Barrier(3, timeout=5)
+        self._fail_key = fail_key
+
+    def put_object(self, **kwargs):
+        self._barrier.wait()
+        if kwargs["Key"] == self._fail_key:
+            raise ConnectionError("R2 write failed")
+        super().put_object(**kwargs)
+
+
+def test_feeds_and_status_upload_concurrently(monkeypatch):
+    client = _BarrierClient()
+    _run_push(monkeypatch, client, 500)
+
+    assert sorted(client.keys()) == sorted(
+        [push_feed.FEED_KEY, push_feed.VP_FEED_KEY, push_feed.STATUS_KEY]
+    )
+
+
+def test_a_failed_feed_upload_fails_the_push(monkeypatch):
+    client = _BarrierClient(fail_key=push_feed.VP_FEED_KEY)
+    with pytest.raises(ConnectionError):
+        _run_push(monkeypatch, client, 500)
+
+    # The other uploads still completed, and the collapse guard did not adopt
+    # a trip count the push never fully published.
+    assert push_feed.FEED_KEY in client.keys()
+    assert push_feed._last_published_entities is None

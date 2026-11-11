@@ -41,6 +41,7 @@ import pickle
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 
 sys.path.insert(0, ".")
@@ -118,6 +119,13 @@ _vp_cache: dict | None = None
 # freshness and upstream health with one cheap GET instead of decoding 170 KB of
 # protobuf just to read the header timestamp.
 STATUS_KEY = os.environ.get("STATUS_KEY", "feed/status.json")
+
+# The three per-push uploads (TripUpdates, VehiclePositions, status.json) go
+# out together rather than one after another: each is a round trip from the
+# GitHub runner to R2, and in series they took ~2.1 s of a ~5.3 s push.
+# boto3 clients are thread-safe; the sessions that create them are not, but
+# there is only the one client, made in the main thread.
+_UPLOADS = ThreadPoolExecutor(max_workers=3, thread_name_prefix="r2-upload")
 
 # Per-vehicle "stopped since" anchors, carried across daemon runs.
 #
@@ -579,7 +587,8 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=N
         })
         return
 
-    client.put_object(
+    tu_upload = _UPLOADS.submit(
+        client.put_object,
         Bucket=R2_BUCKET,
         Key=FEED_KEY,
         Body=tu_result,
@@ -607,7 +616,8 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=N
     )
     # Cleaned VehiclePositions feed (corrected trip match, next stop, congestion)
     # derived from the same inference pass — served at /vehicle_positions.
-    client.put_object(
+    vp_upload = _UPLOADS.submit(
+        client.put_object,
         Bucket=R2_BUCKET,
         Key=VP_FEED_KEY,
         Body=vp_result,
@@ -615,14 +625,24 @@ def _push_once(client, gtfs_data: dict, model_data: dict, trackers: dict, live=N
         CacheControl=FEED_CACHE_CONTROL,
         Metadata={"commit": FEED_COMMIT},
     )
-    _last_published_entities = entities
-    _put_status(client, {
+    # Written alongside the feeds, so it says "published" before they have
+    # landed. If one of them then fails, the push raises below and the next
+    # push (at most --loop seconds later) rewrites the status; _put_status
+    # itself never raises.
+    status_upload = _UPLOADS.submit(_put_status, client, {
         "feed_timestamp": feed_ts,
         "entities": entities,
         "commit": FEED_COMMIT,
         "published": True,
         **upstream,
     })
+    # Wait for all three before reporting either feed's failure, so no upload
+    # is still running when the next push starts writing the same keys.
+    wait((tu_upload, vp_upload, status_upload))
+    for upload in (tu_upload, vp_upload):
+        if upload.exception() is not None:
+            raise upload.exception()
+    _last_published_entities = entities
     t_done = time.monotonic()
     print(
         f"Pushed {len(tu_result):,} B → R2:{FEED_KEY}, "
