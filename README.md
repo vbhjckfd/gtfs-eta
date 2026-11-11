@@ -26,7 +26,7 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
   Cloudflare Worker  →  consumers (apps, journey planners, …)
 ```
 
-**Cron reliability trick**: GitHub Actions scheduled triggers are unreliable on low-activity repos. Instead, a Cloudflare Worker cron fires every 5 minutes and dispatches the `push-feed.yml` GitHub Actions workflow, which pushes a fresh feed snapshot every 10 seconds for ~4 minutes.
+**Cron reliability trick**: GitHub Actions scheduled triggers are unreliable on low-activity repos. Instead, a Cloudflare Worker cron fires every 5 minutes and dispatches the `push-feed.yml` GitHub Actions workflow, which publishes for ~5.5 minutes, pushing a fresh feed as soon as the upstream vehicle positions change (polled every 2 s, at least one push every 20 s).
 
 **Static refresh**: the same 5-minute cron HEADs the operator's `static.zip` and dispatches `refresh-gtfs.yml` when it is newer than our `worker/gtfs_worker_data.pkl` (30 min cooldown, `REFRESH_COOLDOWN_SEC`). The daily 02:00 refresh cron alone left the feed predicting against a stale static for hours whenever the operator republished mid-day — or GitHub started the cron late — and every renamed trip went out with a trip_id the new static no longer has.
 
@@ -291,7 +291,7 @@ uncertainty and bias tables off horizons that differed by one.
 
 The **cleaned VehiclePositions feed** (`feed/vehicle_positions.pb`) re-emits the upstream positions enriched with this project's corrected trip match (often better than the operator's reported `trip_id`; each trip instance goes to one vehicle, with `start_date`/`start_time`, the same one TripUpdates names), the next stop + `current_status` (STOPPED_AT / IN_TRANSIT_TO), and a `congestion_level` derived from observed-vs-historical speed. It is a by-product of the same inference pass, so it costs no extra geometry work.
 
-The feeds are served from the **R2 public custom domain** `eta.lad.lviv.ua`, which Cloudflare edge-caches natively (`Cache-Control: max-age=10` stamped on the objects), so they cost no worker invocation or R2 read per poll:
+The feeds are served from the **R2 public custom domain** `eta.lad.lviv.ua`, which Cloudflare edge-caches natively (`Cache-Control: max-age=3, stale-while-revalidate=2` stamped on the objects), so they cost no worker invocation or R2 read per poll:
 - `https://eta.lad.lviv.ua/feed/trip_updates.pb`
 - `https://eta.lad.lviv.ua/feed/vehicle_positions.pb`
 
