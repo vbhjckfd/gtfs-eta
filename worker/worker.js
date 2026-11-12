@@ -445,7 +445,14 @@ async function dispatchWorkflow(env, workflow) {
 // and its 60 s `aging` threshold, so a cached verdict is never misleadingly old.
 // 503s carry it too: an explicit max-age makes them cacheable, and a stale
 // verdict should not be re-checked more often than a healthy one.
-const HEALTH_CACHE_CONTROL = "public, max-age=5";
+//
+// must-revalidate + stale-if-error=0: once an entry expires it must never be
+// served again.  Without them Cloudflare treated the worker's own 503 as an
+// origin error and kept serving the last cached 200 (cf-cache-status: STALE)
+// — on 2026-11-12 /health said `aging, 144 s` for 1.7 h while the feed was
+// down, hiding the outage from every monitor and from lad.lviv.ua.
+const HEALTH_CACHE_CONTROL =
+  "public, max-age=5, must-revalidate, stale-while-revalidate=0, stale-if-error=0";
 
 function jsonResponse(payload, status) {
   return new Response(JSON.stringify(payload), {
