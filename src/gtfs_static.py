@@ -77,7 +77,7 @@ class GTFSStatic:
         self._active_services_cache: dict[date, set[str]] = {}
         self._trip_index: dict[str, TripInfo] = {}
         self._route_trips: dict[str, list[str]] = {}   # route_id → [trip_id]
-        self.feed_tz: ZoneInfo = ZoneInfo("Europe/Kiev")  # overwritten during parse
+        self.feed_tz: ZoneInfo = ZoneInfo("Europe/Kyiv")  # overwritten during parse
         self._data_dir: Path = DATA_DIR  # overridden by load_from_bytes() for an isolated parse
 
     # ------------------------------------------------------------------
@@ -589,7 +589,7 @@ class GTFSStatic:
         self._calendar_dates = d["calendar_dates"]
         self._trip_index = d["trip_index"]
         self._route_trips = d["route_trips"]
-        self.feed_tz = d.get("feed_tz", ZoneInfo("Europe/Kiev"))
+        self.feed_tz = d.get("feed_tz", ZoneInfo("Europe/Kyiv"))
         self._active_services_cache = {}
         return True
 

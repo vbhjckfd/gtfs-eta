@@ -1753,7 +1753,7 @@ def run_inference(gtfs_data: dict, model_data: dict, trackers: dict,
     # Local wall-clock seconds since midnight, for _expected_dist_along's
     # schedule-progress term — GTFS stop times are local, not UTC.
     try:
-        feed_tz = ZoneInfo(gtfs_data.get("feed_timezone") or "Europe/Kiev")
+        feed_tz = ZoneInfo(gtfs_data.get("feed_timezone") or "Europe/Kyiv")
     except Exception:
         feed_tz = ZoneInfo("Europe/Kiev")
     local_ts = snap_ts.astimezone(feed_tz)

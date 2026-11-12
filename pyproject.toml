@@ -18,6 +18,9 @@ dependencies = [
     "tqdm>=4.66",
     "pyarrow>=14.0",
     "scikit-learn>=1.4",
+    # The upstream GTFS names its zone Europe/Kiev; ubuntu-26.04 runners moved
+    # that alias to tzdata-legacy, so ship the IANA database with the package.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
