@@ -2,6 +2,13 @@ name = "gtfs-eta"
 main = "worker.js"
 compatibility_date = "2026-06-01"
 
+# The docs page also answers at eta.lad.lviv.ua/ — the R2 public domain the
+# feeds are served from.  The pattern has no wildcard, so it matches the root
+# only; /feed/* keeps going straight to R2 without a worker invocation.  The
+# zone's WAF blocks every path on that host except /feed/* and /.
+workers_dev = true
+routes = [{ pattern = "eta.lad.lviv.ua/", zone_name = "lad.lviv.ua" }]
+
 # worker/index.html (the docs page at /) is bundled as a text import.
 [[rules]]
 type = "Text"

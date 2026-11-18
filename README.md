@@ -296,7 +296,7 @@ The feeds are served from the **R2 public custom domain** `eta.lad.lviv.ua`, whi
 - `https://eta.lad.lviv.ua/feed/vehicle_positions.pb`
 
 The `worker/` directory is a plain JS Cloudflare Worker that no longer proxies the feeds — it only:
-- `GET /` in a browser (`Accept: text/html`) — bilingual (EN/UA) docs page for feed consumers, [worker/index.html](worker/index.html).
+- `GET /` in a browser (`Accept: text/html`) — bilingual (EN/UA) docs page for feed consumers, [worker/index.html](worker/index.html). Also routed at `https://eta.lad.lviv.ua/` (root only; `/feed/*` stays on R2).
 - `GET /` (any other client) and `GET /vehicle_positions` — **301-redirect** to the R2 domain above (backward compatibility for unmigrated consumers; no R2 read). The root responses are `no-store`/`private` because the edge cache keys by path and ignores `Vary`.
 - `GET /health` — parses the feed (hand-rolled protobuf wire walk, no deps) and returns 200/503 based on header freshness and, during working hours, predicted arrivals at stop 60.
 - cron (every 5 min) — dispatches `push-feed.yml` (see the cron reliability trick above).
