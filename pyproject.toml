@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-license = "WTFPL"
+license = "MIT"
 name = "gtfs-eta"
 version = "0.1.9"
 requires-python = ">=3.11"

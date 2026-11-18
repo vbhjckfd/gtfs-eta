@@ -113,9 +113,11 @@ This feed re-emits the upstream positions, enriched by the same inference pass:
 
 ### Terms
 
-The feeds are free to use in apps, journey planners and research. Please keep polling to a reasonable rate and credit **lad.lviv.ua**. The data comes with no warranty: predictions are estimates, and the service is best-effort with no SLA.
+- **Feed data** (TripUpdates, VehiclePositions, `status.json`) is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Use it in apps, journey planners and research, commercial use included. Credit **lad.lviv.ua**.
+- **Code** in this repository is under the [MIT License](LICENSE).
+- **GTFS static** belongs to its publisher, Львівавтодор, and is not covered by either licence.
 
-The code in this repository is released under the [WTFPL](LICENSE).
+Please keep polling to a reasonable rate. Predictions are estimates and come with no warranty; the service is best-effort with no SLA.
 
 Older URLs keep working: `https://gtfs-eta.vbhjckfd.workers.dev/` and `/vehicle_positions` return a 301 to the R2 URLs above.
 
