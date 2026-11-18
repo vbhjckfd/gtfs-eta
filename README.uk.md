@@ -231,6 +231,7 @@ python -m src.train_live --train 2026-09-19..2026-09-30 --test 2026-10-01..2026-
 
 - Кожні 5 хвилин воркер архівує опублікований фід у `predictions/` (зберігається 14 днів).
 - `score-quality.yml` (щодня, 02:15 UTC) оцінює вчорашні архівні прогнози проти фактичних прибуттів, отриманих із `raw/`. Він пише `quality/<day>.json`, `latest.json` і `latest.md`: MAE, зміщення й покриття за горизонтами, видами транспорту й маршрутами.
+- `pack-raw.yml` (щодня, 04:30 UTC) пакує кожен день `raw/`, старший за 45 днів, в один `archive/raw/<day>.tar.xz` (~8× менший) і видаляє оригінали, щойно завантаження перевірено. `src.snapshots` читає обидві форми.
 - `route-mae.yml` (22:00 UTC) відкриває issue з таблицею MAE за маршрутами та її зміною за добу, тож погіршення маршруту видно протягом дня.
 
 ---
@@ -302,6 +303,7 @@ track.ua-gis.com/vehicle_position  (GTFS-RT)
 ```
 gtfs-lviv/
   raw/        YYYY-MM-DD/<feedTsISO8601Z>.pb   # Bronze — незмінний сирий protobuf
+  archive/raw/ YYYY-MM-DD.tar.xz              # Bronze після 45 днів, один xz tar на день
   positions/  YYYY-MM-DD.parquet               # Silver — зведені рядки
   static/     <feedVersion>/static.zip         # версії GTFS static
   static/     index.json                       # день → feedVersion

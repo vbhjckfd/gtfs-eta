@@ -231,6 +231,7 @@ Each `StopTimeEvent.uncertainty` is the **live** MAE for its horizon. `make expo
 
 - Every 5 minutes the worker archives the served feed into `predictions/` (kept 14 days).
 - `score-quality.yml` (daily, 02:15 UTC) scores yesterday's archived predictions against the actual arrivals derived from `raw/`. It writes `quality/<day>.json`, `latest.json` and `latest.md`: MAE, bias and coverage per horizon, mode and route.
+- `pack-raw.yml` (daily, 04:30 UTC) packs each `raw/` day older than 45 days into one `archive/raw/<day>.tar.xz` (~8× smaller) and deletes the originals once the upload round-trips. `src.snapshots` reads either form.
 - `route-mae.yml` (22:00 UTC) opens an issue with the per-route MAE table and its day-over-day change, so a route that degrades shows up within a day.
 
 ---
@@ -302,6 +303,7 @@ It was originally a Python Worker. Pyodide isolates intermittently entered a poi
 ```
 gtfs-lviv/
   raw/        YYYY-MM-DD/<feedTsISO8601Z>.pb   # Bronze — immutable raw protobuf
+  archive/raw/ YYYY-MM-DD.tar.xz              # Bronze past 45 days, one xz tar a day
   positions/  YYYY-MM-DD.parquet               # Silver — consolidated rows
   static/     <feedVersion>/static.zip         # Versioned GTFS static
   static/     index.json                       # day → feedVersion mapping

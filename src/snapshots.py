@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import io
 import os
+import tarfile
+import tempfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable, Iterator
 
 import boto3
 import pandas as pd
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from google.transit import gtfs_realtime_pb2
 
@@ -20,6 +25,11 @@ R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 R2_BUCKET = os.environ.get("R2_BUCKET", "gtfs-lviv")
 R2_PREFIX = "raw/"
+# Days older than the retrain window live as one xz tar each (see archive_day);
+# readers unpack them here and keep reading the same raw/ keys.
+ARCHIVE_PREFIX = "archive/raw/"
+ARCHIVE_CACHE = Path(os.environ.get("RAW_ARCHIVE_CACHE")
+                     or Path(tempfile.gettempdir()) / "gtfs-raw-archive")
 
 # R2 S3-compatible endpoint
 _R2_ENDPOINT = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -77,11 +87,15 @@ def list_snapshot_keys(
                     continue
             keys.append(key)
 
+    # shortcut: only a single-day listing falls back to the archive; start/end
+    # ranges see raw/ days only, extend if a range ever reaches past ~45 days.
+    if not keys and date_str is not None:
+        keys = _restore_archive(client, date_str)
     return sorted(keys)
 
 
-def list_snapshot_days() -> list[str]:
-    """Days (YYYY-MM-DD) that have a raw/ snapshot prefix, sorted."""
+def list_snapshot_days(archived: bool = True) -> list[str]:
+    """Days (YYYY-MM-DD) with snapshots, raw/ or archived, sorted."""
     client = _make_client()
     days: set[str] = set()
     paginator = client.get_paginator("list_objects_v2")
@@ -90,7 +104,85 @@ def list_snapshot_days() -> list[str]:
             day = cp["Prefix"][len(R2_PREFIX):].rstrip("/")
             if day:
                 days.add(day)
+    if archived:
+        for page in paginator.paginate(Bucket=R2_BUCKET, Prefix=ARCHIVE_PREFIX):
+            for obj in page.get("Contents", []):
+                days.add(obj["Key"][len(ARCHIVE_PREFIX):].removesuffix(".tar.xz"))
     return sorted(days)
+
+
+def _archive_key(day: str) -> str:
+    return f"{ARCHIVE_PREFIX}{day}.tar.xz"
+
+
+def _download_if_exists(client, key: str, path: Path) -> bool:
+    try:
+        client.download_file(R2_BUCKET, key, str(path))
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return False
+        raise
+    return True
+
+
+def _read_tar(path: Path) -> dict[str, bytes]:
+    with tarfile.open(path, "r:xz") as tar:
+        return {m.name: tar.extractfile(m).read() for m in tar if m.isfile()}
+
+
+def _restore_archive(client, day: str) -> list[str]:
+    """Unpack archive/raw/<day>.tar.xz into ARCHIVE_CACHE; its raw/ keys, or []."""
+    day_dir = ARCHIVE_CACHE / R2_PREFIX / day
+    done = day_dir / ".restored"
+    if not done.exists():
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "day.tar.xz"
+            if not _download_if_exists(client, _archive_key(day), path):
+                return []
+            with tarfile.open(path, "r:xz") as tar:
+                tar.extractall(ARCHIVE_CACHE, filter="data")
+        day_dir.mkdir(parents=True, exist_ok=True)
+        done.touch()
+    return [f"{R2_PREFIX}{day}/{p.name}" for p in day_dir.glob("*.pb")]
+
+
+def archive_day(client, day: str, max_workers: int = 16) -> int:
+    """Pack raw/<day>/ into archive/raw/<day>.tar.xz, verify, delete originals.
+
+    Returns the number of snapshots in the archive (0 if raw/<day>/ is empty).
+    """
+    prefix = f"{R2_PREFIX}{day}/"
+    keys = [o["Key"] for page in client.get_paginator("list_objects_v2")
+            .paginate(Bucket=R2_BUCKET, Prefix=prefix) for o in page.get("Contents", [])]
+    if not keys:
+        return 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        objects = dict(zip(keys, ex.map(
+            lambda k: client.get_object(Bucket=R2_BUCKET, Key=k)["Body"].read(), keys)))
+
+    key = _archive_key(day)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "day.tar.xz"
+        # A run that died after its upload but mid-delete left a full archive
+        # beside a partial raw/ day: keep both.
+        if _download_if_exists(client, key, path):
+            objects = _read_tar(path) | objects
+        with tarfile.open(path, "w:xz") as tar:
+            for name in sorted(objects):
+                info = tarfile.TarInfo(name)
+                info.size = len(objects[name])
+                tar.addfile(info, io.BytesIO(objects[name]))
+        client.upload_file(str(path), R2_BUCKET, key)
+        path.unlink()
+        if not _download_if_exists(client, key, path) or _read_tar(path) != objects:
+            raise RuntimeError(f"{key}: uploaded archive does not round-trip; raw/ kept")
+
+    for i in range(0, len(keys), 1000):
+        resp = client.delete_objects(Bucket=R2_BUCKET, Delete={
+            "Objects": [{"Key": k} for k in keys[i:i + 1000]], "Quiet": True})
+        if resp.get("Errors"):
+            raise RuntimeError(f"{day}: delete failed: {resp['Errors'][:3]}")
+    return len(objects)
 
 
 def _key_to_timestamp(key: str) -> datetime | None:
@@ -104,9 +196,12 @@ def _key_to_timestamp(key: str) -> datetime | None:
 
 def _fetch_and_parse(client, key: str) -> list[dict]:
     """Download one protobuf key and return a list of vehicle rows. Returns [] on parse errors."""
+    local = ARCHIVE_CACHE / key
     try:
-        obj = client.get_object(Bucket=R2_BUCKET, Key=key)
-        data = obj["Body"].read()
+        if local.is_file():
+            data = local.read_bytes()
+        else:
+            data = client.get_object(Bucket=R2_BUCKET, Key=key)["Body"].read()
     except Exception:
         return []
 
