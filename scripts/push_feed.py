@@ -187,6 +187,13 @@ COLLAPSE_SEED_MAX_AGE_SEC = 900
 # ~5.5 min and a None baseline publishes anything (see _should_publish).
 _last_published_entities: int | None = None
 
+# status.json is diagnostic (nothing reads it back; /health uses the feed's own
+# metadata), yet was one of three R2 writes per push. Rewrite it at most this
+# often, except when `published` flips, so a blocked pass shows at once.
+STATUS_EVERY_SEC = 60
+# (monotonic time, published) of the last status.json actually written.
+_last_status: tuple[float, bool] | None = None
+
 def _git_commit() -> str:
     """Short commit of the inference code producing this feed.
 
@@ -211,9 +218,10 @@ FEED_COMMIT = _git_commit()
 
 def __reset_cache() -> None:
     """Test seam: drop the cached last-good VP feed so cases stay isolated."""
-    global _vp_cache, _last_published_entities
+    global _vp_cache, _last_published_entities, _last_status
     _vp_cache = None
     _last_published_entities = None
+    _last_status = None
 
 
 # Tags every New Relic event, so the daemon stays distinguishable from the
@@ -422,6 +430,11 @@ def _put_status(client, payload: dict) -> None:
     Never raises: the status object is diagnostic, and failing to write it must
     not cost us the feed push it describes.
     """
+    global _last_status
+    now = time.monotonic()
+    if (_last_status is not None and _last_status[1] == payload["published"]
+            and now - _last_status[0] < STATUS_EVERY_SEC):
+        return
     try:
         client.put_object(
             Bucket=R2_BUCKET,
@@ -430,6 +443,7 @@ def _put_status(client, payload: dict) -> None:
             ContentType="application/json",
             CacheControl=FEED_CACHE_CONTROL,
         )
+        _last_status = (now, payload["published"])
     except Exception as exc:  # noqa: BLE001 — diagnostics must not break the push
         print(f"[warn] status.json write failed: {exc!r}", flush=True)
 

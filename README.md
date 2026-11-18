@@ -109,7 +109,7 @@ This feed re-emits the upstream positions, enriched by the same inference pass:
    "worker_commit":"a083227","feed_commit":"a083227"}
   ```
 
-- `https://eta.lad.lviv.ua/feed/status.json` is a tiny sidecar written with every push. It is a cheap freshness check that needs no protobuf parsing: `feed_timestamp`, `entities`, `vehicles_in`, `vehicles_stale`, `feed_skew_sec`, `published`, `commit`.
+- `https://eta.lad.lviv.ua/feed/status.json` is a tiny sidecar rewritten at most once a minute, and at once when a push is blocked. It is a cheap freshness check that needs no protobuf parsing: `feed_timestamp`, `entities`, `vehicles_in`, `vehicles_stale`, `feed_skew_sec`, `published`, `commit`.
 
 ### Terms
 
@@ -217,7 +217,7 @@ Each cycle (about every 10 s):
 3. For each vehicle, apply an off-route filter with hysteresis, project the exact position along the shape, and measure progress speed against the previous cycle.
 4. Build feature rows for the next ≤ 10 stops and update `LiveState`.
 5. Run the serialised GBT model.
-6. Encode TripUpdates and VehiclePositions protobufs, then upload both together with `status.json` to R2 in parallel.
+6. Encode TripUpdates and VehiclePositions protobufs, then upload both to R2 in parallel, with `status.json` at most once a minute.
 
 Trip matching memoises the polyline walk per shape. It caches the schedule-progress lookup per push, since every vehicle in a push shares one `now_sec`. It also skips any shape whose bounding box already scores worse than the best full candidate. Together these cut a full inference pass from **4.0 s to 0.76 s** on the live fleet, with byte-identical output. The caches live on the loaded data dict, so they expire with the export they describe.
 

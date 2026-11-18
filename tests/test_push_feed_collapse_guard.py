@@ -164,6 +164,32 @@ def test_recovery_publishes_again(monkeypatch):
     assert push_feed.FEED_KEY in recovered.keys()
 
 
+def test_status_is_rewritten_at_most_once_a_minute(monkeypatch):
+    # One of three R2 writes per push, read by no code (/health uses the feed's
+    # metadata); at ~10 s cadence a write per push was ~260k Class A ops/month.
+    clock = [1000.0]
+    monkeypatch.setattr(push_feed.time, "monotonic", lambda: clock[0])
+    client = _FakeClient()
+    for dt in (0, 10, 40):
+        clock[0] += dt
+        _run_push(monkeypatch, client, 500)
+    assert client.keys().count(push_feed.STATUS_KEY) == 1
+    clock[0] += 10
+    _run_push(monkeypatch, client, 500)
+    assert client.keys().count(push_feed.STATUS_KEY) == 2
+
+
+def test_status_flips_are_written_at_once(monkeypatch):
+    monkeypatch.setattr(push_feed.time, "monotonic", lambda: 1000.0)
+    client = _FakeClient()
+    _run_push(monkeypatch, client, 500)
+    _run_push(monkeypatch, client, 5)    # blocked
+    assert json.loads(client.body(push_feed.STATUS_KEY))["published"] is False
+    _run_push(monkeypatch, client, 480)  # recovered
+    assert json.loads(client.body(push_feed.STATUS_KEY))["published"] is True
+    assert client.keys().count(push_feed.STATUS_KEY) == 3
+
+
 def test_status_write_failure_does_not_break_the_push(monkeypatch):
     class _StatusFails(_FakeClient):
         def put_object(self, **kwargs):
