@@ -5,7 +5,9 @@
  *   which Cloudflare edge-caches natively — so this worker no longer proxies
  *   them (that was one R2 read + worker invocation per poll).  The legacy paths
  *   stay as cheap 301 redirects for any consumer not yet migrated:
- *   GET /                  — 301 → <R2_PUBLIC_BASE>/trip_updates.pb
+ *   GET /                  — docs page (worker/index.html) for browsers
+ *                            (Accept: text/html); 301 → <R2_PUBLIC_BASE>/
+ *                            trip_updates.pb for everyone else
  *   GET /vehicle_positions — 301 → <R2_PUBLIC_BASE>/vehicle_positions.pb
  *   GET /health  — returns JSON 200/503.  Always requires a fresh feed header
  *                  timestamp (< MAX_FEED_AGE_SEC); additionally, during working
@@ -46,6 +48,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { cronPoint, healthPoint, watchdogPoint } from "./analytics.js";
 import { recordEvent } from "./newrelic.js";
+import DOCS_HTML from "./index.html";
 
 const FEED_KEY = "feed/trip_updates.pb";
 
@@ -743,6 +746,22 @@ export default {
         return response;
       }
 
+      // A browser opening the root gets the docs page; feed clients (protobuf
+      // libraries send */* or no Accept) keep the legacy redirect below. Both
+      // root answers are kept out of the shared edge cache: it keys by path
+      // and ignores Vary, so a cached copy of either would reach the wrong
+      // client.
+      const wantsHtml = (request.headers.get("accept") ?? "").includes("text/html");
+      if (path === "" && wantsHtml) {
+        return new Response(DOCS_HTML, {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "private, max-age=300",
+            vary: "Accept",
+          },
+        });
+      }
+
       // The feeds are served (and edge-cached) from the R2 public custom domain;
       // this worker no longer proxies them. Redirect the legacy paths there so
       // any unmigrated consumer keeps working — a 301 is cacheable and reads no
@@ -751,7 +770,11 @@ export default {
       const target = path.endsWith("/vehicle_positions")
         ? `${base}/vehicle_positions.pb`
         : `${base}/trip_updates.pb`;
-      return Response.redirect(target, 301);
+      if (path !== "") return Response.redirect(target, 301);
+      return new Response(null, {
+        status: 301,
+        headers: { location: target, "cache-control": "no-store", vary: "Accept" },
+      });
     } catch (exc) {
       console.error(`[fetch] unhandled error: ${exc}\n${exc?.stack ?? ""}`);
       ctx.waitUntil(reportException(env, exc, "fetch"));

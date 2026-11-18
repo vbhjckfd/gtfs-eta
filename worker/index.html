@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lviv GTFS feeds</title>
+<meta name="description" content="Open GTFS static and GTFS Realtime feeds for Lviv public transport: trip updates with ML arrival predictions and cleaned vehicle positions.">
+<style>
+:root {
+  --bg: #fbfbfa; --fg: #1d1f21; --muted: #5d6268; --line: #e2e3e1;
+  --card: #ffffff; --code: #f1f2f0; --accent: #0057b7;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15171a; --fg: #e6e7e8; --muted: #9aa0a6; --line: #2c2f33;
+          --card: #1c1f23; --code: #23272b; --accent: #6aa8ff; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 820px; margin: 0 auto; padding: 24px 16px 64px; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+h1 { font-size: 1.7rem; line-height: 1.25; margin: 0; }
+h2 { font-size: 1.25rem; margin: 40px 0 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+h3 { font-size: 1.02rem; margin: 24px 0 4px; }
+p, li { color: var(--fg); }
+.lead { color: var(--muted); font-size: 1.05rem; margin: 12px 0 0; }
+a { color: var(--accent); }
+code { font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code);
+       padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+.table { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.94rem; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; }
+.feeds { display: grid; gap: 12px; margin-top: 24px; }
+.feed { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.feed b { display: block; }
+.feed code { display: inline-block; margin-top: 4px; }
+.feed span { display: block; color: var(--muted); font-size: 0.92rem; margin-top: 4px; }
+.langs { display: flex; gap: 6px; flex: none; }
+.langs button { border: 1px solid var(--line); background: var(--card); border-radius: 6px;
+                padding: 4px; cursor: pointer; opacity: 0.45; line-height: 0; }
+.langs button[aria-pressed="true"] { opacity: 1; border-color: var(--accent); }
+.langs svg { width: 28px; height: 18px; display: block; border-radius: 2px; }
+footer { margin-top: 48px; color: var(--muted); font-size: 0.9rem; }
+/* One copy per language; the page's lang picks which shows. */
+html[lang="en"] [lang="uk"], html[lang="uk"] [lang="en"] { display: none; }
+</style>
+</head>
+<body>
+<main>
+<div class="top">
+  <h1><span lang="en">Lviv public transport — GTFS feeds</span><span lang="uk">Громадський транспорт Львова — GTFS</span></h1>
+  <div class="langs" role="group" aria-label="Language / Мова">
+    <button type="button" data-lang="en" aria-pressed="true" title="English" aria-label="English">
+      <svg viewBox="0 0 60 30" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><clipPath id="t"><path d="M30,15 h30 v15 z v15 h-30 z h-30 v-15 z v-15 h30 z"/></clipPath><path d="M0,0 v30 h60 v-30 z" fill="#012169"/><path d="M0,0 L60,30 M60,0 L0,30" stroke="#fff" stroke-width="6"/><path d="M0,0 L60,30 M60,0 L0,30" clip-path="url(#t)" stroke="#C8102E" stroke-width="4"/><path d="M30,0 v30 M0,15 h60" stroke="#fff" stroke-width="10"/><path d="M30,0 v30 M0,15 h60" stroke="#C8102E" stroke-width="6"/></svg>
+    </button>
+    <button type="button" data-lang="uk" aria-pressed="false" title="Українська" aria-label="Українська">
+      <svg viewBox="0 0 3 2" preserveAspectRatio="none" aria-hidden="true"><rect width="3" height="1" fill="#0057B7"/><rect y="1" width="3" height="1" fill="#FFD700"/></svg>
+    </button>
+  </div>
+</div>
+
+<!-- ===================== ENGLISH ===================== -->
+<div lang="en">
+<p class="lead">Open, free GTFS Realtime feeds for trams, trolleybuses and buses in Lviv, Ukraine. Arrival times are predicted by our own machine-learning model, not copied from the timetable. No key, no sign-up.</p>
+
+<div class="feeds">
+  <div class="feed"><b>TripUpdates — predicted arrivals</b><code>https://eta.lad.lviv.ua/feed/trip_updates.pb</code><span>GTFS-RT protobuf · refreshed about every 10 s</span></div>
+  <div class="feed"><b>VehiclePositions — cleaned positions</b><code>https://eta.lad.lviv.ua/feed/vehicle_positions.pb</code><span>GTFS-RT protobuf · same refresh as TripUpdates</span></div>
+  <div class="feed"><b>GTFS static — schedule, stops, shapes</b><code>https://track.ua-gis.com/gtfs/lviv/static.zip</code><span>Published by the city operator; both realtime feeds are built against it</span></div>
+</div>
+
+<h2>Quick start</h2>
+<pre><code>pip install gtfs-realtime-bindings requests</code></pre>
+<pre><code>import requests
+from google.transit import gtfs_realtime_pb2
+
+feed = gtfs_realtime_pb2.FeedMessage()
+feed.ParseFromString(requests.get(
+    "https://eta.lad.lviv.ua/feed/trip_updates.pb", timeout=10).content)
+
+for e in feed.entity[:3]:
+    tu = e.trip_update
+    for stu in tu.stop_time_update:
+        if stu.HasField("arrival"):
+            print(tu.trip.trip_id, stu.stop_id, stu.arrival.time, "±", stu.arrival.uncertainty, "s")</code></pre>
+<p>Poll every 5–10 seconds. The files are served from Cloudflare's edge with <code>Cache-Control: max-age=3</code>, so polling faster returns the same bytes.</p>
+
+<h2>GTFS static</h2>
+<p>The schedule comes from the operator's feed (publisher: Львівавтодор). We don't modify it; the realtime feeds use its identifiers unchanged, so joins work directly. We check it every 5 minutes and switch to a new version within about half an hour of it being published.</p>
+<div class="table"><table>
+<tr><th>File</th><th>What's in it</th></tr>
+<tr><td><code>agency.txt</code></td><td>Carriers. Timezone is Kyiv (written as <code>Europe/Kiev</code>).</td></tr>
+<tr><td><code>routes.txt</code></td><td>About 70 routes. <code>route_type</code> 0 = tram, 3 = bus <em>and</em> trolleybus; trolleybus short names start with <code>Тр</code>, buses with <code>А</code>, trams with <code>Т</code>.</td></tr>
+<tr><td><code>stops.txt</code></td><td>About 1,000 stops. <code>stop_id</code> is the internal key; <code>stop_code</code> is the number printed on the stop sign.</td></tr>
+<tr><td><code>trips.txt</code></td><td>About 16,000 trips with <code>direction_id</code>, <code>shape_id</code>, <code>block_id</code>. <code>trip_id</code> looks like <code>18550_0_1</code>.</td></tr>
+<tr><td><code>stop_times.txt</code></td><td>Planned times for every stop of every trip.</td></tr>
+<tr><td><code>shapes.txt</code></td><td>Route geometry.</td></tr>
+<tr><td><code>calendar.txt</code>, <code>calendar_dates.txt</code></td><td>Service days.</td></tr>
+<tr><td><code>feed_info.txt</code></td><td><code>feed_version</code> and validity dates.</td></tr>
+</table></div>
+
+<h2>GTFS Realtime</h2>
+<p>Both feeds are GTFS-RT 2.0 <code>FeedMessage</code> protobufs (<code>application/x-protobuf</code>). The header timestamp is when the file was published.</p>
+
+<h3>TripUpdates</h3>
+<p>One entity per vehicle currently running a trip. Each lists predicted arrivals for up to the next 10 stops. The predictions come from a gradient-boosted model trained on months of archived vehicle positions. It uses live travel times from every other vehicle on the same street segments, dwell times at stops, and each vehicle's own recent pace. On held-out days the mean absolute error is about 93 s overall, and 61 s for the next stop.</p>
+<div class="table"><table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>trip.trip_id</code>, <code>start_date</code>, <code>start_time</code>, <code>direction_id</code></td><td>Exactly which run of which trip. Matches <code>trips.txt</code>.</td></tr>
+<tr><td><code>vehicle.id</code></td><td>The vehicle making the prediction.</td></tr>
+<tr><td><code>timestamp</code></td><td>When the GPS fix behind this prediction was taken. It can be up to 3 minutes old, while the header is always fresh.</td></tr>
+<tr><td><code>stop_time_update[].stop_id</code></td><td>Matches <code>stops.txt</code> <code>stop_id</code> (not the sign number).</td></tr>
+<tr><td><code>arrival.time</code></td><td>Predicted arrival, POSIX seconds. If the arrival time has already passed, the update says "arriving now" rather than being dropped.</td></tr>
+<tr><td><code>arrival.uncertainty</code></td><td>Expected error in seconds, larger for stops further ahead. It is calibrated daily from the feed's live accuracy.</td></tr>
+<tr><td><code>departure.time</code></td><td>Arrival plus measured dwell: 32 s for trams, 27 s for buses and trolleybuses.</td></tr>
+<tr><td><code>delay</code></td><td>Deviation from the timetable, <strong>trams and trolleybuses only</strong>. Bus timetables are too far from reality for this to be useful.</td></tr>
+<tr><td>Last update with <code>NO_DATA</code></td><td>Marks the end of the 10-stop prediction horizon. Don't carry delays past it to later stops.</td></tr>
+</table></div>
+
+<h3>VehiclePositions</h3>
+<p>The operator's positions, cleaned up and enriched:</p>
+<ul>
+<li>Trip matching is corrected: each run goes to exactly one vehicle, with <code>start_date</code>/<code>start_time</code>, and it is the same trip that TripUpdates names.</li>
+<li><code>stop_id</code> and <code>current_status</code> (<code>STOPPED_AT</code> or <code>IN_TRANSIT_TO</code>) give the next stop.</li>
+<li><code>congestion_level</code> comes from observed speed compared with the usual speed for that route and hour.</li>
+</ul>
+
+<h2>Status</h2>
+<p><a href="/health"><code>/health</code></a> returns JSON with HTTP 200 when the feed is fresh. It returns 503 if the feed is more than 3 minutes old, or if no arrivals are predicted at a central stop during service hours.</p>
+
+<h2>Terms</h2>
+<p>The feeds are free to use in apps, journey planners and research. Please keep polling to a reasonable rate and credit "lad.lviv.ua". The data comes with no warranty: predictions are estimates.</p>
+
+<footer>
+<p>Source and full methodology: <a href="https://github.com/vbhjckfd/gtfs-eta">github.com/vbhjckfd/gtfs-eta</a> · Rider-facing app: <a href="https://lad.lviv.ua">lad.lviv.ua</a></p>
+</footer>
+</div>
+
+<!-- ===================== УКРАЇНСЬКА ===================== -->
+<div lang="uk">
+<p class="lead">Відкриті безкоштовні фіди GTFS Realtime для трамваїв, тролейбусів і автобусів Львова. Час прибуття прогнозує наша власна модель машинного навчання, а не копіює розклад. Без ключа й реєстрації.</p>
+
+<div class="feeds">
+  <div class="feed"><b>TripUpdates — прогноз прибуття</b><code>https://eta.lad.lviv.ua/feed/trip_updates.pb</code><span>GTFS-RT protobuf · оновлюється приблизно що 10 с</span></div>
+  <div class="feed"><b>VehiclePositions — очищені позиції</b><code>https://eta.lad.lviv.ua/feed/vehicle_positions.pb</code><span>GTFS-RT protobuf · оновлюється разом із TripUpdates</span></div>
+  <div class="feed"><b>GTFS static — розклад, зупинки, траси</b><code>https://track.ua-gis.com/gtfs/lviv/static.zip</code><span>Публікує міський оператор; обидва фіди реального часу побудовані на ньому</span></div>
+</div>
+
+<h2>Швидкий старт</h2>
+<pre><code>pip install gtfs-realtime-bindings requests</code></pre>
+<pre><code>import requests
+from google.transit import gtfs_realtime_pb2
+
+feed = gtfs_realtime_pb2.FeedMessage()
+feed.ParseFromString(requests.get(
+    "https://eta.lad.lviv.ua/feed/trip_updates.pb", timeout=10).content)
+
+for e in feed.entity[:3]:
+    tu = e.trip_update
+    for stu in tu.stop_time_update:
+        if stu.HasField("arrival"):
+            print(tu.trip.trip_id, stu.stop_id, stu.arrival.time, "±", stu.arrival.uncertainty, "с")</code></pre>
+<p>Опитуйте раз на 5–10 секунд. Файли віддає край мережі Cloudflare з <code>Cache-Control: max-age=3</code>, тож частіші запити повертають ті самі байти.</p>
+
+<h2>GTFS static</h2>
+<p>Розклад береться з фіду оператора (видавець — Львівавтодор). Ми його не змінюємо: фіди реального часу використовують ті самі ідентифікатори, тож дані з'єднуються напряму. Ми перевіряємо його що 5 хвилин і переходимо на нову версію приблизно за пів години після публікації.</p>
+<div class="table"><table>
+<tr><th>Файл</th><th>Що в ньому</th></tr>
+<tr><td><code>agency.txt</code></td><td>Перевізники. Часовий пояс — Київ (записаний як <code>Europe/Kiev</code>).</td></tr>
+<tr><td><code>routes.txt</code></td><td>Близько 70 маршрутів. <code>route_type</code> 0 — трамвай, 3 — автобус <em>і</em> тролейбус; короткі назви тролейбусів починаються з <code>Тр</code>, автобусів — з <code>А</code>, трамваїв — з <code>Т</code>.</td></tr>
+<tr><td><code>stops.txt</code></td><td>Близько 1000 зупинок. <code>stop_id</code> — внутрішній ключ, <code>stop_code</code> — номер на табличці зупинки.</td></tr>
+<tr><td><code>trips.txt</code></td><td>Близько 16 000 рейсів із <code>direction_id</code>, <code>shape_id</code>, <code>block_id</code>. <code>trip_id</code> має вигляд <code>18550_0_1</code>.</td></tr>
+<tr><td><code>stop_times.txt</code></td><td>Плановий час на кожній зупинці кожного рейсу.</td></tr>
+<tr><td><code>shapes.txt</code></td><td>Геометрія маршрутів.</td></tr>
+<tr><td><code>calendar.txt</code>, <code>calendar_dates.txt</code></td><td>Дні курсування.</td></tr>
+<tr><td><code>feed_info.txt</code></td><td><code>feed_version</code> і термін дії.</td></tr>
+</table></div>
+
+<h2>GTFS Realtime</h2>
+<p>Обидва фіди — protobuf <code>FeedMessage</code> за GTFS-RT 2.0 (<code>application/x-protobuf</code>). Час у заголовку — момент публікації файлу.</p>
+
+<h3>TripUpdates</h3>
+<p>Один запис на кожен транспорт, що зараз виконує рейс. У кожному записі — прогноз прибуття на щонайбільше 10 наступних зупинок. Прогноз дає модель градієнтного бустингу, навчена на місяцях архівних позицій транспорту. Вона враховує живий час проїзду інших машин тими самими відрізками вулиць, стоянку на зупинках і власний темп кожної машини. На відкладених днях середня абсолютна похибка — близько 93 с загалом і 61 с для найближчої зупинки.</p>
+<div class="table"><table>
+<tr><th>Поле</th><th>Значення</th></tr>
+<tr><td><code>trip.trip_id</code>, <code>start_date</code>, <code>start_time</code>, <code>direction_id</code></td><td>Точно який виїзд якого рейсу. Збігається з <code>trips.txt</code>.</td></tr>
+<tr><td><code>vehicle.id</code></td><td>Машина, для якої зроблено прогноз.</td></tr>
+<tr><td><code>timestamp</code></td><td>Коли зроблено GPS-позначку, з якої пораховано прогноз. Вона може бути давністю до 3 хвилин, тоді як заголовок завжди свіжий.</td></tr>
+<tr><td><code>stop_time_update[].stop_id</code></td><td>Збігається зі <code>stop_id</code> у <code>stops.txt</code> (а не з номером на табличці).</td></tr>
+<tr><td><code>arrival.time</code></td><td>Прогноз прибуття, секунди POSIX. Якщо час прибуття вже минув, запис каже «прибуває зараз», а не зникає.</td></tr>
+<tr><td><code>arrival.uncertainty</code></td><td>Очікувана похибка в секундах, більша для дальших зупинок. Щодня калібрується за фактичною точністю фіду.</td></tr>
+<tr><td><code>departure.time</code></td><td>Прибуття плюс виміряна стоянка: 32 с для трамваїв, 27 с для автобусів і тролейбусів.</td></tr>
+<tr><td><code>delay</code></td><td>Відхилення від розкладу, <strong>лише трамваї й тролейбуси</strong>. Автобусний розклад надто далекий від реальності, щоб це поле було корисним.</td></tr>
+<tr><td>Останній запис із <code>NO_DATA</code></td><td>Позначає кінець горизонту прогнозу в 10 зупинок. Не переносьте затримку за нього на дальші зупинки.</td></tr>
+</table></div>
+
+<h3>VehiclePositions</h3>
+<p>Позиції оператора, очищені й доповнені:</p>
+<ul>
+<li>Прив'язку до рейсу виправлено: кожен виїзд належить рівно одній машині, з <code>start_date</code>/<code>start_time</code>, і це той самий рейс, що й у TripUpdates.</li>
+<li><code>stop_id</code> і <code>current_status</code> (<code>STOPPED_AT</code> або <code>IN_TRANSIT_TO</code>) вказують наступну зупинку.</li>
+<li><code>congestion_level</code> — з порівняння фактичної швидкості зі звичною для цього маршруту й години.</li>
+</ul>
+
+<h2>Стан</h2>
+<p><a href="/health"><code>/health</code></a> повертає JSON із HTTP 200, коли фід свіжий. Він повертає 503, якщо фіду понад 3 хвилини, або якщо в години руху немає прогнозів для центральної зупинки.</p>
+
+<h2>Умови</h2>
+<p>Фіди можна вільно використовувати в застосунках, планувальниках поїздок і дослідженнях. Будь ласка, опитуйте помірно й зазначайте «lad.lviv.ua». Гарантій немає: прогнози — це оцінки.</p>
+
+<footer>
+<p>Код і повна методологія: <a href="https://github.com/vbhjckfd/gtfs-eta">github.com/vbhjckfd/gtfs-eta</a> · Застосунок для пасажирів: <a href="https://lad.lviv.ua">lad.lviv.ua</a></p>
+</footer>
+</div>
+</main>
+<script>
+(function () {
+  var TITLES = { en: "Lviv GTFS feeds", uk: "GTFS Львова" };
+  function pick() {
+    try { var s = localStorage.getItem("lang"); if (s === "en" || s === "uk") return s; } catch (e) {}
+    // Ukrainian and Russian browsers get Ukrainian; there is no Russian page.
+    return /^(uk|ru)\b/i.test(navigator.language || "") ? "uk" : "en";
+  }
+  function set(l) {
+    document.documentElement.lang = l;
+    document.title = TITLES[l];
+    document.querySelectorAll("[data-lang]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.lang === l));
+    });
+  }
+  document.querySelectorAll("[data-lang]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      set(b.dataset.lang);
+      try { localStorage.setItem("lang", b.dataset.lang); } catch (e) {}
+    });
+  });
+  set(pick());
+})();
+</script>
+</body>
+</html>
