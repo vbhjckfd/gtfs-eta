@@ -6,7 +6,7 @@
  *   them (that was one R2 read + worker invocation per poll).  The legacy paths
  *   stay as cheap 301 redirects for any consumer not yet migrated:
  *   GET /                  — docs page (worker/index.html) for browsers
- *                            (Accept: text/html); 301 → <R2_PUBLIC_BASE>/
+ *                            (Accept: text/html) and link-preview bots; 301 → <R2_PUBLIC_BASE>/
  *                            trip_updates.pb for everyone else
  *   GET /vehicle_positions — 301 → <R2_PUBLIC_BASE>/vehicle_positions.pb
  *   GET /health  — returns JSON 200/503.  Always requires a fresh feed header
@@ -734,6 +734,11 @@ export class FeedWatchdog extends DurableObject {
   }
 }
 
+// Link-preview crawlers mostly send Accept: */*, which would otherwise get the
+// protobuf redirect and an empty share card.  Feed clients never match these.
+const PREVIEW_BOT_RE =
+  /facebookexternalhit|facebot|twitterbot|telegrambot|slackbot|discordbot|linkedinbot|whatsapp|viber|skypeuripreview|applebot|googlebot|bingbot|yandex|duckduckbot|redditbot|pinterest|vkshare|embedly|iframely|opengraph|mastodon|bluesky|cardyb|metainspector|preview/i;
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -751,7 +756,9 @@ export default {
       // root answers are kept out of the shared edge cache: it keys by path
       // and ignores Vary, so a cached copy of either would reach the wrong
       // client.
-      const wantsHtml = (request.headers.get("accept") ?? "").includes("text/html");
+      const wantsHtml =
+        (request.headers.get("accept") ?? "").includes("text/html") ||
+        PREVIEW_BOT_RE.test(request.headers.get("user-agent") ?? "");
       if (path === "" && wantsHtml) {
         return new Response(DOCS_HTML, {
           headers: {
