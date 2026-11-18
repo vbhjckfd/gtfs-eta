@@ -115,6 +115,8 @@ This feed re-emits the upstream positions, enriched by the same inference pass:
 
 The feeds are free to use in apps, journey planners and research. Please keep polling to a reasonable rate and credit **lad.lviv.ua**. The data comes with no warranty: predictions are estimates, and the service is best-effort with no SLA.
 
+The code in this repository is released under the [WTFPL](LICENSE).
+
 Older URLs keep working: `https://gtfs-eta.vbhjckfd.workers.dev/` and `/vehicle_positions` return a 301 to the R2 URLs above.
 
 ---
