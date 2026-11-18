@@ -1,4 +1,4 @@
-.PHONY: install pipeline pipeline-date train learn export deploy r2-lifecycle share-assets r2-cors \
+.PHONY: install pipeline pipeline-date train learn export deploy r2-lifecycle share-assets r2-cors og \
         sanity validate-off-route \
         check-gtfs check-snapshots \
         push-feed serve-feed smoke score route-mae review-quality diagnose \
@@ -75,6 +75,11 @@ r2-lifecycle:
 			npx wrangler r2 bucket lifecycle add gtfs-lviv delete-old-predictions predictions/ \
 				--expire-days 14 --force; \
 		fi && npx wrangler r2 bucket lifecycle list gtfs-lviv'
+
+## Render worker/og.png, the docs page's share image (Pillow via uv).
+## Then make share-assets, and bump ?v= on og.png in worker/index.html.
+og:
+	uv run scripts/og.py
 
 ## Upload the docs page's share image and icons (worker/*.png, favicon.svg)
 ## to R2 under feed/ — the only public path besides / that the WAF lets through.
@@ -159,6 +164,8 @@ help:
 	@echo "  deploy               Deploy Cloudflare Worker"
 	@echo "  release              export + deploy"
 	@echo "  r2-lifecycle         Apply R2 lifecycle rules (predictions/ 14 d)"
+	@echo "  og                   Render worker/og.png (then share-assets + bump ?v=)"
+	@echo "  share-assets         Upload og.png + icons to R2 feed/"
 	@echo ""
 	@echo "  push-feed            Push one TripUpdates snapshot to R2"
 	@echo "  serve-feed           Push to R2 every 10 s (live feed daemon)"
