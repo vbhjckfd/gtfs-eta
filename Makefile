@@ -1,4 +1,4 @@
-.PHONY: install pipeline pipeline-date train learn export deploy r2-lifecycle \
+.PHONY: install pipeline pipeline-date train learn export deploy r2-lifecycle share-assets r2-cors \
         sanity validate-off-route \
         check-gtfs check-snapshots \
         push-feed serve-feed smoke score route-mae review-quality diagnose \
@@ -75,6 +75,24 @@ r2-lifecycle:
 			npx wrangler r2 bucket lifecycle add gtfs-lviv delete-old-predictions predictions/ \
 				--expire-days 14 --force; \
 		fi && npx wrangler r2 bucket lifecycle list gtfs-lviv'
+
+## Upload the docs page's share image and icons (worker/*.png, favicon.svg)
+## to R2 under feed/ — the only public path besides / that the WAF lets through.
+share-assets:
+	cd worker && bash -c 'source ~/.nvm/nvm.sh && nvm use 24 && \
+		for f in og.png favicon-32.png apple-touch-icon.png favicon.svg; do \
+			case $$f in *.svg) t=image/svg+xml;; *) t=image/png;; esac; \
+			npx wrangler r2 object put gtfs-lviv/feed/$$f --file $$f --content-type $$t \
+				--cache-control "public, max-age=86400" --remote; \
+		done'
+
+## Public read CORS on the bucket, so browsers (share-card checkers, web
+## apps) can load feed/* from other origins. Overwrites the bucket's CORS config.
+r2-cors:
+	cd worker && bash -c 'source ~/.nvm/nvm.sh && nvm use 24 && \
+		printf "%s" "{\"rules\":[{\"allowed\":{\"origins\":[\"*\"],\"methods\":[\"GET\",\"HEAD\"]},\"maxAgeSeconds\":86400}]}" > /tmp/gtfs-lviv-cors.json && \
+		npx wrangler r2 bucket cors set gtfs-lviv --file /tmp/gtfs-lviv-cors.json --force && \
+		npx wrangler r2 bucket cors list gtfs-lviv'
 
 ## Export then deploy in one step
 release: export deploy

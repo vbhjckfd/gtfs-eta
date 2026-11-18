@@ -6,25 +6,45 @@
 <title>Lviv GTFS feeds</title>
 <meta name="description" content="Open GTFS static and GTFS Realtime feeds for Lviv public transport: trip updates with ML arrival predictions and cleaned vehicle positions.">
 <link rel="canonical" href="https://eta.lad.lviv.ua/">
+<link rel="icon" href="https://eta.lad.lviv.ua/feed/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="https://eta.lad.lviv.ua/feed/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="https://eta.lad.lviv.ua/feed/apple-touch-icon.png" sizes="180x180">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Dataset",
+  "name": "Lviv GTFS Realtime feeds",
+  "description": "Open GTFS and GTFS Realtime feeds for Lviv public transport: ML arrival predictions and cleaned vehicle positions. Free, no API key, CC BY 4.0.",
+  "url": "https://eta.lad.lviv.ua/",
+  "license": "https://creativecommons.org/licenses/by/4.0/",
+  "isAccessibleForFree": true,
+  "inLanguage": ["en", "uk"],
+  "spatialCoverage": { "@type": "Place", "name": "Lviv, Ukraine" },
+  "creator": { "@type": "Person", "name": "Myroslav Holyak", "url": "https://github.com/vbhjckfd" },
+  "distribution": [
+    { "@type": "DataDownload", "name": "TripUpdates", "encodingFormat": "application/x-protobuf", "contentUrl": "https://eta.lad.lviv.ua/feed/trip_updates.pb" },
+    { "@type": "DataDownload", "name": "VehiclePositions", "encodingFormat": "application/x-protobuf", "contentUrl": "https://eta.lad.lviv.ua/feed/vehicle_positions.pb" }
+  ]
+}
+</script>
 <meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#15171a" media="(prefers-color-scheme: dark)">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="lad.lviv.ua">
 <meta property="og:url" content="https://eta.lad.lviv.ua/">
-<meta property="og:title" content="Lviv GTFS feeds — realtime arrivals for every tram, trolleybus and bus">
-<meta property="og:description" content="Open GTFS static and GTFS Realtime feeds for Lviv public transport: trip updates with ML arrival predictions and cleaned vehicle positions. Free, no API key, CC BY 4.0.">
+<meta property="og:title" content="Lviv GTFS feeds: realtime arrivals for trams and buses">
+<meta property="og:description" content="Open GTFS and GTFS Realtime feeds for Lviv public transport: ML arrival predictions and cleaned vehicle positions. Free, no API key, CC BY 4.0.">
 <meta property="og:locale" content="en_GB">
 <meta property="og:locale:alternate" content="uk_UA">
-<!-- Share image: source worker/og.png, served from R2 (the WAF only lets / and /feed/* through). After changing it:
-     npx wrangler r2 object put gtfs-lviv/feed/og.png --file og.png --content-type image/png --cache-control "public, max-age=86400" --remote -->
+<!-- Share image and icons: sources in worker/, served from R2 under feed/ (the WAF only lets / and /feed/* through). After changing one: make share-assets -->
 <meta property="og:image" content="https://eta.lad.lviv.ua/feed/og.png">
 <meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Lviv GTFS Realtime: open feeds for every tram, trolleybus and bus, arrival times predicted by machine learning. Mean error about 93 s, refreshed every 10 s, free with no API key.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Lviv GTFS feeds — realtime arrivals for every tram, trolleybus and bus">
-<meta name="twitter:description" content="Open GTFS static and GTFS Realtime feeds for Lviv public transport: trip updates with ML arrival predictions and cleaned vehicle positions.">
+<meta name="twitter:title" content="Lviv GTFS feeds: realtime arrivals for trams and buses">
+<meta name="twitter:description" content="Open GTFS and GTFS Realtime feeds for Lviv public transport: ML arrival predictions and cleaned vehicle positions. Free, no API key, CC BY 4.0.">
 <meta name="twitter:image" content="https://eta.lad.lviv.ua/feed/og.png">
 <style>
 :root {
